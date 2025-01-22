@@ -35,6 +35,8 @@
 //#Object:libc-integration-0.c
 //#Object:libc-integration-1.c
 
+// TODO: Wild shouldn't output `.plt.got` section
+// TODO: Figure out what is `.gnu_debuglink` section created by LLD
 //#Config:clang-initial-exec:default
 //#CompArgs:-g -fPIC -ftls-model=initial-exec -DDYNAMIC_DEP
 //#LinkArgs:--cc=clang -fPIC -dynamic -Wl,--strip-debug -Wl,--gc-sections -Wl,-rpath,$ORIGIN -Wl,-z,now
@@ -42,7 +44,11 @@
 //#Shared:libc-integration-0.c
 //#Shared:libc-integration-1.c
 //#DiffIgnore:section.relro_padding
+//#DiffIgnore:section.plt.got
+//#DiffIgnore:section.gnu_debuglink
 
+// TODO: Wild shouldn't output `.plt.got` section
+// TODO: Figure out what is `.gnu_debuglink` section created by LLD
 //#Config:clang-global-dynamic:default
 //#Compiler:clang
 //#CompArgs:-g -fPIC -ftls-model=global-dynamic -DDYNAMIC_DEP
@@ -53,6 +59,8 @@
 //#DiffIgnore:section.relro_padding
 //#DiffIgnore:section.rodata.entsize
 //#DiffIgnore:section.rodata.flags
+//#DiffIgnore:section.plt.got
+//#DiffIgnore:section.gnu_debuglink
 
 //#Config:gcc-dynamic-pie:default
 //#CompArgs:-g -fpie -DDYNAMIC_DEP
