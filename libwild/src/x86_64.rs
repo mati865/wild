@@ -4,6 +4,7 @@
 //! static-PIE binary because dynamic relocations haven't yet been applied to the GOT yet.
 
 use crate::arch::Arch;
+use crate::arch::RelocationModifier;
 use crate::args::OutputKind;
 use crate::elf::DynamicRelocationKind;
 use crate::elf::RelocationKindInfo;
@@ -15,7 +16,6 @@ use anyhow::Result;
 use linker_utils::elf::shf;
 use linker_utils::elf::x86_64_rel_type_to_string;
 use linker_utils::elf::SectionFlags;
-use linker_utils::relaxation::RelocationModifier;
 use linker_utils::x86_64::RelaxationKind;
 
 pub(crate) struct X86_64;
@@ -87,6 +87,7 @@ impl crate::arch::Arch for X86_64 {
 pub(crate) struct Relaxation {
     kind: RelaxationKind,
     rel_info: RelocationKindInfo,
+    next_modifier: RelocationModifier,
 }
 
 impl crate::arch::Relaxation for Relaxation {
@@ -101,11 +102,19 @@ impl crate::arch::Relaxation for Relaxation {
         // TODO: Consider removing Option. There are a few callers though, so need to see how this
         // looks.
         #[allow(clippy::unnecessary_wraps)]
-        fn create(kind: RelaxationKind, new_r_type: u32) -> Option<Relaxation> {
+        fn create(
+            kind: RelaxationKind,
+            new_r_type: u32,
+            next_modifier: RelocationModifier,
+        ) -> Option<Relaxation> {
             // This only fails for relocation types that we don't support and if we relax to a type
             // we don't support, then that's a bug.
             let rel_info = X86_64::relocation_from_raw(new_r_type).unwrap();
-            Some(Relaxation { kind, rel_info })
+            Some(Relaxation {
+                kind,
+                rel_info,
+                next_modifier,
+            })
         }
 
         let is_known_address = value_flags.contains(ValueFlags::ADDRESS);
@@ -115,6 +124,8 @@ impl crate::arch::Relaxation for Relaxation {
         let is_absolute_address = is_known_address && non_relocatable;
         let can_bypass_got = value_flags.contains(ValueFlags::CAN_BYPASS_GOT);
 
+        let mut next_modifier = RelocationModifier::Normal;
+
         // IFuncs cannot be referenced directly. The always need to go via the GOT. So if we've got
         // say a PLT32 relocation, we don't want to relax it even if we're in a static executable.
         // Furthermore, if we encounter a relocation like PC32 to an ifunc, then we need to change
@@ -122,7 +133,11 @@ impl crate::arch::Relaxation for Relaxation {
         if value_flags.contains(ValueFlags::IFUNC) {
             return match relocation_kind {
                 object::elf::R_X86_64_PC32 => {
-                    return create(RelaxationKind::NoOp, object::elf::R_X86_64_PLT32);
+                    return create(
+                        RelaxationKind::NoOp,
+                        object::elf::R_X86_64_PLT32,
+                        next_modifier,
+                    );
                 }
                 _ => None,
             };
@@ -154,18 +169,21 @@ impl crate::arch::Relaxation for Relaxation {
                             return create(
                                 RelaxationKind::RexMovIndirectToAbsolute,
                                 object::elf::R_X86_64_32,
+                                next_modifier,
                             );
                         }
                         0x2b => {
                             return create(
                                 RelaxationKind::RexSubIndirectToAbsolute,
                                 object::elf::R_X86_64_32,
+                                next_modifier,
                             );
                         }
                         0x3b => {
                             return create(
                                 RelaxationKind::RexCmpIndirectToAbsolute,
                                 object::elf::R_X86_64_32,
+                                next_modifier,
                             );
                         }
                         _ => return None,
@@ -176,6 +194,7 @@ impl crate::arch::Relaxation for Relaxation {
                             return create(
                                 RelaxationKind::MovIndirectToLea,
                                 object::elf::R_X86_64_PC32,
+                                next_modifier,
                             );
                         }
                         _ => return None,
@@ -189,6 +208,7 @@ impl crate::arch::Relaxation for Relaxation {
                             return create(
                                 RelaxationKind::MovIndirectToAbsolute,
                                 object::elf::R_X86_64_32,
+                                next_modifier,
                             );
                         }
                         _ => {}
@@ -200,6 +220,7 @@ impl crate::arch::Relaxation for Relaxation {
                             return create(
                                 RelaxationKind::CallIndirectToRelative,
                                 object::elf::R_X86_64_PC32,
+                                next_modifier,
                             )
                         }
                         _ => return None,
@@ -213,6 +234,7 @@ impl crate::arch::Relaxation for Relaxation {
                         return create(
                             RelaxationKind::MovIndirectToLea,
                             object::elf::R_X86_64_PC32,
+                            next_modifier,
                         );
                     }
                     _ => {}
@@ -225,23 +247,33 @@ impl crate::arch::Relaxation for Relaxation {
                         return create(
                             RelaxationKind::RexMovIndirectToAbsolute,
                             object::elf::R_X86_64_TPOFF32,
+                            next_modifier,
                         )
                     }
                     _ => {}
                 }
             }
             object::elf::R_X86_64_PLT32 if can_bypass_got => {
-                return create(RelaxationKind::NoOp, object::elf::R_X86_64_PC32);
+                return create(
+                    RelaxationKind::NoOp,
+                    object::elf::R_X86_64_PC32,
+                    next_modifier,
+                );
             }
             object::elf::R_X86_64_PLTOFF64 if can_bypass_got => {
-                return create(RelaxationKind::NoOp, object::elf::R_X86_64_GOTOFF64);
+                return create(
+                    RelaxationKind::NoOp,
+                    object::elf::R_X86_64_GOTOFF64,
+                    next_modifier,
+                );
             }
             object::elf::R_X86_64_TLSGD if can_bypass_got && output_kind.is_executable() => {
                 let kind = match TlsGdForm::identify(section_bytes, offset)? {
                     TlsGdForm::Regular => RelaxationKind::TlsGdToLocalExec,
                     TlsGdForm::Large => RelaxationKind::TlsGdToLocalExecLarge,
                 };
-                return create(kind, object::elf::R_X86_64_TPOFF32);
+                next_modifier = RelocationModifier::SkipNextRelocation;
+                return create(kind, object::elf::R_X86_64_TPOFF32, next_modifier);
             }
             object::elf::R_X86_64_TLSGD if output_kind.is_executable() => {
                 let kind = match TlsGdForm::identify(section_bytes, offset)? {
@@ -251,19 +283,26 @@ impl crate::arch::Relaxation for Relaxation {
                         return None;
                     }
                 };
-                return create(kind, object::elf::R_X86_64_GOTTPOFF);
+                next_modifier = RelocationModifier::SkipNextRelocation;
+                return create(kind, object::elf::R_X86_64_GOTTPOFF, next_modifier);
             }
             object::elf::R_X86_64_TLSLD if output_kind.is_executable() => {
                 if section_bytes.get(offset - 3..offset)? == [0x48, 0x8d, 0x3d] {
+                    next_modifier = RelocationModifier::SkipNextRelocation;
                     if section_bytes.get(offset + 4..offset + 6) == Some(&[0x48, 0xb8]) {
                         // The previous instruction was 64 bit, so we use a slightly different
                         // relaxation with extra padding.
                         return create(
                             RelaxationKind::TlsLdToLocalExec64,
                             object::elf::R_X86_64_NONE,
+                            next_modifier,
                         );
                     }
-                    return create(RelaxationKind::TlsLdToLocalExec, object::elf::R_X86_64_NONE);
+                    return create(
+                        RelaxationKind::TlsLdToLocalExec,
+                        object::elf::R_X86_64_NONE,
+                        next_modifier,
+                    );
                 }
             }
             _ => return None,
@@ -271,15 +310,8 @@ impl crate::arch::Relaxation for Relaxation {
         None
     }
 
-    fn apply(
-        &self,
-        section_bytes: &mut [u8],
-        offset_in_section: &mut u64,
-        addend: &mut u64,
-        next_modifier: &mut RelocationModifier,
-    ) {
-        self.kind
-            .apply(section_bytes, offset_in_section, addend, next_modifier);
+    fn apply(&self, section_bytes: &mut [u8], offset_in_section: &mut u64, addend: &mut u64) {
+        self.kind.apply(section_bytes, offset_in_section, addend);
     }
 
     fn rel_info(&self) -> crate::elf::RelocationKindInfo {
@@ -288,6 +320,10 @@ impl crate::arch::Relaxation for Relaxation {
 
     fn debug_kind(&self) -> impl std::fmt::Debug {
         &self.kind
+    }
+
+    fn next_modifier(&self) -> RelocationModifier {
+        self.next_modifier
     }
 }
 
@@ -322,7 +358,6 @@ fn test_relaxation() {
     fn check(relocation_kind: u32, bytes_in: &[u8], address: &[u8], absolute: &[u8]) {
         let mut out = bytes_in.to_owned();
         let mut offset = bytes_in.len() as u64;
-        let mut modifier = RelocationModifier::Normal;
         if let Some(r) = Relaxation::new(
             relocation_kind,
             bytes_in,
@@ -331,7 +366,7 @@ fn test_relaxation() {
             OutputKind::StaticExecutable(RelocationModel::Relocatable),
             shf::EXECINSTR,
         ) {
-            r.apply(&mut out, &mut offset, &mut 0, &mut modifier);
+            r.apply(&mut out, &mut offset, &mut 0);
 
             assert_eq!(
                 out, address,
@@ -347,7 +382,7 @@ fn test_relaxation() {
             shf::EXECINSTR,
         ) {
             out.copy_from_slice(bytes_in);
-            r.apply(&mut out, &mut offset, &mut 0, &mut modifier);
+            r.apply(&mut out, &mut offset, &mut 0);
             assert_eq!(
                 out, absolute,
                 "unresolved: Expected {absolute:x?}, got {out:x?}"

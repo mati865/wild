@@ -1409,7 +1409,8 @@ fn integration_test(
         "input_does_not_exist.c",
         "ifunc2.c",
         "tls-local-exec.c",
-        "undefined_symbols.c"
+        "undefined_symbols.c",
+        "undefined_symbols.cc"
     )]
     program_name: &'static str,
     #[allow(unused_variables)] setup_symlink: (),
