@@ -7,6 +7,7 @@ use self::elf::TLS_MODULE_BASE_SYMBOL_NAME;
 use crate::alignment;
 use crate::arch::Arch;
 use crate::arch::Relaxation as _;
+use crate::arch::RelocationModifier;
 use crate::args::Args;
 use crate::args::BuildIdOption;
 use crate::args::FileWriteMode;
@@ -73,7 +74,6 @@ use linker_utils::elf::shf;
 use linker_utils::elf::sht;
 use linker_utils::elf::RelocationKind;
 use linker_utils::elf::SectionFlags;
-use linker_utils::relaxation::RelocationModifier;
 use memmap2::MmapOptions;
 use object::elf::NT_GNU_BUILD_ID;
 use object::elf::NT_GNU_PROPERTY_TYPE_0;
@@ -1803,6 +1803,8 @@ fn apply_relocation<S: StorageModel, A: Arch>(
         .symbol(e, false)
         .context("Unsupported absolute relocation")?;
     let local_symbol_id = object_layout.symbol_id_range.input_to_id(symbol_index);
+    // FIXME(Open point): We could bail here instead of duplicating next_modifier logic,
+    // but I worry that would negatively affect debugability when resolution fails due to a bug.
     let resolution = layout
         .merged_symbol_resolution(local_symbol_id)
         .with_context(|| {
@@ -1829,7 +1831,8 @@ fn apply_relocation<S: StorageModel, A: Arch>(
     ) {
         tracing::trace!(kind = ?relaxation.debug_kind(), %value_flags, %resolution_flags);
         rel_info = relaxation.rel_info();
-        relaxation.apply(out, &mut offset_in_section, &mut addend, &mut next_modifier);
+        relaxation.apply(out, &mut offset_in_section, &mut addend);
+        next_modifier = relaxation.next_modifier();
     } else {
         tracing::trace!(%value_flags, %resolution_flags);
         rel_info = A::relocation_from_raw(r_type)?;
