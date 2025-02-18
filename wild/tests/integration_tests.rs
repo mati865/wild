@@ -1559,14 +1559,28 @@ fn diff_files(instructions: &Config, files: Vec<PathBuf>, display: &dyn Display)
 fn setup_wild_ld_symlink() -> Result {
     let wild = wild_path();
     let wild_ld_path = wild.with_file_name("ld");
+
     if !wild_ld_path.exists() {
-        std::os::unix::fs::symlink(wild, &wild_ld_path).with_context(|| {
-            format!(
-                "Failed to symlink `{}` to `{}`",
-                wild_ld_path.display(),
-                wild.display()
-            )
-        })?;
+        #[cfg(target_os = "windows")]
+        {
+            std::os::windows::fs::symlink_file(wild, &wild_ld_path).with_context(|| {
+                format!(
+                    "Failed to symlink `{}` to `{}`",
+                    wild_ld_path.display(),
+                    wild.display()
+                )
+            })?;
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            std::os::unix::fs::symlink(wild, &wild_ld_path).with_context(|| {
+                format!(
+                    "Failed to symlink `{}` to `{}`",
+                    wild_ld_path.display(),
+                    wild.display()
+                )
+            })?;
+        }
     }
     Ok(())
 }

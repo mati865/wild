@@ -39,9 +39,9 @@ pub(crate) mod shutdown;
 pub(crate) mod slice;
 pub(crate) mod storage;
 pub(crate) mod string_merging;
-#[cfg(feature = "fork")]
+#[cfg(all(feature = "fork", not(target_os = "windows")))]
 pub(crate) mod subprocess;
-#[cfg(not(feature = "fork"))]
+#[cfg(any(not(feature = "fork"), target_os = "windows"))]
 #[path = "subprocess_unsupported.rs"]
 pub(crate) mod subprocess;
 pub(crate) mod symbol;
