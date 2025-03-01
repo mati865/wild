@@ -2592,6 +2592,7 @@ fn write_dynamic_symbol_definitions<S: StorageModel>(
                         let version = layout
                             .symbol_db
                             .version_script
+                            // TODO: can we avoid rehashing?
                             .version_for_symbol(&UnversionedSymbolName::prehashed(sym_def.name))
                             .unwrap_or(object::elf::VER_NDX_GLOBAL);
                         version_out.0.set(LittleEndian, version);
