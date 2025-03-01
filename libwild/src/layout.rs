@@ -572,7 +572,7 @@ pub(crate) struct DynamicLayout<'data> {
     /// Mapping from input versions to output versions. Input version 1 is at index 0.
     pub(crate) version_mapping: Vec<u16>,
 
-    pub(crate) verdef_info: Option<VerdefInfo<'data>>,
+    pub(crate) verneed_info: Option<VerneedInfo<'data>>,
 
     /// Whether this is the last DynamicLayout that puts content into .gnu.version_r.
     pub(crate) is_last_verneed: bool,
@@ -1171,12 +1171,12 @@ struct DynamicLayoutState<'data> {
     /// The contents of the .gnu.version section. Maps from symbol index to symbol version index.
     symbol_versions: &'data [Versym],
 
-    verdef_info: Option<VerdefInfo<'data>>,
+    verneed_info: Option<VerneedInfo<'data>>,
 
     non_addressable_indexes: NonAddressableIndexes,
 }
 
-pub(crate) struct VerdefInfo<'data> {
+pub(crate) struct VerneedInfo<'data> {
     pub(crate) defs: VerdefIterator<'data, FileHeader>,
     pub(crate) string_table_index: object::SectionIndex,
 
@@ -2055,7 +2055,7 @@ fn set_last_verneed<S: StorageModel>(
     if is_last_verneed {
         for file in files.iter_mut().rev() {
             if let FileLayout::Dynamic(d) = file {
-                if d.verdef_info.is_some() {
+                if d.verneed_info.is_some() {
                     d.is_last_verneed = true;
                     break;
                 }
@@ -3253,7 +3253,7 @@ fn new_object_layout_state(input_state: resolution::ResolvedObject) -> FileLayou
             symbol_versions_needed: Default::default(),
 
             // These fields are filled in when we finalise sizes.
-            verdef_info: None,
+            verneed_info: None,
             non_addressable_indexes: Default::default(),
         })
     }
@@ -4376,7 +4376,7 @@ impl<'data> DynamicLayoutState<'data> {
                         + u64::from(version_count) * size_of::<crate::elf::Vernaux>() as u64,
                 );
 
-                self.verdef_info = Some(VerdefInfo {
+                self.verneed_info = Some(VerneedInfo {
                     defs,
                     string_table_index: link,
                     version_count,
@@ -4393,7 +4393,7 @@ impl<'data> DynamicLayoutState<'data> {
         counts: &mut NonAddressableCounts,
     ) -> Result {
         self.non_addressable_indexes = *indexes;
-        if let Some(info) = self.verdef_info.as_ref() {
+        if let Some(info) = self.verneed_info.as_ref() {
             if info.version_count > 0 {
                 counts.verneed_count += 1;
                 indexes.gnu_version_r_index = indexes
@@ -4456,7 +4456,7 @@ impl<'data> DynamicLayoutState<'data> {
             resolutions_out.write(Some(resolution))?;
         }
 
-        if let Some(v) = self.verdef_info.as_ref() {
+        if let Some(v) = self.verneed_info.as_ref() {
             memory_offsets.increment(
                 part_id::GNU_VERSION_R,
                 size_of::<crate::elf::Verneed>() as u64
@@ -4472,7 +4472,7 @@ impl<'data> DynamicLayoutState<'data> {
             symbol_id_range: self.symbol_id_range,
             input_symbol_versions: self.symbol_versions,
             version_mapping,
-            verdef_info: self.verdef_info,
+            verneed_info: self.verneed_info,
             // We set this to true later for one object.
             is_last_verneed: false,
         })
