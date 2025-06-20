@@ -1,5 +1,7 @@
 int def1(void);
-int def2(void);
+int def2(void) {
+    return def1();
+};
 
 int call_def1(void) {
     return def1();
@@ -10,5 +12,5 @@ int call_def2(void) {
 }
 
 __attribute__((weak)) int foo(void) {
-    return call_def1();
-}
+    return 40;
+};

@@ -21,6 +21,12 @@
 // should too.
 //#DiffIgnore:file-header.entry
 
+//#Config:weak:default
+//#LinkArgs:-z now --allow-shlib-undefined
+//#Mode:dynamic
+//#Shared:shlib-undefined-2.c
+//#Archive:shlib-undefined-3.c
+
 #include "runtime.h"
 
 int def1(void) {
@@ -28,8 +34,12 @@ int def1(void) {
 }
 
 int call_def1(void);
+__attribute__((weak)) int foo(void);
 
 void _start(void) {
     runtime_init();
+    if (foo() == 40) {
+        exit_syscall(0);
+    }
     exit_syscall(call_def1());
 }
