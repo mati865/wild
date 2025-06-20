@@ -9,6 +9,4 @@ int call_def2(void) {
     return def2();
 }
 
-__attribute__((weak)) int foo(void) {
-    return call_def1();
-}
+__attribute__((weak)) int foo = 40;

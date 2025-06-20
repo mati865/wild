@@ -26,6 +26,7 @@
 //#Mode:dynamic
 //#Shared:shlib-undefined-2.c
 //#Archive:shlib-undefined-3.c
+//#CompArgs:-DWIP
 
 #include "runtime.h"
 
@@ -34,12 +35,16 @@ int def1(void) {
 }
 
 int call_def1(void);
-__attribute__((weak)) int foo(void);
+#ifdef WIP
+__attribute__((weak)) int foo;
+#endif
 
 void _start(void) {
     runtime_init();
-    if (foo() == 40) {
+    #ifdef WIP
+    if (foo == 40) {
         exit_syscall(0);
     }
+    #endif
     exit_syscall(call_def1());
 }

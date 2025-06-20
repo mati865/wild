@@ -11,6 +11,4 @@ int call_def2(void) {
     return def2();
 }
 
-__attribute__((weak)) int foo(void) {
-    return 40;
-};
+__attribute__((weak)) int foo = 42;
