@@ -30,3 +30,12 @@ s3h: .ascii "Hello\0"
 
 .globl noref
 noref: .ascii "No reference to this string\0"
+
+// Empty mergeable strings used to crash Wild
+
+.section .empty, "aMS", @progbits, 2
+
+.globl b
+b:
+.text
+
