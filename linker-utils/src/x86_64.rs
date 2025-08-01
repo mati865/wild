@@ -169,9 +169,10 @@ impl RelaxationKind {
                 *addend = 0;
             }
             RelaxationKind::TlsDescToInitialExec => {
+                let dest = section_bytes[offset - 1];
                 section_bytes[offset - 3..offset + 4].copy_from_slice(&[
-                    // mov {GOT}(%rip),%rax
-                    0x48, 0x8b, 0x05, 0, 0, 0, 0,
+                    // mov {GOT}(%rip),%{dest}
+                    0x48, 0x8b, dest, 0, 0, 0, 0,
                 ]);
             }
             RelaxationKind::SkipTlsDescCall => {
