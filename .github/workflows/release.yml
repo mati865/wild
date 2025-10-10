@@ -3,6 +3,7 @@ on:
   push:
     tags:
       - '[0-9]+.*'
+  workflow_dispatch:
 
 name: Release
 
@@ -82,3 +83,6 @@ jobs:
         draft: true
         files: |
           wild-linker-*.tar.gz
+
+
+
