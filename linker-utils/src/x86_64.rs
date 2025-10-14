@@ -240,49 +240,154 @@ impl RelaxationKind {
 /// Returns the supplied x86-64 relocation as RelocationKindType. Returns `None` if the r_type isn't recognised.
 #[must_use]
 pub const fn relocation_from_raw(r_type: u32) -> Option<RelocationKindInfo> {
-    let (kind, size, sign) = match r_type {
-        object::elf::R_X86_64_64 => const { (RelocationKind::Absolute, 8, Sign::Unsigned) },
-        object::elf::R_X86_64_PC32 => const { (RelocationKind::Relative, 4, Sign::Signed) },
-        object::elf::R_X86_64_PC64 => const { (RelocationKind::Relative, 8, Sign::Signed) },
-        object::elf::R_X86_64_GOT32 => const { (RelocationKind::GotRelGotBase, 4, Sign::Unsigned) },
-        object::elf::R_X86_64_GOT64 => const { (RelocationKind::GotRelGotBase, 8, Sign::Unsigned) },
-        object::elf::R_X86_64_GOTOFF64 => {
-            const { (RelocationKind::SymRelGotBase, 8, Sign::Signed) }
+    let (kind, size, range) = match r_type {
+        // variant one
+        object::elf::R_X86_64_64 => {
+            const N: usize = 8;
+            (
+                RelocationKind::Absolute,
+                N,
+                const { AllowedRange::from_byte_size(N, Sign::Unsigned) },
+            )
         }
-        object::elf::R_X86_64_PLT32 => const { (RelocationKind::PltRelative, 4, Sign::Signed) },
-        object::elf::R_X86_64_PLTOFF64 => {
-            const { (RelocationKind::PltRelGotBase, 8, Sign::Signed) }
-        }
-        object::elf::R_X86_64_GOTPCREL => const { (RelocationKind::GotRelative, 4, Sign::Signed) },
+        // variant two
+        object::elf::R_X86_64_PC32 => (
+            RelocationKind::Relative,
+            4,
+            const { AllowedRange::from_byte_size(4, Sign::Signed) },
+        ),
+
+        // just to make it build
+        object::elf::R_X86_64_PC64 => (
+            RelocationKind::Relative,
+            8,
+            const { AllowedRange::from_byte_size(8, Sign::Signed) },
+        ),
+        object::elf::R_X86_64_GOT32 => (
+            RelocationKind::GotRelGotBase,
+            4,
+            const { AllowedRange::from_byte_size(4, Sign::Unsigned) },
+        ),
+        object::elf::R_X86_64_GOT64 => (
+            RelocationKind::GotRelGotBase,
+            8,
+            const { AllowedRange::from_byte_size(8, Sign::Unsigned) },
+        ),
+        object::elf::R_X86_64_GOTOFF64 => (
+            RelocationKind::SymRelGotBase,
+            8,
+            const { AllowedRange::from_byte_size(8, Sign::Signed) },
+        ),
+        object::elf::R_X86_64_PLT32 => (
+            RelocationKind::PltRelative,
+            4,
+            const { AllowedRange::from_byte_size(4, Sign::Signed) },
+        ),
+        object::elf::R_X86_64_PLTOFF64 => (
+            RelocationKind::PltRelGotBase,
+            8,
+            const { AllowedRange::from_byte_size(8, Sign::Signed) },
+        ),
+        object::elf::R_X86_64_GOTPCREL => (
+            RelocationKind::GotRelative,
+            4,
+            const { AllowedRange::from_byte_size(4, Sign::Signed) },
+        ),
 
         // For now, we rely on GOTPC64 and GOTPC32 always referencing the symbol
         // _GLOBAL_OFFSET_TABLE_, which means that we can just treat these as normal relative
         // relocations and avoid any special processing when writing.
-        object::elf::R_X86_64_GOTPC64 => const { (RelocationKind::Relative, 8, Sign::Signed) },
-        object::elf::R_X86_64_GOTPC32 => const { (RelocationKind::Relative, 4, Sign::Signed) },
+        object::elf::R_X86_64_GOTPC64 => (
+            RelocationKind::Relative,
+            8,
+            const { AllowedRange::from_byte_size(8, Sign::Signed) },
+        ),
+        object::elf::R_X86_64_GOTPC32 => (
+            RelocationKind::Relative,
+            4,
+            const { AllowedRange::from_byte_size(4, Sign::Signed) },
+        ),
 
-        object::elf::R_X86_64_32 => const { (RelocationKind::Absolute, 4, Sign::Unsigned) },
-        object::elf::R_X86_64_32S => const { (RelocationKind::Absolute, 4, Sign::Signed) },
-        object::elf::R_X86_64_16 => const { (RelocationKind::Absolute, 2, Sign::Signed) },
-        object::elf::R_X86_64_PC16 => const { (RelocationKind::Relative, 2, Sign::Signed) },
-        object::elf::R_X86_64_8 => const { (RelocationKind::Absolute, 1, Sign::Signed) },
-        object::elf::R_X86_64_PC8 => const { (RelocationKind::Relative, 1, Sign::Signed) },
-        object::elf::R_X86_64_TLSGD => const { (RelocationKind::TlsGd, 4, Sign::Signed) },
-        object::elf::R_X86_64_TLSLD => const { (RelocationKind::TlsLd, 4, Sign::Signed) },
-        object::elf::R_X86_64_DTPOFF32 => const { (RelocationKind::DtpOff, 4, Sign::Signed) },
-        object::elf::R_X86_64_DTPOFF64 => const { (RelocationKind::DtpOff, 8, Sign::Signed) },
-        object::elf::R_X86_64_GOTTPOFF => const { (RelocationKind::GotTpOff, 4, Sign::Signed) },
-        object::elf::R_X86_64_GOTPCRELX | object::elf::R_X86_64_REX_GOTPCRELX => {
-            const { (RelocationKind::GotRelative, 4, Sign::Signed) }
-        }
-        object::elf::R_X86_64_TPOFF32 => const { (RelocationKind::TpOff, 4, Sign::Signed) },
-        object::elf::R_X86_64_GOTPC32_TLSDESC => {
-            const { (RelocationKind::TlsDesc, 4, Sign::Signed) }
-        }
-        object::elf::R_X86_64_TLSDESC_CALL => {
-            const { (RelocationKind::TlsDescCall, 0, Sign::Signed) }
-        }
-        object::elf::R_X86_64_NONE => const { (RelocationKind::None, 0, Sign::Signed) },
+        object::elf::R_X86_64_32 => (
+            RelocationKind::Absolute,
+            4,
+            const { AllowedRange::from_byte_size(4, Sign::Unsigned) },
+        ),
+        object::elf::R_X86_64_32S => (
+            RelocationKind::Absolute,
+            4,
+            const { AllowedRange::from_byte_size(4, Sign::Signed) },
+        ),
+        object::elf::R_X86_64_16 => (
+            RelocationKind::Absolute,
+            2,
+            const { AllowedRange::from_byte_size(2, Sign::Signed) },
+        ),
+        object::elf::R_X86_64_PC16 => (
+            RelocationKind::Relative,
+            2,
+            const { AllowedRange::from_byte_size(2, Sign::Signed) },
+        ),
+        object::elf::R_X86_64_8 => (
+            RelocationKind::Absolute,
+            1,
+            const { AllowedRange::from_byte_size(1, Sign::Signed) },
+        ),
+        object::elf::R_X86_64_PC8 => (
+            RelocationKind::Relative,
+            1,
+            const { AllowedRange::from_byte_size(1, Sign::Signed) },
+        ),
+        object::elf::R_X86_64_TLSGD => (
+            RelocationKind::TlsGd,
+            4,
+            const { AllowedRange::from_byte_size(4, Sign::Signed) },
+        ),
+        object::elf::R_X86_64_TLSLD => (
+            RelocationKind::TlsLd,
+            4,
+            const { AllowedRange::from_byte_size(4, Sign::Signed) },
+        ),
+        object::elf::R_X86_64_DTPOFF32 => (
+            RelocationKind::DtpOff,
+            4,
+            const { AllowedRange::from_byte_size(4, Sign::Signed) },
+        ),
+        object::elf::R_X86_64_DTPOFF64 => (
+            RelocationKind::DtpOff,
+            8,
+            const { AllowedRange::from_byte_size(8, Sign::Signed) },
+        ),
+        object::elf::R_X86_64_GOTTPOFF => (
+            RelocationKind::GotTpOff,
+            4,
+            const { AllowedRange::from_byte_size(4, Sign::Signed) },
+        ),
+        object::elf::R_X86_64_GOTPCRELX | object::elf::R_X86_64_REX_GOTPCRELX => (
+            RelocationKind::GotRelative,
+            4,
+            const { AllowedRange::from_byte_size(4, Sign::Signed) },
+        ),
+        object::elf::R_X86_64_TPOFF32 => (
+            RelocationKind::TpOff,
+            4,
+            const { AllowedRange::from_byte_size(4, Sign::Signed) },
+        ),
+        object::elf::R_X86_64_GOTPC32_TLSDESC => (
+            RelocationKind::TlsDesc,
+            4,
+            const { AllowedRange::from_byte_size(4, Sign::Signed) },
+        ),
+        object::elf::R_X86_64_TLSDESC_CALL => (
+            RelocationKind::TlsDescCall,
+            0,
+            const { AllowedRange::from_byte_size(0, Sign::Signed) },
+        ),
+        object::elf::R_X86_64_NONE => (
+            RelocationKind::None,
+            0,
+            const { AllowedRange::from_byte_size(0, Sign::Signed) },
+        ),
         _ => return None,
     };
 
@@ -290,7 +395,7 @@ pub const fn relocation_from_raw(r_type: u32) -> Option<RelocationKindInfo> {
         kind,
         size: RelocationSize::ByteSize(size),
         mask: None,
-        range: AllowedRange::from_byte_size(size, sign),
+        range,
         alignment: 1,
     })
 }
