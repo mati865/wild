@@ -1043,8 +1043,25 @@ fn resolve_symbol<'data, 'definitions>(
                 // file got loaded. TODO: If the file is a non-archived object, or possibly even if
                 // it's an archived object that we've already decided to load, then we could skip
                 // this.
+
+                // WIP: When outputting a shared object, we need to allow it to export undefined
+                // weak symbols that are defined in other **needed** shared objects.
+                let ignore_if_loaded = if resources.symbol_db.output_kind.is_shared_object()
+                    && symbol_file_id != obj.file_id
+                    && local_symbol.is_weak()
+                    && !obj.parsed.modifiers.as_needed
+                    // This is totally wrong way to allow versioned symbols through
+                    && resources
+                        .symbol_db
+                        .symbol_version_debug(symbol_id)
+                        .is_none()
+                {
+                    None
+                } else {
+                    Some(symbol_file_id)
+                };
                 undefined_symbols_out.push(UndefinedSymbol {
-                    ignore_if_loaded: Some(symbol_file_id),
+                    ignore_if_loaded,
                     name: prehashed_name,
                     symbol_id: obj.symbol_id_range.input_to_id(local_symbol_index),
                 });
