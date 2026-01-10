@@ -24,7 +24,6 @@ use crate::elf::File;
 use crate::elf::FileHeader;
 use crate::elf::RelocationList;
 use crate::elf::Versym;
-use crate::elf::rela_to_crel_iter;
 use crate::elf_writer;
 use crate::ensure;
 use crate::error;
@@ -112,6 +111,7 @@ use object::elf::STT_TLS;
 use object::elf::gnu_hash;
 use object::read::elf::Crel;
 use object::read::elf::Dyn as _;
+use object::read::elf::Rela;
 use object::read::elf::RelocationSections;
 use object::read::elf::SectionHeader as _;
 use object::read::elf::Sym;
@@ -1593,27 +1593,114 @@ struct ObjectLayoutState<'data> {
     exception_frames: Vec<ExceptionFrame<'data>>,
 }
 
-pub trait CloneableIterator<T>: Iterator<Item = T> {
-    fn clone_box(&self) -> Box<dyn CloneableIterator<T> + '_>;
+/// A relocation that can be either Rela64 or Crel
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Relocation<'data> {
+    Rela(&'data elf::Rela),
+    Crel(Crel),
 }
 
-impl<T, I> CloneableIterator<T> for I
+impl Relocation<'_> {
+    pub(crate) fn r_offset(&self) -> u64 {
+        match self {
+            Self::Rela(r) => r.r_offset.get(LittleEndian),
+            Self::Crel(r) => r.r_offset,
+        }
+    }
+
+    pub(crate) fn r_type(&self) -> u32 {
+        match self {
+            Self::Rela(r) => r.r_type(LittleEndian, false),
+            Self::Crel(r) => r.r_type,
+        }
+    }
+
+    pub(crate) fn r_addend(&self) -> i64 {
+        match self {
+            Self::Rela(r) => r.r_addend.get(LittleEndian),
+            Self::Crel(r) => r.r_addend,
+        }
+    }
+
+    pub(crate) fn symbol(&self) -> Option<object::SymbolIndex> {
+        match self {
+            Self::Rela(r) => r.symbol(LittleEndian, false),
+            Self::Crel(c) => c.symbol(),
+        }
+    }
+}
+
+#[derive(Clone)]
+enum RelocationIteratorInner<'data, R, C>
 where
-    I: Iterator<Item = T> + Clone,
+    R: Iterator<Item = &'data elf::Rela> + Clone,
+    C: Iterator<Item = object::Result<Crel>> + Clone,
 {
-    fn clone_box(&self) -> Box<dyn CloneableIterator<T> + '_> {
-        Box::new(self.clone())
+    Rela(R),
+    Crel(C),
+}
+
+#[derive(Clone)]
+pub(crate) struct RelocationIterator<
+    'data,
+    R = core::slice::Iter<'data, elf::Rela>,
+    C = object::read::elf::CrelIterator<'data>,
+> where
+    R: Iterator<Item = &'data elf::Rela> + Clone,
+    C: Iterator<Item = object::Result<Crel>> + Clone,
+{
+    inner: RelocationIteratorInner<'data, R, C>,
+    /// Number of relocations remaining to yield
+    remaining: usize,
+}
+
+impl<'data, R, C> RelocationIterator<'data, R, C>
+where
+    R: Iterator<Item = &'data elf::Rela> + Clone,
+    C: Iterator<Item = object::Result<Crel>> + Clone,
+{
+    pub(crate) fn rela(iter: R, count: usize) -> Self {
+        Self {
+            inner: RelocationIteratorInner::Rela(iter),
+            remaining: count,
+        }
+    }
+
+    pub(crate) fn crel(iter: C, count: usize) -> Self {
+        Self {
+            inner: RelocationIteratorInner::Crel(iter),
+            remaining: count,
+        }
+    }
+}
+
+impl<'data, R, C> Iterator for RelocationIterator<'data, R, C>
+where
+    R: Iterator<Item = &'data elf::Rela> + Clone,
+    C: Iterator<Item = object::Result<Crel>> + Clone,
+{
+    type Item = object::Result<Relocation<'data>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+        self.remaining -= 1;
+        match &mut self.inner {
+            RelocationIteratorInner::Rela(iter) => iter.next().map(|r| Ok(Relocation::Rela(r))),
+            RelocationIteratorInner::Crel(iter) => iter.next().map(|r| r.map(Relocation::Crel)),
+        }
     }
 }
 
 struct ExceptionFrame<'data> {
     /// The relocations that need to be processed if we load this frame.
-    relocations: Box<dyn CloneableIterator<object::Result<Crel>> + Send + 'data>,
+    relocations: RelocationIterator<'data>,
 
     /// Number of bytes required to store this frame.
     frame_size: u32,
 
-    /// The index of the previous frame that is for the same section.
+    /// If there was a previous frame for the same section, then this is its index.
     previous_frame_for_section: Option<FrameIndex>,
 }
 
@@ -3235,7 +3322,7 @@ impl Section {
 fn process_relocation<'data, 'scope, A: Arch>(
     object: &ObjectLayoutState,
     common: &mut CommonGroupState,
-    rel: &Crel,
+    rel: &Relocation,
     section: &object::elf::SectionHeader64<LittleEndian>,
     resources: &'scope GraphResources<'data, '_>,
     queue: &mut LocalWorkQueue,
@@ -3250,8 +3337,8 @@ fn process_relocation<'data, 'scope, A: Arch>(
         let symbol_id = symbol_db.definition(local_symbol_id);
         let mut flags = resources.local_flags_for_symbol(symbol_id);
         flags.merge(resources.local_flags_for_symbol(local_symbol_id));
-        let rel_offset = rel.r_offset;
-        let r_type = rel.r_type;
+        let rel_offset = rel.r_offset();
+        let r_type = rel.r_type();
         let section_flags = SectionFlags::from_header(section);
 
         let rel_info = if let Some(relaxation) = A::Relaxation::new(
@@ -4669,29 +4756,16 @@ impl<'data> ObjectLayoutState<'data> {
         let part_id = unloaded.part_id;
         let header = self.object.section(section_index)?;
         let section = Section::create(header, self, section_index, part_id)?;
+        dbg!(self.input);
+        let relocations = match self.relocations(section.index)? {
+            RelocationList::Rela(r) => RelocationIterator::rela(r.iter(), dbg!(r.len())),
+            RelocationList::Crel(c) => {
+                let len = c.len();
+                RelocationIterator::crel(c, len)
+            }
+        };
 
-        match self.relocations(section.index)? {
-            RelocationList::Rela(relocations) => {
-                self.load_section_relocations::<A>(
-                    common,
-                    queue,
-                    resources,
-                    section,
-                    rela_to_crel_iter(relocations),
-                    scope,
-                )?;
-            }
-            RelocationList::Crel(relocations) => {
-                self.load_section_relocations::<A>(
-                    common,
-                    queue,
-                    resources,
-                    section,
-                    relocations,
-                    scope,
-                )?;
-            }
-        }
+        self.load_section_relocations::<A>(common, queue, resources, section, relocations, scope)?;
 
         tracing::debug!(loaded_section = %self.object.section_display_name(section_index), file = %self.input);
 
@@ -4729,10 +4803,11 @@ impl<'data> ObjectLayoutState<'data> {
         queue: &mut LocalWorkQueue,
         resources: &'scope GraphResources<'data, '_>,
         section: Section,
-        relocations: impl Iterator<Item = object::Result<Crel>>,
+        relocations: RelocationIterator<'data>,
         scope: &Scope<'scope>,
     ) -> Result {
         let mut modifier = RelocationModifier::Normal;
+        dbg!(relocations.remaining);
         for rel in relocations {
             if modifier == RelocationModifier::SkipNextRelocation {
                 modifier = RelocationModifier::Normal;
@@ -4781,7 +4856,8 @@ impl<'data> ObjectLayoutState<'data> {
             // Request loading of any sections/symbols referenced by the FDEs for our
             // section.
             if let Some(eh_frame_section) = self.eh_frame_section {
-                for rel in frame_data.relocations.clone_box() {
+                dbg!(frame_data.relocations.remaining);
+                for rel in frame_data.relocations.clone() {
                     process_relocation::<A>(
                         self,
                         common,
@@ -4810,7 +4886,6 @@ impl<'data> ObjectLayoutState<'data> {
         &mut self,
         common: &mut CommonGroupState<'data>,
         queue: &mut LocalWorkQueue,
-
         part_id: PartId,
         section_index: SectionIndex,
         resources: &'scope GraphResources<'data, '_>,
@@ -4818,25 +4893,22 @@ impl<'data> ObjectLayoutState<'data> {
     ) -> Result {
         let header = self.object.section(section_index)?;
         let section = Section::create(header, self, section_index, part_id)?;
-        if A::local_symbols_in_debug_info() {
-            match self.relocations(section.index)? {
-                RelocationList::Rela(relocations) => self.load_debug_relocations::<A>(
-                    common,
-                    queue,
-                    resources,
-                    section,
-                    rela_to_crel_iter(relocations),
-                    scope,
-                )?,
-                RelocationList::Crel(relocations) => self.load_debug_relocations::<A>(
-                    common,
-                    queue,
-                    resources,
-                    section,
-                    relocations,
-                    scope,
-                )?,
+        let relocations = match self.relocations(section.index)? {
+            RelocationList::Rela(r) => RelocationIterator::rela(r.iter(), dbg!(r.len())),
+            RelocationList::Crel(c) => {
+                let len = c.len();
+                RelocationIterator::crel(c, len)
             }
+        };
+        if A::local_symbols_in_debug_info() {
+            self.load_debug_relocations::<A>(
+                common,
+                queue,
+                resources,
+                section,
+                relocations,
+                scope,
+            )?;
         }
 
         tracing::debug!(loaded_debug_section = %self.object.section_display_name(section_index),);
@@ -4852,9 +4924,10 @@ impl<'data> ObjectLayoutState<'data> {
         queue: &mut LocalWorkQueue,
         resources: &'scope GraphResources<'data, '_>,
         section: Section,
-        relocations: impl Iterator<Item = object::Result<Crel>>,
+        relocations: RelocationIterator<'data>,
         scope: &Scope<'scope>,
     ) -> Result<(), Error> {
+        dbg!(relocations.remaining);
         for rel in relocations {
             let modifier = process_relocation::<A>(
                 self,
@@ -5315,38 +5388,28 @@ fn process_eh_frame_data<'data, 'scope, A: Arch>(
 ) -> Result {
     let eh_frame_section = object.object.section(eh_frame_section_index)?;
     let data = object.object.raw_section_data(eh_frame_section)?;
-    match object.relocations(eh_frame_section_index)? {
-        RelocationList::Rela(relocations) => process_eh_frame_relocations::<A, _>(
-            object,
-            common,
-            file_symbol_id_range,
-            resources,
-            queue,
-            eh_frame_section,
-            data,
-            rela_to_crel_iter(relocations),
-            scope,
-        ),
-        RelocationList::Crel(crel_iterator) => process_eh_frame_relocations::<A, _>(
-            object,
-            common,
-            file_symbol_id_range,
-            resources,
-            queue,
-            eh_frame_section,
-            data,
-            crel_iterator,
-            scope,
-        ),
-    }
+    dbg!(object.input);
+    let relocations = match object.relocations(eh_frame_section_index)? {
+        RelocationList::Rela(r) => RelocationIterator::rela(r.iter(), dbg!(r.len())),
+        RelocationList::Crel(c) => {
+            let len = c.len();
+            RelocationIterator::crel(c, len)
+        }
+    };
+    process_eh_frame_relocations::<A>(
+        object,
+        common,
+        file_symbol_id_range,
+        resources,
+        queue,
+        eh_frame_section,
+        data,
+        relocations,
+        scope,
+    )
 }
 
-fn process_eh_frame_relocations<
-    'data,
-    'scope,
-    A: Arch,
-    I: Iterator<Item = object::Result<Crel>> + Clone + Send + 'data,
->(
+fn process_eh_frame_relocations<'data, 'scope, A: Arch>(
     object: &mut ObjectLayoutState<'data>,
     common: &mut CommonGroupState<'data>,
     file_symbol_id_range: SymbolIdRange,
@@ -5354,7 +5417,7 @@ fn process_eh_frame_relocations<
     queue: &mut LocalWorkQueue,
     eh_frame_section: &'data object::elf::SectionHeader64<LittleEndian>,
     data: &'data [u8],
-    relocations: I,
+    relocations: RelocationIterator<'data>,
     scope: &Scope<'scope>,
 ) -> Result {
     const PREFIX_LEN: usize = size_of::<elf::EhFrameEntryPrefix>();
@@ -5383,9 +5446,11 @@ fn process_eh_frame_relocations<
             // symbols it references. If however, it references something other than a symbol, then,
             // because we're not taking that into consideration, we disallow deduplication.
             let mut eligible_for_deduplication = true;
+            dbg!(rel_iter.remaining);
             while let Some(rel) = rel_iter.clone().next() {
+                dbg!(rel_iter.remaining);
                 let rel = rel?;
-                let rel_offset = rel.r_offset;
+                let rel_offset = rel.r_offset();
                 if rel_offset >= next_offset as u64 {
                     // This relocation belongs to the next entry.
                     break;
@@ -5428,9 +5493,11 @@ fn process_eh_frame_relocations<
             let rel_start = rel_iter.clone();
             let mut rel_elements = 0;
 
+            dbg!(rel_iter.remaining);
             while let Some(rel) = rel_iter.clone().next() {
+                dbg!(rel_iter.remaining);
                 let rel = rel?;
-                let rel_offset = rel.r_offset;
+                let rel_offset = rel.r_offset();
                 if rel_offset < next_offset as u64 {
                     let is_pc_begin = (rel_offset as usize - offset) == elf::FDE_PC_BEGIN_OFFSET;
 
@@ -5454,8 +5521,12 @@ fn process_eh_frame_relocations<
                 // turn point to whatever the section pointed to before.
                 let previous_frame_for_section = unloaded.last_frame_index.replace(frame_index);
 
+                let relocations = RelocationIterator {
+                    inner: rel_start.inner,
+                    remaining: rel_elements,
+                };
                 object.exception_frames.push(ExceptionFrame {
-                    relocations: Box::new(rel_start.take(rel_elements)),
+                    relocations,
                     frame_size: size as u32,
                     previous_frame_for_section,
                 });
