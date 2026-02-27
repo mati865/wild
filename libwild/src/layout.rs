@@ -2906,12 +2906,13 @@ pub(crate) fn process_relocation<
 
         let relocation_needs_got = flags_to_add.needs_got();
 
-        if flags.is_ifunc() && !symbol_db.output_kind.is_static_executable() {
-            flags_to_add |= ValueFlags::GOT | ValueFlags::PLT;
-        }
-
-        if flags.is_ifunc() && relocation_needs_got && !symbol_db.output_kind.is_relocatable() {
-            flags_to_add |= ValueFlags::IFUNC_GOT_FOR_ADDRESS;
+        if flags.is_ifunc() {
+            if !symbol_db.output_kind.is_static_executable() {
+                flags_to_add |= ValueFlags::GOT | ValueFlags::PLT;
+            }
+            if relocation_needs_got && !symbol_db.output_kind.is_relocatable() {
+                flags_to_add |= ValueFlags::IFUNC_GOT_FOR_ADDRESS;
+            }
         }
 
         let atomic_flags = &resources.per_symbol_flags.get_atomic(symbol_id);
