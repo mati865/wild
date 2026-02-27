@@ -2900,9 +2900,10 @@ pub(crate) fn process_relocation<
         }
 
         // For ifunc symbols with GOT-relative references (like R_X86_64_GOTPCRELX), we need a
-        // separate GOT entry for address equality. The main GOT entry will be used by the PLT stub
-        // with an IRELATIVE relocation, while this extra entry will contain the PLT stub address so
-        // that all references to the ifunc return the same address.
+        // separate GOT entry for address equality if the address is actually taken (needs_direct).
+        // The main GOT entry will be used by the PLT stub with an IRELATIVE relocation, while
+        // this extra entry will contain the PLT stub address so that all references to the
+        // ifunc return the same address.
 
         let relocation_needs_got = flags_to_add.needs_got();
 
@@ -2910,7 +2911,10 @@ pub(crate) fn process_relocation<
             if !symbol_db.output_kind.is_static_executable() {
                 flags_to_add |= ValueFlags::GOT | ValueFlags::PLT;
             }
-            if relocation_needs_got && !symbol_db.output_kind.is_relocatable() {
+            if relocation_needs_got
+                && !symbol_db.output_kind.is_relocatable()
+                && flags.needs_direct()
+            {
                 flags_to_add |= ValueFlags::IFUNC_GOT_FOR_ADDRESS;
             }
         }
