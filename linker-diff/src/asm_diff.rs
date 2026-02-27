@@ -2100,7 +2100,11 @@ impl<'data> RelaxationTester<'data> {
                         }
                     }
 
-                    value_kind = ValueKind::Unwrapped(inner_kind);
+                    if inner_kind == BasicValueKind::Pointer && referent.is_none() {
+                        value_kind = ValueKind::OptionalPlt;
+                    } else {
+                        value_kind = ValueKind::Unwrapped(inner_kind);
+                    }
                 }
                 ValueKind::Unwrapped(_) => break,
             }
