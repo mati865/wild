@@ -12,17 +12,17 @@ pub enum RelaxationKind {
     MovIndirectToLea,
 
     /// Transforms a mov instruction that would have loaded an absolute value to not use the GOT.
-    /// The transformation will look like `mov *x(%rip), reg` ->  `mov x, reg`.
+    /// The transformation will look like `mov *x(%rip), reg` -> `mov x, reg`.
     MovIndirectToAbsolute,
 
     /// Transforms a mov instruction that would have loaded an absolute value to not use the GOT.
-    /// The transformation will look like `mov *x(%rip), reg` ->  `mov x, reg`.
+    /// The transformation will look like `mov *x(%rip), reg` -> `mov x, reg`.
     RexMovIndirectToAbsolute,
 
-    // Transforms an indirect sub to an absolute sub.
+    /// Transforms an indirect sub to an absolute sub.
     RexSubIndirectToAbsolute,
 
-    // Transforms an indirect cmp to an absolute cmp.
+    /// Transforms an indirect cmp to an absolute cmp.
     RexCmpIndirectToAbsolute,
 
     /// Transform a call instruction like `call *x(%rip)` -> `call x(%rip)`.
@@ -54,10 +54,10 @@ pub enum RelaxationKind {
     /// Transform general dynamic (GD) into initial exec
     TlsGdToInitialExec,
 
-    // Transform TLSDESC to local exec for a statically linked executables.
+    /// Transform TLSDESC to local exec for a statically linked executable.
     TlsDescToLocalExec,
 
-    // Transform TLSDESC to initial exec.
+    /// Transform TLSDESC to initial exec.
     TlsDescToInitialExec,
 
     /// Convert a TLSDESC_CALL to a no-op.
