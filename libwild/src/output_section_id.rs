@@ -94,6 +94,7 @@ pub(crate) const SYMTAB_GLOBAL: OutputSectionId = part_id::SYMTAB_GLOBAL.output_
 pub(crate) const RELA_DYN_RELATIVE: OutputSectionId =
     part_id::RELA_DYN_RELATIVE.output_section_id();
 pub(crate) const RELA_DYN_GENERAL: OutputSectionId = part_id::RELA_DYN_GENERAL.output_section_id();
+pub(crate) const RELR_DYN: OutputSectionId = part_id::RELR_DYN.output_section_id();
 pub(crate) const RISCV_ATTRIBUTES: OutputSectionId = part_id::RISCV_ATTRIBUTES.output_section_id();
 pub(crate) const RELRO_PADDING: OutputSectionId = part_id::RELRO_PADDING.output_section_id();
 
@@ -558,6 +559,7 @@ impl CustomSectionIds {
         builder.add_section(GNU_VERSION_D);
         builder.add_section(GNU_VERSION_R);
         builder.add_section(RELA_DYN_RELATIVE);
+        builder.add_section(RELR_DYN);
         builder.add_section(RELA_PLT);
         builder.add_section(RODATA);
         builder.add_section(EH_FRAME_HDR);
