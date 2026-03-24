@@ -3684,7 +3684,8 @@ fn integration_test(
         "linker-script-assert-pass.c",
         "linker-script-assert-fail.c",
         "linker-script-glob.c",
-        "execstack.s"
+        "execstack.s",
+        "pack-relative-relocs.c"
     )]
     program_name: &'static str,
     #[allow(unused_variables)] setup_symlink: (),
