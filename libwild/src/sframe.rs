@@ -17,7 +17,9 @@ const FLAG_FUNC_START_PCREL: u8 = 0x4;
 const FLAG_AARCH64_PAUTH: u8 = 0x8;
 
 const HEADER_SIZE: usize = 0x1c;
-const FDE_SIZE: usize = 21;
+const FDE_INDEX_SIZE: usize = 16;
+// const FDE_ATTR_SIZE: usize = 5;
+// const FDE_SIZE: usize = FDE_INDEX_SIZE + FDE_ATTR_SIZE;
 
 // Field offsets in the SFrame header
 const VERSION_FIELD: usize = 0x02;
@@ -33,9 +35,9 @@ const FDE_START_OFFSET_FIELD: usize = 0x14;
 const FRE_START_OFFSET_FIELD: usize = 0x18;
 
 struct Entry {
-    bytes: [u8; FDE_SIZE],
+    fde_index_bytes: [u8; FDE_INDEX_SIZE],
     func_addr: i128,
-    fre_bytes: Vec<u8>,
+    fde_attr_and_fre_bytes: Vec<u8>,
 }
 
 #[derive(Debug, derive_more::Display)]
@@ -203,11 +205,11 @@ pub(crate) fn sort_sframe_section(
         let fre_start = offset + header_end_offset + header.fre_start_offset as usize;
 
         let num_fdes = header.num_fdes as usize;
-        let total_fde_bytes = FDE_SIZE
+        let total_fde_index_bytes = FDE_INDEX_SIZE
             .checked_mul(num_fdes)
             .context("SFrame FDE array size overflow")?;
 
-        let fde_end = fde_start + total_fde_bytes;
+        let fde_end = fde_start + total_fde_index_bytes;
 
         if fde_end > offset + len {
             bail!("SFrame FDE array truncated");
@@ -215,7 +217,7 @@ pub(crate) fn sort_sframe_section(
 
         let mut fre_offsets = Vec::with_capacity(num_fdes + 1);
         for i in 0..num_fdes {
-            let offset_in_section = fde_start + i * FDE_SIZE;
+            let offset_in_section = fde_start + i * FDE_INDEX_SIZE;
             let fre_offset = read_u32(section, offset_in_section + 12);
             fre_offsets.push(fre_offset);
         }
@@ -230,18 +232,19 @@ pub(crate) fn sort_sframe_section(
         fre_offsets.dedup();
 
         for index in 0..num_fdes {
-            let offset_in_section = fde_start + index * FDE_SIZE;
-            let mut bytes = [0u8; FDE_SIZE];
-            bytes.copy_from_slice(&section[offset_in_section..offset_in_section + FDE_SIZE]);
+            let offset_in_section = fde_start + index * FDE_INDEX_SIZE;
+            let mut fde_index_bytes = [0u8; FDE_INDEX_SIZE];
+            fde_index_bytes
+                .copy_from_slice(&section[offset_in_section..offset_in_section + FDE_INDEX_SIZE]);
 
-            let start_value = i128::from(read_i64(&bytes, 0));
+            let start_value = i128::from(read_i64(&fde_index_bytes, 0));
             let func_addr = if pc_rel {
                 section_base + (offset_in_section as i128) + start_value
             } else {
                 section_base + start_value
             };
 
-            let curr_fre_offset = read_u32(&bytes, 12);
+            let curr_fre_offset = read_u32(&fde_index_bytes, 12);
 
             // Find the length of the FRE data for this function.
             // It extends from curr_fre_offset to the next offset in our sorted list.
@@ -260,13 +263,13 @@ pub(crate) fn sort_sframe_section(
                 bail!("SFrame FRE data truncated");
             }
 
-            let fre_bytes =
+            let fde_attr_and_fre_bytes =
                 section[curr_fre_abs_start..curr_fre_abs_start + curr_fre_len].to_owned();
 
             entries.push(Entry {
-                bytes,
+                fde_index_bytes,
                 func_addr,
-                fre_bytes,
+                fde_attr_and_fre_bytes,
             });
         }
     }
@@ -281,10 +284,10 @@ pub(crate) fn sort_sframe_section(
     let header_end_offset = HEADER_SIZE + output_aux_len;
 
     let fde_offset = 0;
-    let fde_size = num_fdes * FDE_SIZE;
+    let fde_size = num_fdes * FDE_INDEX_SIZE;
     let fre_offset = fde_size;
 
-    let total_fre_size: usize = entries.iter().map(|e| e.fre_bytes.len()).sum();
+    let total_fre_size: usize = entries.iter().map(|e| e.fde_attr_and_fre_bytes.len()).sum();
     let total_size = header_end_offset + fde_size + total_fre_size;
 
     if total_size > section.len() {
@@ -316,9 +319,9 @@ pub(crate) fn sort_sframe_section(
     let fre_start_idx = header_end_offset + fre_offset;
 
     for (index, entry) in entries.iter().enumerate() {
-        let mut fde_bytes = entry.bytes;
+        let mut fde_bytes = entry.fde_index_bytes;
 
-        let fde_pos_in_section = fde_start_idx + index * FDE_SIZE;
+        let fde_pos_in_section = fde_start_idx + index * FDE_INDEX_SIZE;
         let pc_rel = header.preamble.flags & FLAG_FUNC_START_PCREL != 0;
 
         let new_value = if pc_rel {
@@ -332,11 +335,12 @@ pub(crate) fn sort_sframe_section(
 
         fde_bytes[12..16].copy_from_slice(&(current_fre_rel_offset as u32).to_le_bytes());
 
-        section[fde_pos_in_section..fde_pos_in_section + FDE_SIZE].copy_from_slice(&fde_bytes);
+        section[fde_pos_in_section..fde_pos_in_section + FDE_INDEX_SIZE]
+            .copy_from_slice(&fde_bytes);
 
-        let fre_len = entry.fre_bytes.len();
+        let fre_len = entry.fde_attr_and_fre_bytes.len();
         let fre_pos = fre_start_idx + current_fre_rel_offset;
-        section[fre_pos..fre_pos + fre_len].copy_from_slice(&entry.fre_bytes);
+        section[fre_pos..fre_pos + fre_len].copy_from_slice(&entry.fde_attr_and_fre_bytes);
 
         current_fre_rel_offset += fre_len;
     }
