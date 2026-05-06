@@ -17,7 +17,7 @@ const FLAG_FUNC_START_PCREL: u8 = 0x4;
 const FLAG_AARCH64_PAUTH: u8 = 0x8;
 
 const HEADER_SIZE: usize = 0x1c;
-const FDE_SIZE: usize = 20;
+const FDE_SIZE: usize = 21;
 
 // Field offsets in the SFrame header
 const VERSION_FIELD: usize = 0x02;
