@@ -46,10 +46,14 @@ pub enum SframeError {
     BadMagicBytes(u16),
 }
 
-struct Header {
+struct Preamble {
     magic: u16,
     version: u8,
     flags: u8,
+}
+
+struct Header {
+    preamble: Preamble,
     abi_arch: u8,
     cfa_fixed_fp_offset: i8,
     cfa_fixed_ra_offset: i8,
@@ -73,10 +77,14 @@ impl Header {
             return Err(SframeError::UnsupportedVersion(version));
         }
 
-        Ok(Header {
+        let preamble = Preamble {
             magic,
             version,
             flags: data[FLAGS_FIELD],
+        };
+
+        Ok(Header {
+            preamble,
             abi_arch: data[ABI_ARCH_FIELD],
             cfa_fixed_fp_offset: data[CFA_FIXED_FP_OFFSET_FIELD] as i8,
             cfa_fixed_ra_offset: data[CFA_FIXED_RA_OFFSET_FIELD] as i8,
@@ -90,9 +98,9 @@ impl Header {
     }
 
     fn write(&self, data: &mut [u8]) {
-        data[0..2].copy_from_slice(&self.magic.to_le_bytes());
-        data[VERSION_FIELD] = self.version;
-        data[FLAGS_FIELD] = self.flags;
+        data[0..2].copy_from_slice(&self.preamble.magic.to_le_bytes());
+        data[VERSION_FIELD] = self.preamble.version;
+        data[FLAGS_FIELD] = self.preamble.flags;
         data[ABI_ARCH_FIELD] = self.abi_arch;
         data[CFA_FIXED_FP_OFFSET_FIELD] = self.cfa_fixed_fp_offset as u8;
         data[CFA_FIXED_RA_OFFSET_FIELD] = self.cfa_fixed_ra_offset as u8;
@@ -166,21 +174,21 @@ pub(crate) fn sort_sframe_section(
             Err(e) => bail!("Failed to parse SFrame header at offset {}: {}", offset, e),
         };
 
-        let pc_rel = header.flags & FLAG_FUNC_START_PCREL != 0;
+        let pc_rel = header.preamble.flags & FLAG_FUNC_START_PCREL != 0;
         let aux_len = header.aux_len as usize;
 
         if first_section {
-            output_flags = header.flags;
+            output_flags = header.preamble.flags;
             output_abi_arch = header.abi_arch;
             output_cfa_fixed_fp_offset = header.cfa_fixed_fp_offset;
             output_cfa_fixed_ra_offset = header.cfa_fixed_ra_offset;
             output_aux_len = aux_len;
             first_section = false;
         } else {
-            if (header.flags & FLAG_FRAME_POINTER) == 0 {
+            if (header.preamble.flags & FLAG_FRAME_POINTER) == 0 {
                 output_flags &= !FLAG_FRAME_POINTER;
             }
-            if (header.flags & FLAG_AARCH64_PAUTH) != 0 {
+            if (header.preamble.flags & FLAG_AARCH64_PAUTH) != 0 {
                 output_flags |= FLAG_AARCH64_PAUTH;
             }
         }
@@ -283,10 +291,14 @@ pub(crate) fn sort_sframe_section(
         bail!("Merged SFrame section too large");
     }
 
-    let header = Header {
+    let preamble = Preamble {
         magic: SFRAME_MAGIC,
         version: SFRAME_VERSION_3,
         flags: output_flags | FLAG_FDE_SORTED,
+    };
+
+    let header = Header {
+        preamble,
         abi_arch: output_abi_arch,
         cfa_fixed_fp_offset: output_cfa_fixed_fp_offset,
         cfa_fixed_ra_offset: output_cfa_fixed_ra_offset,
@@ -307,7 +319,7 @@ pub(crate) fn sort_sframe_section(
         let mut fde_bytes = entry.bytes;
 
         let fde_pos_in_section = fde_start_idx + index * FDE_SIZE;
-        let pc_rel = header.flags & FLAG_FUNC_START_PCREL != 0;
+        let pc_rel = header.preamble.flags & FLAG_FUNC_START_PCREL != 0;
 
         let new_value = if pc_rel {
             entry.func_addr - (section_base + fde_pos_in_section as i128)
