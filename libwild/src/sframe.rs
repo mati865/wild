@@ -216,7 +216,7 @@ pub(crate) fn sort_sframe_section(
         let mut fre_offsets = Vec::with_capacity(num_fdes + 1);
         for i in 0..num_fdes {
             let offset_in_section = fde_start + i * FDE_SIZE;
-            let fre_offset = read_u32(section, offset_in_section + 8);
+            let fre_offset = read_u32(section, offset_in_section + 12);
             fre_offsets.push(fre_offset);
         }
 
@@ -241,7 +241,7 @@ pub(crate) fn sort_sframe_section(
                 section_base + start_value
             };
 
-            let curr_fre_offset = read_u32(&bytes, 8);
+            let curr_fre_offset = read_u32(&bytes, 12);
 
             // Find the length of the FRE data for this function.
             // It extends from curr_fre_offset to the next offset in our sorted list.
@@ -330,7 +330,7 @@ pub(crate) fn sort_sframe_section(
             .context("Function start address out of 32-bit range for SFrame entry")?;
         write_i64(&mut fde_bytes, 0, new_value_i64);
 
-        fde_bytes[8..12].copy_from_slice(&(current_fre_rel_offset as u32).to_le_bytes());
+        fde_bytes[12..16].copy_from_slice(&(current_fre_rel_offset as u32).to_le_bytes());
 
         section[fde_pos_in_section..fde_pos_in_section + FDE_SIZE].copy_from_slice(&fde_bytes);
 
