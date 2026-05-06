@@ -9,7 +9,7 @@ use std::convert::TryInto;
 // Magic value identifying an SFrame section.
 const SFRAME_MAGIC: u16 = 0xdee2;
 // Current supported SFrame version.
-const SFRAME_VERSION_2: u8 = 2;
+const SFRAME_VERSION_3: u8 = 3;
 
 const FLAG_FDE_SORTED: u8 = 0x1;
 const FLAG_FRAME_POINTER: u8 = 0x2;
@@ -69,7 +69,7 @@ impl Header {
         }
 
         let version = data[VERSION_FIELD];
-        if version != SFRAME_VERSION_2 {
+        if version != SFRAME_VERSION_3 {
             return Err(SframeError::UnsupportedVersion(version));
         }
 
@@ -285,7 +285,7 @@ pub(crate) fn sort_sframe_section(
 
     let header = Header {
         magic: SFRAME_MAGIC,
-        version: SFRAME_VERSION_2,
+        version: SFRAME_VERSION_3,
         flags: output_flags | FLAG_FDE_SORTED,
         abi_arch: output_abi_arch,
         cfa_fixed_fp_offset: output_cfa_fixed_fp_offset,
