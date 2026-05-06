@@ -123,12 +123,12 @@ fn read_u32(data: &[u8], offset: usize) -> u32 {
     u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap())
 }
 
-fn read_i32(data: &[u8], offset: usize) -> i32 {
-    i32::from_le_bytes(data[offset..offset + 4].try_into().unwrap())
+fn read_i64(data: &[u8], offset: usize) -> i64 {
+    i64::from_le_bytes(data[offset..offset + 8].try_into().unwrap())
 }
 
-fn write_i32(data: &mut [u8], offset: usize, value: i32) {
-    data[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+fn write_i64(data: &mut [u8], offset: usize, value: i64) {
+    data[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
 }
 
 /// Sort the SFrame FDE array in-place by the functions' start addresses.
@@ -234,7 +234,7 @@ pub(crate) fn sort_sframe_section(
             let mut bytes = [0u8; FDE_SIZE];
             bytes.copy_from_slice(&section[offset_in_section..offset_in_section + FDE_SIZE]);
 
-            let start_value = i128::from(read_i32(&bytes, 0));
+            let start_value = i128::from(read_i64(&bytes, 0));
             let func_addr = if pc_rel {
                 section_base + (offset_in_section as i128) + start_value
             } else {
@@ -326,9 +326,9 @@ pub(crate) fn sort_sframe_section(
         } else {
             entry.func_addr - section_base
         };
-        let new_value_i32 = i32::try_from(new_value)
+        let new_value_i64 = i64::try_from(new_value)
             .context("Function start address out of 32-bit range for SFrame entry")?;
-        write_i32(&mut fde_bytes, 0, new_value_i32);
+        write_i64(&mut fde_bytes, 0, new_value_i64);
 
         fde_bytes[8..12].copy_from_slice(&(current_fre_rel_offset as u32).to_le_bytes());
 
