@@ -14,7 +14,6 @@ const SFRAME_VERSION_3: u8 = 3;
 const FLAG_FDE_SORTED: u8 = 0x1;
 const FLAG_FRAME_POINTER: u8 = 0x2;
 const FLAG_FUNC_START_PCREL: u8 = 0x4;
-const FLAG_AARCH64_PAUTH: u8 = 0x8;
 
 const HEADER_SIZE: usize = 0x1c;
 const FDE_INDEX_SIZE: usize = 16;
@@ -189,9 +188,6 @@ pub(crate) fn sort_sframe_section(
         } else {
             if (header.preamble.flags & FLAG_FRAME_POINTER) == 0 {
                 output_flags &= !FLAG_FRAME_POINTER;
-            }
-            if (header.preamble.flags & FLAG_AARCH64_PAUTH) != 0 {
-                output_flags |= FLAG_AARCH64_PAUTH;
             }
         }
 
