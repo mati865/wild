@@ -15,6 +15,7 @@ use crate::linker_script::MemoryRegion;
 use crate::output_section_id::OutputSections;
 use crate::output_section_id::SectionName;
 use crate::output_section_map::OutputSectionMap;
+use crate::parsing::SymbolLoc;
 use crate::platform::Platform;
 
 /// Compute 1-based line number by counting newlines before `remainder` in `file_bytes`.
@@ -67,10 +68,20 @@ pub(crate) fn evaluate_assertions<'data, P: Platform>(
                 let line = line_number(parsed.file_bytes, assertion.remainder);
                 let result = evaluate_expression(
                     &assertion.expression,
+                    SymbolLoc::None,
                     section_layouts,
                     output_sections,
-                    warning_callback,
                     &parsed.memory_regions,
+                    &|name| {
+                        // Symbol resolution in ASSERT is not yet implemented. Rather than failing the
+                        // link (which would be our fault, not the user's), emit a warning and skip the
+                        // assertion by returning 1 (true).
+                        warning_callback(Warning::new(format!(
+                            "ASSERT: symbol references not yet supported ('{}'), skipping assertion",
+                            String::from_utf8_lossy(name)
+                        )));
+                        Ok(1)
+                    },
                 )
                 .with_context(|| format!("{}:{}: Failed to evaluate ASSERT", parsed.input, line))?;
 
@@ -84,21 +95,23 @@ pub(crate) fn evaluate_assertions<'data, P: Platform>(
     Ok(())
 }
 
-fn evaluate_expression<'data, P: Platform>(
+pub(crate) fn evaluate_expression<'data, P: Platform>(
     expr: &Expression<'data>,
+    expr_loc: SymbolLoc,
     section_layouts: &OutputSectionMap<OutputRecordLayout>,
     output_sections: &OutputSections<'data, P>,
-    warning_callback: &WarningCallback,
     memory_regions: &[MemoryRegion<'data>],
+    symbol_resolution_callback: &dyn Fn(&[u8]) -> Result<u64>,
 ) -> Result<u64> {
     macro_rules! eval {
         ($e:expr) => {
             evaluate_expression(
                 $e,
+                expr_loc,
                 section_layouts,
                 output_sections,
-                warning_callback,
                 memory_regions,
+                symbol_resolution_callback,
             )
         };
     }
@@ -106,19 +119,16 @@ fn evaluate_expression<'data, P: Platform>(
     match expr {
         Expression::Number(n) => Ok(*n),
 
-        // '.' is not meaningful outside of section layout context; treat as 0
-        Expression::LocationCounter => Ok(0),
+        Expression::LocationCounter => match expr_loc {
+            SymbolLoc::SectionStart(id) => Ok(section_layouts.get(id).mem_offset),
+            SymbolLoc::SectionEnd(id) => {
+                let layout = section_layouts.get(id);
+                Ok(layout.mem_offset + layout.mem_size)
+            }
+            SymbolLoc::None => Ok(0),
+        },
 
-        Expression::Symbol(name) => {
-            // Symbol resolution in ASSERT is not yet implemented. Rather than failing the
-            // link (which would be our fault, not the user's), emit a warning and skip the
-            // assertion by returning 1 (true).
-            warning_callback(Warning::new(format!(
-                "ASSERT: symbol references not yet supported ('{}'), skipping assertion",
-                String::from_utf8_lossy(name)
-            )));
-            Ok(1)
-        }
+        Expression::Symbol(name) => symbol_resolution_callback(name),
 
         Expression::Add(l, r) => Ok(eval!(l)?.wrapping_add(eval!(r)?)),
         Expression::Subtract(l, r) => Ok(eval!(l)?.wrapping_sub(eval!(r)?)),
@@ -254,7 +264,6 @@ mod tests {
     use crate::grouping::SequencedLinkerScript;
     use crate::input_data::FileId;
     use crate::linker_script::AssertCommand;
-    use crate::output_section_id::OutputSections;
     use crate::parsing::ProcessedLinkerScript;
     use crate::symbol_db::SymbolIdRange;
 
@@ -269,7 +278,7 @@ mod tests {
 
     fn eval_const(expr: &Expression<'static>) -> Result<u64> {
         let (layouts, sections) = dummy_context();
-        evaluate_expression::<Elf>(expr, &layouts, &sections, &|_| {}, &[])
+        evaluate_expression::<Elf>(expr, SymbolLoc::None, &layouts, &sections, &[], &|_| Ok(1))
     }
 
     #[test]
@@ -564,12 +573,6 @@ mod tests {
     }
 
     #[test]
-    fn test_symbol_skips_with_ok() {
-        // Symbol references are not yet supported; should return Ok(1) (skip, not fail)
-        assert_eq!(eval_const(&Expression::Symbol(b"__bss_start")).unwrap(), 1);
-    }
-
-    #[test]
     fn test_alignof_evaluation() {
         // Test that evaluating ALIGNOF for a non-existent section returns 0
         assert_eq!(
@@ -607,7 +610,7 @@ mod tests {
             message: b"should pass",
             remainder: b"",
         }]);
-        assert!(evaluate_assertions::<Elf>(&[group], &layouts, &sections, &|_| {}).is_ok(),);
+        assert!(evaluate_assertions::<Elf>(&[group], &layouts, &sections, &|_| {}).is_ok());
     }
 
     #[test]
@@ -638,7 +641,14 @@ mod tests {
             },
         ];
         let eval = |expr: &Expression| {
-            evaluate_expression::<Elf>(expr, &layouts, &sections, &|_| {}, &regions)
+            evaluate_expression::<Elf>(
+                expr,
+                SymbolLoc::None,
+                &layouts,
+                &sections,
+                &regions,
+                &|_| Ok(0),
+            )
         };
         assert_eq!(eval(&Expression::Origin(b"rom")).unwrap(), 0x08000000);
         assert_eq!(eval(&Expression::Length(b"rom")).unwrap(), 0x100000);

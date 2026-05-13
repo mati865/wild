@@ -28,6 +28,8 @@ use crate::output_section_id::OutputSections;
 use crate::parsing;
 use crate::parsing::InternalSymDefInfo;
 use crate::parsing::Prelude;
+use crate::parsing::Redirect;
+use crate::parsing::SymbolLoc;
 use crate::parsing::SymbolPlacement;
 use crate::parsing::SyntheticSymbols;
 use crate::part_id;
@@ -408,7 +410,7 @@ impl<'data, P: Platform> SymbolDb<'data, P> {
                 .push(Group::Prelude(crate::parsing::Prelude::new(
                     self.args,
                     self.output_kind,
-                )));
+                )?));
         }
 
         grouping::create_groups(self, parsed_objects, processed_linker_scripts);
@@ -2005,22 +2007,29 @@ impl<'data, P: Platform> Prelude<'data, P> {
     ) {
         for definition in &self.symbol_definitions {
             let symbol_id = symbols_out.next;
-            let mut flags = match definition.placement {
+            let mut flags = match &definition.placement {
                 SymbolPlacement::Undefined | SymbolPlacement::ForceUndefined => {
                     ValueFlags::ABSOLUTE
-                }
-                SymbolPlacement::DefsymAbsolute(_) => {
-                    outputs.add_non_versioned(PendingSymbol::new(symbol_id, definition.name));
-                    ValueFlags::NON_INTERPOSABLE | ValueFlags::ABSOLUTE
                 }
                 SymbolPlacement::SectionStart(_)
                 | SymbolPlacement::SectionEnd(_)
                 | SymbolPlacement::SectionGroupEnd(_)
-                | SymbolPlacement::Redirect(_)
                 | SymbolPlacement::LoadBaseAddress
                 | SymbolPlacement::SegmentStart(_, _) => {
                     outputs.add_non_versioned(PendingSymbol::new(symbol_id, definition.name));
                     ValueFlags::NON_INTERPOSABLE
+                }
+                SymbolPlacement::Redirect(redirect) => {
+                    outputs.add_non_versioned(PendingSymbol::new(symbol_id, definition.name));
+                    let mut flags = ValueFlags::NON_INTERPOSABLE | ValueFlags::ABSOLUTE;
+                    redirect.expression.visit_expressions(&mut |e| {
+                        if matches!(e, crate::linker_script::Expression::Symbol(_)) {
+                            flags.remove(ValueFlags::ABSOLUTE);
+                            return false;
+                        }
+                        true
+                    });
+                    flags
                 }
             };
             if definition.symbol.is_hidden() {
@@ -2038,11 +2047,14 @@ impl std::fmt::Display for SymbolId {
 }
 
 impl<P: Platform> InternalSymDefInfo<'_, P> {
-    pub(crate) fn section_id(self) -> Option<OutputSectionId> {
+    pub(crate) fn section_id(&self) -> Option<OutputSectionId> {
         match self.placement {
+            SymbolPlacement::Redirect(Redirect {
+                loc: SymbolLoc::SectionEnd(i) | SymbolLoc::SectionStart(i),
+                ..
+            }) => Some(i),
             SymbolPlacement::Undefined
             | SymbolPlacement::ForceUndefined
-            | SymbolPlacement::DefsymAbsolute(_)
             | SymbolPlacement::Redirect(_) => None,
             SymbolPlacement::SectionStart(i) => Some(i),
             SymbolPlacement::SectionEnd(i) => Some(i),

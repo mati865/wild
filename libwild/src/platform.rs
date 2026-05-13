@@ -1,7 +1,6 @@
 use crate::OutputKind;
 use crate::Result;
 use crate::alignment::Alignment;
-use crate::args::DefsymValue;
 use crate::bail;
 use crate::error::Warning;
 use crate::grouping::Group;
@@ -1239,7 +1238,7 @@ pub(crate) trait Args: std::fmt::Debug + Send + Sync + 'static {
         crate::args::UnresolvedSymbols::ReportAll
     }
 
-    fn defsym(&self) -> &[(String, DefsymValue)] {
+    fn defsym(&self) -> &[(String, String)] {
         &[]
     }
 
