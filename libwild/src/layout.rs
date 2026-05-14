@@ -357,10 +357,10 @@ pub fn compute<'data, P: Platform, A: Arch<Platform = P>>(
 
     // Evaluate ASSERT commands from all linker scripts now that layout is complete.
     crate::expression_eval::evaluate_assertions(
-        &symbol_db.groups,
+        &symbol_db,
         &section_layouts,
         &output_sections,
-        &resources.symbol_db.args.common().warning_callback,
+        &symbol_resolutions.resolutions,
     )?;
 
     let thunk_block_addresses = thunk_block_addresses_out
