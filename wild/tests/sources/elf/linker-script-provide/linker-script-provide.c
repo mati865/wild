@@ -27,8 +27,7 @@
 //#DiffIgnore:segment.RISCV_ATTRIBUTES.*
 // GNU ld emits `.riscv.attributes`, but Wild does not
 //#DiffIgnore:riscv_attributes.*
-// GNU ld behaves strangely when a symbol referenced in a linker script is
-// empty. See this:
+// GNU ld behaves strangely when a symbol referenced in a linker script is empty. See this:
 // https://github.com/wild-linker/wild/pull/1525#discussion_r2785478582
 //#DiffIgnore:dynsym.__data_start.section
 //#DiffIgnore:dynsym.__data_end.section
@@ -44,8 +43,8 @@ extern char __data_start __attribute__((weak));
 extern char __data_end __attribute__((weak));
 
 void* get_provided(void) {
-  return &provided_absolute + (long)&provided_hidden_absolute +
-         (long)&provided_symbol + (long)&provided_expr1 + (long)&provided_expr2;
+  return &provided_absolute + (long)&provided_hidden_absolute + (long)&provided_symbol +
+         (long)&provided_expr1 + (long)&provided_expr2;
 }
 
 unsigned long get_text_size(void) {
