@@ -2215,7 +2215,7 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
         )
     }
 
-    fn symbol(&self, index: object::SymbolIndex) -> Result<&'data SymtabEntry> {
+    fn symbol(&self, index: object::SymbolIndex) -> Result<&SymtabEntry> {
         Ok(self.symbols.symbol(index)?)
     }
 
@@ -2375,7 +2375,7 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
         })
     }
 
-    fn symbols_iter(&self) -> impl Iterator<Item = &'data SymtabEntry> {
+    fn symbols_iter(&self) -> impl Iterator<Item = &SymtabEntry> {
         self.symbols.iter()
     }
 
