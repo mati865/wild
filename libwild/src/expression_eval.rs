@@ -131,6 +131,7 @@ pub(crate) fn evaluate_expression<'data, P: Platform>(
                 let layout = section_layouts.get(id);
                 Ok(layout.mem_offset + layout.mem_size)
             }
+            SymbolLoc::FirstSection => Ok(0),
             SymbolLoc::None => Ok(0),
         },
 

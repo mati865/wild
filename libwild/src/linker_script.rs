@@ -88,6 +88,7 @@ pub(crate) enum SectionCommand<'a> {
     SetLocation(Location),
     Align(Alignment),
     Assert(AssertCommand<'a>),
+    Provide(ProvideSymbolDefinition<'a>),
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -943,8 +944,17 @@ fn parse_section_command<'input>(
     skip_comments_and_whitespace(input)?;
 
     // Handle ASSERT command
-    if name == b"ASSERT" {
-        return Ok(SectionCommand::Assert(parse_assert(input)?));
+    match name {
+        b"ASSERT" => {
+            return Ok(SectionCommand::Assert(parse_assert(input)?));
+        }
+        b"PROVIDE" => {
+            return Ok(SectionCommand::Provide(parse_provide(input, false)?));
+        }
+        b"PROVIDE_HIDDEN" => {
+            return Ok(SectionCommand::Provide(parse_provide(input, true)?));
+        }
+        _ => {}
     }
 
     if name == b"." {

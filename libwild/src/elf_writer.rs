@@ -4432,20 +4432,16 @@ fn get_defsym_attributes(
         } else {
             Err(redirect.missing_target(target_name))
         }
-    } else if let SymbolLoc::SectionStart(os) = redirect.loc {
-        let shndx = layout
-            .output_sections
-            .output_index_of_section(os)
-            .unwrap_or(0);
-        Ok((SymbolSection::Index(shndx), object::elf::STT_NOTYPE))
-    } else if let SymbolLoc::SectionEnd(os) = redirect.loc {
-        let shndx = layout
-            .output_sections
-            .output_index_of_section(os)
-            .unwrap_or(0);
-        Ok((SymbolSection::Index(shndx), object::elf::STT_NOTYPE))
     } else {
-        Ok((object::elf::SHN_ABS.into(), object::elf::STT_NOTYPE))
+        let shndx = match redirect.loc {
+            SymbolLoc::SectionStart(os) | SymbolLoc::SectionEnd(os) => layout
+                .output_sections
+                .output_index_of_section(os)
+                .unwrap_or(0),
+            SymbolLoc::FirstSection => 1,
+            SymbolLoc::None => return Ok((object::elf::SHN_ABS.into(), object::elf::STT_NOTYPE)),
+        };
+        Ok((SymbolSection::Index(shndx), object::elf::STT_NOTYPE))
     }
 }
 

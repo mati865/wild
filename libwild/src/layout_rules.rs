@@ -176,6 +176,8 @@ impl<'data> LayoutRulesBuilder<'data> {
                 // section, one of which doesn't affect the header value.
                 let mut extra_min_alignment = alignment::MIN;
 
+                let mut current_section_id = None;
+
                 for sec_cmd in &sections.commands {
                     match sec_cmd {
                         SectionCommand::Section(sec) => {
@@ -202,6 +204,7 @@ impl<'data> LayoutRulesBuilder<'data> {
                                 min_alignment,
                                 section_location,
                             );
+                            current_section_id = Some(primary_section_id);
 
                             let mut last_section_id = None;
 
@@ -288,6 +291,22 @@ impl<'data> LayoutRulesBuilder<'data> {
                         SectionCommand::Align(a) => extra_min_alignment = *a,
                         SectionCommand::Assert(assert_cmd) => {
                             assertions.push(assert_cmd.clone());
+                        }
+                        SectionCommand::Provide(provide) => {
+                            let placement = if let Some(id) = current_section_id {
+                                SymbolLoc::SectionEnd(id)
+                            } else {
+                                SymbolLoc::FirstSection
+                            };
+                            let placement = SymbolPlacement::Redirect(Redirect {
+                                kind: RedirectKind::Script,
+                                expression: provide.value.clone(),
+                                loc: placement,
+                            });
+                            symbol_defs.push(
+                                InternalSymDefInfo::new(placement, provide.name)
+                                    .with_hidden(provide.hidden),
+                            );
                         }
                     }
                 }

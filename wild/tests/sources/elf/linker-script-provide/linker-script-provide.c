@@ -31,6 +31,9 @@
 // https://github.com/wild-linker/wild/pull/1525#discussion_r2785478582
 //#DiffIgnore:dynsym.__data_start.section
 //#DiffIgnore:dynsym.__data_end.section
+//#DiffIgnore:dynsym.__sections_end.section
+// Different linkers emit different first sections.
+//#DiffIgnore:dynsym.__sections_start.section
 
 extern char provided_absolute __attribute__((weak));
 extern char provided_hidden_absolute __attribute__((weak));
@@ -41,6 +44,9 @@ extern char __text_start __attribute__((weak));
 extern char __text_end __attribute__((weak));
 extern char __data_start __attribute__((weak));
 extern char __data_end __attribute__((weak));
+extern char __sections_start __attribute__((weak));
+extern char __sections_mid __attribute__((weak));
+extern char __sections_end __attribute__((weak));
 
 void* get_provided(void) {
   return &provided_absolute + (long)&provided_hidden_absolute + (long)&provided_symbol +
@@ -54,3 +60,7 @@ unsigned long get_text_size(void) {
 unsigned long get_data_size(void) {
   return (unsigned long)&__data_end - (unsigned long)&__data_start;
 }
+
+unsigned long get_size(void) { return &__sections_end - &__sections_start; }
+
+void* get_mid(void) { return &__sections_mid; }

@@ -105,6 +105,7 @@ pub(crate) enum SymbolPlacement<'data> {
 pub(crate) enum SymbolLoc {
     SectionStart(OutputSectionId),
     SectionEnd(OutputSectionId),
+    FirstSection,
     None,
 }
 
