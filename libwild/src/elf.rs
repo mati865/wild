@@ -729,7 +729,7 @@ impl platform::Platform for Elf {
         } = RawSymbolName::parse(symbol_name.bytes());
 
         let mut version = object::elf::VER_NDX_GLOBAL;
-        if symbol_db.version_script.version_count() > 0
+        if (symbol_db.version_script.version_count() > 0 || version_name.is_some())
             && let Some(v) = symbol_db
                 .version_script
                 .version_for_symbol(&UnversionedSymbolName::prehashed(name), version_name)?
