@@ -195,6 +195,22 @@ impl<'data> LayoutRulesBuilder<'data> {
                 for sec_cmd in &sections.commands {
                     match sec_cmd {
                         SectionCommand::Section(sec) => {
+                            if sec.output_section_name == b"/DISCARD/" {
+                                for contents_cmd in &sec.commands {
+                                    match contents_cmd {
+                                        ContentsCommand::Matcher(matcher) => {
+                                            for pattern in &matcher.input_section_name_patterns {
+                                                self.add_section_rule(SectionRule::new(
+                                                    pattern,
+                                                    matcher.input_file_pattern,
+                                                    crate::layout_rules::SectionRuleOutcome::Discard,
+                                                )?);
+                                            }
+                                        }
+                                        _ => crate::bail!("Illegal use of /DISCARD/ section"),
+                                    }
+                                }
+                            }
                             let min_alignment = sec
                                 .alignment
                                 .unwrap_or(alignment::MIN)
