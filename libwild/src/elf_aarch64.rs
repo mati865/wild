@@ -112,14 +112,16 @@ impl crate::platform::Arch for ElfAArch64 {
     }
 
     fn get_property_class(property_type: u32) -> Option<PropertyClass> {
-        match property_type {
+        match object::elf::GnuPropertyType(property_type) {
             GNU_PROPERTY_AARCH64_FEATURE_1_AND => Some(PropertyClass::And),
             _ => None,
         }
     }
 
-    fn merge_eflags(_eflags: impl Iterator<Item = u32>) -> Result<u32> {
-        Ok(0)
+    fn merge_eflags(
+        _eflags: impl Iterator<Item = object::elf::FileFlags>,
+    ) -> Result<object::elf::FileFlags> {
+        Ok(object::elf::FileFlags(0))
     }
 
     fn high_part_relocations() -> &'static [u32] {
@@ -292,7 +294,7 @@ impl crate::platform::Arch for ElfAArch64 {
     ) -> bool {
         object
             .symbol(symbol_index)
-            .is_ok_and(|sym| (sym.st_other & object::elf::STO_AARCH64_VARIANT_PCS) != 0)
+            .is_ok_and(|sym| sym.st_other.contains(object::elf::STO_AARCH64_VARIANT_PCS))
     }
 
     fn get_source_info<'data>(
