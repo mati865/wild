@@ -1,7 +1,9 @@
 //! Parser for the Text-Based Stub (`.tbd`) library definitions used by Mach-O.
 //!
 //! This crate currently targets TBD format version 4 and extracts the
-//! linker-visible symbol definitions (and weak symbols).
+//! linker-visible symbol definitions (and weak symbols). To keep parsing
+//! simple and efficient, the parser rejects escape sequences and returns
+//! `&'data str` slices directly from the input.
 //!
 //! The parser accepts multi-document YAML TBD files. The first document is
 //! treated as the main library. Additional documents are treated as child
@@ -13,7 +15,6 @@ use crate::error;
 use crate::error::Result;
 use itertools::Itertools;
 use serde::Deserialize;
-use std::borrow::Cow;
 use std::collections::HashSet;
 
 const ARM64_LIB_ARCH: &str = "arm64-macos";
@@ -23,11 +24,11 @@ const ARM64_LIB_ARCH: &str = "arm64-macos";
 struct TextBasedDefinition<'a> {
     tbd_version: u32,
     #[serde(borrow)]
-    targets: Vec<Cow<'a, str>>,
+    targets: Vec<&'a str>,
     #[serde(borrow)]
-    install_name: Cow<'a, str>,
+    install_name: &'a str,
     #[serde(default)]
-    current_version: Cow<'a, str>,
+    current_version: &'a str,
     #[serde(default)]
     parent_umbrella: Vec<ParentUmbrella<'a>>,
     #[serde(default)]
@@ -48,48 +49,52 @@ impl<'a> TextBasedDefinition<'a> {
 #[serde(rename_all = "kebab-case")]
 struct ParentUmbrella<'a> {
     #[serde(borrow)]
-    targets: Vec<Cow<'a, str>>,
+    targets: Vec<&'a str>,
     #[serde(borrow)]
-    umbrella: Cow<'a, str>,
+    umbrella: &'a str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 struct ReexportedLibraries<'a> {
     #[serde(borrow)]
-    targets: Vec<Cow<'a, str>>,
+    targets: Vec<&'a str>,
     #[serde(borrow)]
-    libraries: Vec<Cow<'a, str>>,
+    libraries: Vec<&'a str>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 struct Exports<'a> {
     #[serde(borrow)]
-    targets: Vec<Cow<'a, str>>,
+    targets: Vec<&'a str>,
     #[serde(default)]
     #[serde(borrow)]
-    symbols: Vec<Cow<'a, str>>,
+    symbols: Vec<&'a str>,
     #[serde(default)]
     #[serde(borrow)]
-    weak_symbols: Vec<Cow<'a, str>>,
+    weak_symbols: Vec<&'a str>,
 }
-
 // TODO: remove
 #[allow(unused)]
-pub struct DefinedStubLibrary<'a> {
+#[derive(Debug, Clone)]
+pub(crate) struct DefinedStubLibrary<'a> {
     /// Install name of the dynamic library, including its `.dylib` suffix.    
-    pub install_name: String,
+    pub(crate) install_name: String,
     /// Current version recorded for the library, if present.
-    pub current_version: String,
+    pub(crate) current_version: String,
     /// Global symbols defined by the library or by any reexported child library.
-    pub symbols: HashSet<Cow<'a, str>>,
+    pub(crate) symbols: Vec<&'a str>,
     /// Weak symbols defined by the library or by any reexported child library.
-    pub weak_symbols: HashSet<Cow<'a, str>>,
+    pub(crate) weak_symbols: Vec<&'a str>,
 }
 
-// TODO: remove
-#[allow(unused)]
+impl DefinedStubLibrary<'_> {
+    pub(crate) fn total_symbols(&self) -> usize {
+        self.symbols.len() + self.weak_symbols.len()
+    }
+}
+
 pub fn parse_defined_library<'data>(input: &'data str) -> Result<DefinedStubLibrary<'data>> {
     let library_definitions = serde_yaml::Deserializer::from_str(input)
         .map(TextBasedDefinition::deserialize)
@@ -99,9 +104,7 @@ pub fn parse_defined_library<'data>(input: &'data str) -> Result<DefinedStubLibr
         .first()
         .ok_or_else(|| error!("root library must be defined"))?;
     ensure!(
-        main_library
-            .targets
-            .contains(&Cow::Borrowed(ARM64_LIB_ARCH)),
+        main_library.targets.contains(&ARM64_LIB_ARCH),
         "'{ARM64_LIB_ARCH}' architecture not implemented by the library"
     );
 
@@ -112,14 +115,14 @@ pub fn parse_defined_library<'data>(input: &'data str) -> Result<DefinedStubLibr
     let mut defined_library = DefinedStubLibrary {
         install_name: main_library.install_name.to_string(),
         current_version: main_library.current_version.to_string(),
-        symbols: HashSet::with_capacity(
+        symbols: Vec::with_capacity(
             library_definitions
                 .iter()
                 .flat_map(TextBasedDefinition::all_exports)
                 .map(|exp| exp.symbols.len())
                 .sum(),
         ),
-        weak_symbols: HashSet::with_capacity(
+        weak_symbols: Vec::with_capacity(
             library_definitions
                 .iter()
                 .flat_map(TextBasedDefinition::all_exports)
@@ -137,12 +140,10 @@ pub fn parse_defined_library<'data>(input: &'data str) -> Result<DefinedStubLibr
         .map_err(|_| error!("expected just a single exported library"))?
     {
         ensure!(
-            exported_libraries
-                .targets
-                .contains(&Cow::Borrowed(ARM64_LIB_ARCH)),
+            exported_libraries.targets.contains(&ARM64_LIB_ARCH),
             "'{ARM64_LIB_ARCH}' architecture not covered in the exported library"
         );
-        let exported_libraries: HashSet<_> = exported_libraries.libraries.iter().clone().collect();
+        let exported_libraries: HashSet<_> = exported_libraries.libraries.iter().copied().collect();
         exported_libraries
     } else {
         HashSet::new()
@@ -156,20 +157,18 @@ pub fn parse_defined_library<'data>(input: &'data str) -> Result<DefinedStubLibr
         );
         if lib != main_library {
             ensure!(
-                exported_libraries.contains(&lib.install_name),
+                exported_libraries.contains(lib.install_name),
                 "child library '{}' not listed as reexported by the main library",
                 lib.install_name
             );
         }
 
         for export in lib.all_exports() {
-            if export.targets.contains(&Cow::Borrowed(ARM64_LIB_ARCH)) {
-                defined_library
-                    .symbols
-                    .extend(export.symbols.iter().cloned());
+            if export.targets.contains(&ARM64_LIB_ARCH) {
+                defined_library.symbols.extend(export.symbols.iter());
                 defined_library
                     .weak_symbols
-                    .extend(export.weak_symbols.iter().cloned());
+                    .extend(export.weak_symbols.iter());
             }
         }
     }
@@ -237,9 +236,6 @@ reexports:
         assert_eq!(
             stub_library.symbols,
             ["_main_arm64", "_a_arm64", "_b_arm64", "_b_exported_arm64"]
-                .into_iter()
-                .map(Cow::Borrowed)
-                .collect()
         );
         assert_eq!(
             stub_library.weak_symbols,
@@ -248,9 +244,6 @@ reexports:
                 "_a_weak_arm64",
                 "_b_weak_exported_arm64"
             ]
-            .into_iter()
-            .map(Cow::Borrowed)
-            .collect()
         );
     }
 }
