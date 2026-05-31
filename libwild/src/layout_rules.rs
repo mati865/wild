@@ -323,6 +323,19 @@ impl<'data> LayoutRulesBuilder<'data> {
                                     .with_hidden(provide.hidden),
                             );
                         }
+                        SectionCommand::SymbolAssignment(assignment) => {
+                            let loc = if let Some(id) = current_section_id {
+                                SymbolLoc::SectionEnd(id)
+                            } else {
+                                SymbolLoc::FirstSection
+                            };
+                            let placement = SymbolPlacement::Redirect(Redirect {
+                                kind: RedirectKind::Script,
+                                expression: assignment.expr.clone(),
+                                loc,
+                            });
+                            symbol_defs.push(InternalSymDefInfo::new(placement, assignment.name));
+                        }
                     }
                 }
             } else if let linker_script::Command::Assert(assert_cmd) = cmd {

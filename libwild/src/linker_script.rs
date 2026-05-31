@@ -89,6 +89,7 @@ pub(crate) enum SectionCommand<'a> {
     Align(Alignment),
     Assert(AssertCommand<'a>),
     Provide(ProvideSymbolDefinition<'a>),
+    SymbolAssignment(SymbolAssignment<'a>),
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -957,21 +958,29 @@ fn parse_section_command<'input>(
         _ => {}
     }
 
-    if name == b"." {
-        '='.parse_next(input)?;
+    if opt("=").parse_next(input)?.is_some() {
         skip_comments_and_whitespace(input)?;
+        if name == b"." {
+            let cmd = if input.starts_with(b"ALIGN") {
+                SectionCommand::Align(parse_alignment(input)?)
+            } else {
+                SectionCommand::SetLocation(parse_location.parse_next(input)?)
+            };
 
-        let cmd = if input.starts_with(b"ALIGN") {
-            SectionCommand::Align(parse_alignment(input)?)
-        } else {
-            SectionCommand::SetLocation(parse_location.parse_next(input)?)
-        };
+            skip_comments_and_whitespace(input)?;
+            ';'.parse_next(input)?;
+            skip_comments_and_whitespace(input)?;
 
+            return Ok(cmd);
+        }
+        let expr = parse_expression.parse_next(input)?;
         skip_comments_and_whitespace(input)?;
         ';'.parse_next(input)?;
         skip_comments_and_whitespace(input)?;
-
-        return Ok(cmd);
+        return Ok(SectionCommand::SymbolAssignment(SymbolAssignment {
+            name,
+            expr,
+        }));
     }
 
     let start_address_expression = if input.starts_with(b":") {
