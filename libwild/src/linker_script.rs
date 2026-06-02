@@ -11,7 +11,6 @@ use std::path::Path;
 use winnow::BStr;
 use winnow::Parser as _;
 use winnow::ascii::dec_uint;
-use winnow::ascii::hex_digit1;
 use winnow::ascii::hex_uint;
 use winnow::ascii::multispace0;
 use winnow::combinator::alt;
@@ -85,16 +84,16 @@ pub(crate) struct Sections<'a> {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum SectionCommand<'a> {
     Section(Section<'a>),
-    SetLocation(Location),
+    SetLocation(Location<'a>),
     Align(Alignment),
     Assert(AssertCommand<'a>),
     Provide(ProvideSymbolDefinition<'a>),
     SymbolAssignment(SymbolAssignment<'a>),
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub(crate) struct Location {
-    pub(crate) address: u64,
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub(crate) struct Location<'a> {
+    pub(crate) address: Expression<'a>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -874,11 +873,8 @@ enum MulOp {
     Divide,
 }
 
-fn parse_location(input: &mut &BStr) -> winnow::Result<Location> {
-    "0x".parse_next(input)?;
-    let hex_str =
-        std::str::from_utf8(hex_digit1.parse_next(input)?).map_err(|_| ContextError::new())?;
-    let address = u64::from_str_radix(hex_str, 16).map_err(|_| ContextError::new())?;
+fn parse_location<'input>(input: &mut &'input BStr) -> winnow::Result<Location<'input>> {
+    let address = parse_expression.parse_next(input)?;
     Ok(Location { address })
 }
 
@@ -1387,7 +1383,9 @@ mod tests {
                     Command::Entry(b"_start"),
                     Command::Sections(Sections {
                         commands: vec![
-                            SectionCommand::SetLocation(Location { address: 0x1000000 }),
+                            SectionCommand::SetLocation(Location {
+                                address: Expression::Number(0x1000000),
+                            }),
                             SectionCommand::Align(Alignment::new(16).unwrap()),
                             SectionCommand::Section(Section {
                                 output_section_name: b".foo",

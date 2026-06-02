@@ -1574,7 +1574,7 @@ impl platform::Platform for Wasm {
             Vec<crate::output_section_id::OutputSectionId>,
         >,
     ) -> (
-        crate::output_section_id::OutputOrder,
+        crate::output_section_id::OutputOrder<'data>,
         crate::program_segments::ProgramSegments<Self::ProgramSegmentDef>,
     ) {
         use crate::output_section_id as osid;

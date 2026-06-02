@@ -21,6 +21,7 @@ use crate::input_data::InputRef;
 use crate::input_data::PRELUDE_FILE_ID;
 use crate::input_section_id::SectionIdRange;
 use crate::layout_rules::SectionKind;
+use crate::linker_script::Expression;
 use crate::output_section_id;
 use crate::output_section_id::OrderEvent;
 use crate::output_section_id::OutputOrder;
@@ -232,13 +233,28 @@ pub fn compute<'data, P: Platform, A: Arch<Platform = P>>(
         &symbol_db,
     );
 
+    let memory_regions: Vec<crate::linker_script::MemoryRegion<'_>> = symbol_db
+        .groups
+        .iter()
+        .filter_map(|g| {
+            if let crate::grouping::Group::LinkerScripts(scripts) = g {
+                Some(scripts)
+            } else {
+                None
+            }
+        })
+        .flatten()
+        .flat_map(|s| s.parsed.memory_regions.iter().cloned())
+        .collect();
+
     let mut section_part_layouts = layout_section_parts::<A::Platform>(
         &section_part_sizes,
         &output_sections,
         &program_segments,
         &output_order,
-        symbol_db.args,
-    );
+        &symbol_db,
+        &memory_regions,
+    )?;
 
     if symbol_db.args.should_relax() && A::supports_size_reduction_relaxations() {
         perform_iterative_relaxation::<A>(
@@ -250,7 +266,8 @@ pub fn compute<'data, P: Platform, A: Arch<Platform = P>>(
             &output_order,
             &symbol_db,
             &per_symbol_flags,
-        );
+            &memory_regions,
+        )?;
     }
 
     if let Some((record, last_part_id)) = section_part_layouts
@@ -474,7 +491,7 @@ fn update_defsym_symbol_resolution<'data, P: Platform>(
     if let SymbolPlacement::Redirect(redirect) = &def_info.placement {
         let value = crate::expression_eval::evaluate_expression(
             &redirect.expression,
-            redirect.loc,
+            &redirect.loc,
             section_layouts,
             output_sections,
             memory_regions,
@@ -633,7 +650,7 @@ pub struct Layout<'data, P: Platform> {
     pub(crate) segment_layouts: SegmentLayouts,
     pub(crate) output_sections: OutputSections<'data, P>,
     pub(crate) program_segments: ProgramSegments<P::ProgramSegmentDef>,
-    pub(crate) output_order: OutputOrder,
+    pub(crate) output_order: OutputOrder<'data>,
     pub(crate) non_addressable_counts: P::NonAddressableCounts,
     pub(crate) merged_strings: OutputSectionMap<MergedStringsSection<'data>>,
     pub(crate) merged_string_start_addresses: MergedStringStartAddresses,
@@ -1317,7 +1334,7 @@ pub(crate) struct FinaliseLayoutResources<'scope, 'data, P: Platform> {
     pub(crate) symbol_db: &'scope SymbolDb<'data, P>,
     pub(crate) per_symbol_flags: &'scope PerSymbolFlags,
     output_sections: &'scope OutputSections<'data, P>,
-    output_order: &'scope OutputOrder,
+    output_order: &'scope OutputOrder<'data>,
     pub(crate) section_layouts: &'scope OutputSectionMap<OutputRecordLayout>,
     merged_string_start_addresses: &'scope MergedStringStartAddresses,
     merged_strings: &'scope OutputSectionMap<MergedStringsSection<'data>>,
@@ -1675,10 +1692,10 @@ fn compute_symbols_and_layouts<'data, P: Platform>(
         .collect()
 }
 
-fn compute_segment_layout<P: Platform>(
+fn compute_segment_layout<'data, P: Platform>(
     section_layouts: &OutputSectionMap<OutputRecordLayout>,
     output_sections: &OutputSections<P>,
-    output_order: &OutputOrder,
+    output_order: &OutputOrder<'data>,
     program_segments: &ProgramSegments<P::ProgramSegmentDef>,
     header_info: &HeaderInfo,
     args: &P::Args,
@@ -1827,7 +1844,7 @@ fn compute_segment_layout<P: Platform>(
 fn compute_total_section_part_sizes<'data, P: Platform>(
     group_states: &mut [GroupState<'data, P>],
     output_sections: &mut OutputSections<P>,
-    output_order: &OutputOrder,
+    output_order: &OutputOrder<'data>,
     program_segments: &ProgramSegments<P::ProgramSegmentDef>,
     per_symbol_flags: &mut PerSymbolFlags,
     must_keep_sections: OutputSectionMap<bool>,
@@ -2941,7 +2958,7 @@ impl<'data, P: Platform> PreludeLayoutState<'data, P> {
         total_sizes: &mut OutputSectionPartMap<u64>,
         must_keep_sections: OutputSectionMap<bool>,
         output_sections: &mut OutputSections<P>,
-        output_order: &OutputOrder,
+        output_order: &OutputOrder<'data>,
         program_segments: &ProgramSegments<P::ProgramSegmentDef>,
         per_symbol_flags: &mut PerSymbolFlags,
         resources: &FinaliseSizesResources<'data, '_, P>,
@@ -3053,7 +3070,7 @@ impl<'data, P: Platform> PreludeLayoutState<'data, P> {
         must_keep_sections: OutputSectionMap<bool>,
         output_sections: &mut OutputSections<P>,
         program_segments: &ProgramSegments<P::ProgramSegmentDef>,
-        output_order: &OutputOrder,
+        output_order: &OutputOrder<'data>,
         resources: &FinaliseSizesResources<'data, '_, P>,
         symbol_flags: &PerSymbolFlags,
     ) {
@@ -4730,12 +4747,13 @@ fn perform_iterative_relaxation<'data, A: Arch>(
     group_states: &mut [GroupState<'data, A::Platform>],
     section_part_sizes: &mut OutputSectionPartMap<u64>,
     section_part_layouts: &mut OutputSectionPartMap<OutputRecordLayout>,
-    output_sections: &OutputSections<A::Platform>,
+    output_sections: &OutputSections<'data, A::Platform>,
     program_segments: &ProgramSegments<<A::Platform as Platform>::ProgramSegmentDef>,
-    output_order: &OutputOrder,
+    output_order: &OutputOrder<'data>,
     symbol_db: &SymbolDb<'data, A::Platform>,
     per_symbol_flags: &PerSymbolFlags,
-) {
+    memory_regions: &[crate::linker_script::MemoryRegion<'data>],
+) -> Result {
     timing_phase!("Iterative relaxation");
 
     let mut rescan_sections: Option<RescanSections> = None;
@@ -4789,18 +4807,22 @@ fn perform_iterative_relaxation<'data, A: Arch>(
             output_sections,
             program_segments,
             output_order,
-            symbol_db.args,
-        );
+            symbol_db,
+            memory_regions,
+        )?;
     }
+    Ok(())
 }
 
-fn layout_section_parts<P: Platform>(
+fn layout_section_parts<'data, P: Platform>(
     sizes: &OutputSectionPartMap<u64>,
-    output_sections: &OutputSections<P>,
+    output_sections: &OutputSections<'data, P>,
     program_segments: &ProgramSegments<P::ProgramSegmentDef>,
-    output_order: &OutputOrder,
-    args: &P::Args,
-) -> OutputSectionPartMap<OutputRecordLayout> {
+    output_order: &OutputOrder<'data>,
+    symbol_db: &SymbolDb<'data, P>,
+    memory_regions: &[crate::linker_script::MemoryRegion<'data>],
+) -> Result<OutputSectionPartMap<OutputRecordLayout>> {
+    let args = symbol_db.args;
     let segment_alignments = compute_segment_alignments::<P>(
         sizes,
         program_segments,
@@ -4809,8 +4831,26 @@ fn layout_section_parts<P: Platform>(
         output_sections,
     );
 
+    // Create an empty section layout for now, until we can support using linker script
+    // commands.
+    let empty_section_layouts = OutputSectionMap::with_size(output_sections.num_sections());
+
+    let expression_eval = |expr: &Expression<'data>| {
+        crate::expression_eval::evaluate_expression(
+            expr,
+            &crate::parsing::SymbolLoc::None,
+            &empty_section_layouts,
+            output_sections,
+            memory_regions,
+            symbol_db,
+            &|_| {
+                bail!("Symbols with the set location operation are not yet supported.");
+            },
+        )
+    };
+
     let mut file_offset = 0;
-    let mut mem_offset = output_sections.base_address;
+    let mut mem_offset = expression_eval(&output_sections.base_address)?;
     let mut nonalloc_mem_offsets: OutputSectionMap<u64> =
         OutputSectionMap::with_size(output_sections.num_sections());
     let mut reloc_alloc_mem_offsets: OutputSectionMap<u64> =
@@ -4822,8 +4862,8 @@ fn layout_section_parts<P: Platform>(
 
     for event in output_order {
         match event {
-            OrderEvent::SetLocation(location) => {
-                pending_location = Some(location);
+            OrderEvent::SetLocation(expr) => {
+                pending_location = Some(expr);
             }
             OrderEvent::SegmentStart(segment_id) => {
                 if program_segments.is_load_segment(segment_id) {
@@ -4831,9 +4871,9 @@ fn layout_section_parts<P: Platform>(
                         .get(&segment_id)
                         .copied()
                         .unwrap_or_else(|| args.loadable_segment_alignment());
-                    if let Some(location) = pending_location.take() {
+                    if let Some(expr) = pending_location.take() {
                         // The OrderEvent::SetLocation is ELF-specific only.
-                        mem_offset = location.address;
+                        mem_offset = expression_eval(&expr)?;
                         file_offset =
                             segment_alignment.align_modulo(mem_offset, file_offset as u64) as usize;
                     } else {
@@ -4856,8 +4896,8 @@ fn layout_section_parts<P: Platform>(
                 let section_info = output_sections.output_info(section_id);
                 let part_id_range = section_id.part_id_range();
                 let max_alignment = sizes.max_alignment(part_id_range.clone(), output_sections);
-                if let Some(location) = section_info.location {
-                    mem_offset = location.address;
+                if let Some(ref expr) = section_info.location {
+                    mem_offset = expression_eval(expr)?;
                 }
 
                 records_out[part_id_range.clone()]
@@ -4945,15 +4985,15 @@ fn layout_section_parts<P: Platform>(
         };
     }
 
-    records_out
+    Ok(records_out)
 }
 
 /// Computes the maximum alignment for each LOAD segment by examining the alignments of all sections
 /// that will be placed in that segment.
-fn compute_segment_alignments<P: Platform>(
+fn compute_segment_alignments<'data, P: Platform>(
     sizes: &OutputSectionPartMap<u64>,
     program_segments: &ProgramSegments<P::ProgramSegmentDef>,
-    output_order: &OutputOrder,
+    output_order: &OutputOrder<'data>,
     args: &P::Args,
     output_sections: &OutputSections<P>,
 ) -> HashMap<ProgramSegmentId, Alignment> {
@@ -5241,13 +5281,24 @@ fn test_no_disallowed_overlaps() {
     }
     let section_part_sizes = output_sections.new_part_map::<u64>().map(|_, _| 7);
 
+    let output_kind = crate::output_kind::OutputKind::StaticExecutable(
+        crate::args::RelocationModel::NonRelocatable,
+    );
+    let arena = colosseum::sync::Arena::new();
+    let auxiliary = crate::input_data::AuxiliaryFiles::new(&args, &arena).unwrap();
+    let herd = Default::default();
+    let symbol_db =
+        crate::symbol_db::SymbolDb::<Elf>::new(&args, output_kind, &auxiliary, &herd).unwrap();
+
     let section_part_layouts = layout_section_parts::<Elf>(
         &section_part_sizes,
         &output_sections,
         &program_segments,
         &output_order,
-        &args,
-    );
+        &symbol_db,
+        &[],
+    )
+    .unwrap();
 
     let section_layouts = layout_sections(&output_sections, &section_part_layouts);
 

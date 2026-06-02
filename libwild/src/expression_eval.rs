@@ -45,7 +45,7 @@ pub(crate) fn evaluate_assertions<'data, P: Platform>(
                 let line = line_number(parsed.file_bytes, assertion.remainder);
                 let result = evaluate_expression(
                     &assertion.expression,
-                    SymbolLoc::None,
+                    &SymbolLoc::None,
                     section_layouts,
                     output_sections,
                     &parsed.memory_regions,
@@ -80,7 +80,7 @@ pub(crate) fn evaluate_assertions<'data, P: Platform>(
 
 pub(crate) fn evaluate_expression<'data, P: Platform>(
     expr: &Expression<'data>,
-    expr_loc: SymbolLoc,
+    expr_loc: &SymbolLoc<'data>,
     section_layouts: &OutputSectionMap<OutputRecordLayout>,
     output_sections: &OutputSections<'data, P>,
     memory_regions: &[MemoryRegion<'data>],
@@ -105,12 +105,13 @@ pub(crate) fn evaluate_expression<'data, P: Platform>(
         Expression::Number(n) => Ok(*n),
 
         Expression::LocationCounter => match expr_loc {
-            SymbolLoc::SectionStart(id) => Ok(section_layouts.get(id).mem_offset),
+            SymbolLoc::SectionStart(id) => Ok(section_layouts.get(*id).mem_offset),
             SymbolLoc::SectionEnd(id) => {
-                let layout = section_layouts.get(id);
+                let layout = section_layouts.get(*id);
                 Ok(layout.mem_offset + layout.mem_size)
             }
             SymbolLoc::FirstSection | SymbolLoc::None => Ok(0),
+            SymbolLoc::Expression(expr, _) => eval!(expr),
         },
 
         Expression::Symbol(name) => symbol_resolution_callback(name),
@@ -280,7 +281,7 @@ mod tests {
         with_dummy_context(|layouts, sections, symbol_db| {
             evaluate_expression::<Elf>(
                 expr,
-                SymbolLoc::None,
+                &SymbolLoc::None,
                 layouts,
                 sections,
                 &[],
@@ -656,7 +657,7 @@ mod tests {
             let eval = |expr: &Expression<'static>| {
                 evaluate_expression::<Elf>(
                     expr,
-                    SymbolLoc::None,
+                    &SymbolLoc::None,
                     layouts,
                     sections,
                     &regions,

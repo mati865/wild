@@ -1826,7 +1826,7 @@ impl platform::Platform for Elf {
         output_kind: OutputKind,
         output_sections: &OutputSections<'data, Self>,
         secondary: &OutputSectionMap<Vec<OutputSectionId>>,
-    ) -> (OutputOrder, ProgramSegments<Self::ProgramSegmentDef>) {
+    ) -> (OutputOrder<'data>, ProgramSegments<Self::ProgramSegmentDef>) {
         let mut builder = OutputOrderBuilder::<Self>::new(output_kind, output_sections, secondary);
 
         builder.add_section(output_section_id::FILE_HEADER);

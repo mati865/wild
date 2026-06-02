@@ -4447,6 +4447,17 @@ fn get_defsym_attributes(
             }
             SymbolLoc::FirstSection => 1,
             SymbolLoc::None => return Ok((object::elf::SHN_ABS.into(), object::elf::STT_NOTYPE)),
+            SymbolLoc::Expression(_, os) => {
+                if let Some(os) = os {
+                    let os = layout.output_sections.primary_output_section(os);
+                    layout
+                        .output_sections
+                        .output_index_of_section(os)
+                        .unwrap_or(0)
+                } else {
+                    1
+                }
+            }
         };
         Ok((SymbolSection::Index(shndx), object::elf::STT_NOTYPE))
     }

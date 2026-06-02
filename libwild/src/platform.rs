@@ -448,7 +448,7 @@ pub(crate) trait Platform:
     /// what we did wrong. Can optionally return a more helpful error.
     fn verify_resolution_allocation(
         _output_sections: &OutputSections<Self>,
-        _output_order: &OutputOrder,
+        _output_order: &OutputOrder<'_>,
         _output_kind: OutputKind,
         _mem_sizes: &OutputSectionPartMap<u64>,
         _resolution: &layout::Resolution<Self>,
@@ -700,7 +700,7 @@ pub(crate) trait Platform:
         output_kind: OutputKind,
         output_sections: &OutputSections<'data, Self>,
         secondary: &OutputSectionMap<Vec<OutputSectionId>>,
-    ) -> (OutputOrder, ProgramSegments<Self::ProgramSegmentDef>);
+    ) -> (OutputOrder<'data>, ProgramSegments<Self::ProgramSegmentDef>);
 
     fn will_emit_section_symbol_for_partial_objects(
         _output_sections: &OutputSections<Self>,

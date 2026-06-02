@@ -1464,7 +1464,7 @@ impl platform::Platform for MachO {
             Vec<crate::output_section_id::OutputSectionId>,
         >,
     ) -> (
-        crate::output_section_id::OutputOrder,
+        crate::output_section_id::OutputOrder<'data>,
         crate::program_segments::ProgramSegments<Self::ProgramSegmentDef>,
     ) {
         let mut builder = OutputOrderBuilder::<Self>::new(output_kind, output_sections, secondary);
