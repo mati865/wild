@@ -54,6 +54,7 @@ pub(crate) struct ProcessedLinkerScript<'data, P: Platform> {
     /// `AssertCommand::remainder` when reporting errors.
     pub(crate) file_bytes: &'data [u8],
     pub(crate) memory_regions: Vec<crate::linker_script::MemoryRegion<'data>>,
+    pub(crate) program_headers: Vec<crate::linker_script::Phdr<'data>>,
 }
 
 #[derive(Debug)]

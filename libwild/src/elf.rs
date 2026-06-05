@@ -13,9 +13,11 @@ use crate::ensure;
 use crate::error;
 use crate::error::Context as _;
 use crate::error::Result;
+use crate::expression_eval;
 use crate::file_kind::FileKind;
 use crate::file_writer::copy_section_data;
 use crate::grouping::Group;
+use crate::grouping::SequencedLinkerScript;
 use crate::input_data::InputBytes;
 use crate::input_data::InputRef;
 use crate::layout;
@@ -967,6 +969,7 @@ impl platform::Platform for Elf {
                 min_alignment: d.min_alignment,
                 location: None,
                 secondary_order: None,
+                phdr_name: None,
             })
             .collect()
     }
@@ -1827,7 +1830,8 @@ impl platform::Platform for Elf {
         output_sections: &OutputSections<'data, Self>,
         secondary: &OutputSectionMap<Vec<OutputSectionId>>,
     ) -> (OutputOrder<'data>, ProgramSegments<Self::ProgramSegmentDef>) {
-        let mut builder = OutputOrderBuilder::<Self>::new(output_kind, output_sections, secondary);
+        let mut builder =
+            OutputOrderBuilder::<Self>::new(output_kind, output_sections, secondary, false);
 
         builder.add_section(output_section_id::FILE_HEADER);
         builder.add_section(output_section_id::PROGRAM_HEADERS);
@@ -1886,6 +1890,98 @@ impl platform::Platform for Elf {
         builder.add_section(output_section_id::STRTAB);
 
         builder.build()
+    }
+
+    fn build_custom_output_order_and_program_segments<'data>(
+        custom: &CustomSectionIds,
+        output_kind: OutputKind,
+        output_sections: &OutputSections<'data, Self>,
+        secondary: &OutputSectionMap<Vec<OutputSectionId>>,
+        linker_scripts: &[&SequencedLinkerScript<'data, Self>],
+        phdr_map: &mut hashbrown::HashMap<&[u8], Vec<OutputSectionId>>,
+    ) -> Result<(OutputOrder<'data>, ProgramSegments<Self::ProgramSegmentDef>)> {
+        let mut builder =
+            OutputOrderBuilder::<Self>::new(output_kind, output_sections, secondary, true);
+
+        let mut insert_re = false;
+        let mut insert_rw = false;
+        let mut insert_r = false;
+        let mut first_load = false;
+
+        for script in linker_scripts {
+            for phdr in &script.parsed.program_headers {
+                let ptype = expression_eval::evaluate_const(&phdr.ptype)?;
+                let flags = phdr
+                    .flags
+                    .as_ref()
+                    .map(|f| expression_eval::evaluate_const(f).map(|c| c as u32))
+                    .transpose()?;
+                if let Some(sections) = phdr_map.get_mut(phdr.name) {
+                    let flags = flags
+                        .or_else(|| {
+                            let section_info =
+                                output_sections.section_infos.get(*sections.first()?);
+                            let flags = section_info.section_attributes.flags();
+                            let mut pflags = SegmentFlags(0);
+                            if flags.contains(shf::ALLOC) {
+                                pflags |= pf::READABLE;
+                            }
+                            if flags.contains(shf::WRITE) {
+                                pflags |= pf::WRITABLE;
+                            }
+                            if flags.contains(shf::EXECINSTR) {
+                                pflags |= pf::EXECUTABLE;
+                            }
+                            Some(pflags.0)
+                        })
+                        .unwrap_or(0);
+                    if ptype == 1 && !first_load {
+                        sections.splice(
+                            0..0,
+                            [
+                                output_section_id::FILE_HEADER,
+                                output_section_id::PROGRAM_HEADERS,
+                                output_section_id::SECTION_HEADERS,
+                            ],
+                        );
+                        first_load = true;
+                    };
+                    if ptype == 1 {
+                        let is_write = (flags & 2) != 0;
+                        let is_exec = (flags & 1) != 0;
+
+                        if is_exec && !is_write && !insert_re {
+                            sections.extend(&custom.exec);
+                            insert_re = true;
+                        }
+                        if is_write && !insert_rw {
+                            sections.extend(&custom.tdata);
+                            sections.extend(&custom.tbss);
+                            sections.extend(&custom.data);
+                            sections.extend(&custom.bss);
+                            insert_rw = true;
+                        }
+                        if !is_write && !is_exec && !insert_r {
+                            sections.extend(&custom.ro);
+                            insert_r = true;
+                        }
+                    }
+
+                    builder.add_segment_with_sections(
+                        ptype as u32,
+                        flags,
+                        sections,
+                        output_sections,
+                    );
+                }
+            }
+        }
+
+        for &id in &custom.nonalloc {
+            builder.add_section(id);
+        }
+
+        Ok(builder.build())
     }
 
     fn will_emit_section_symbol_for_partial_objects(
@@ -4365,6 +4461,13 @@ impl platform::ProgramSegmentDef for ProgramSegmentDef {
 
     fn should_cut_rw_segment_when_ending(self) -> bool {
         self.segment_type == pt::GNU_RELRO
+    }
+
+    fn from_linker_script(ptype: u32, flags: u32) -> Self {
+        Self {
+            segment_type: SegmentType(ptype),
+            segment_flags: SegmentFlags(flags),
+        }
     }
 }
 

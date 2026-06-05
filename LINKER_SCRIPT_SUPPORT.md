@@ -57,6 +57,7 @@ end lists the features required to link the Linux kernel.
 | `BYTE(expr)`, `SHORT(expr)`, `LONG(expr)`, `QUAD(expr)` output data | ❌ | |
 | `SUBALIGN(n)` forced input alignment | ❌ | |
 | `ONLY_IF_RO` / `ONLY_IF_RW` output section constraints | ❌ | |
+| `:phdr` output section phdrs | 🧪 | Only a single `:phdr` specifier is supported per output section. |
 
 ## Expressions and Functions
 
@@ -119,7 +120,7 @@ see at a glance what remains before Wild can link the kernel.
 | `SORT_BY_NAME(...)`, `SORT_BY_ALIGNMENT(...)`, `SORT_BY_INIT_PRIORITY(...)` | 📅 | |
 | `EXCLUDE_FILE(...)` inside input section matchers | 📅 | |
 | `CONSTRUCTORS` command | 📅 | |
-| `PHDRS` command for explicit program header definition | 📅 | |
+| `PHDRS` command for explicit program header definition | 🧪 | The FILEHDR and PHDRS keywords aren't yet supported. |
 | Ternary operator (`condition ? a : b`) | 📅 | |
 | `DEFINED(sym)` function | 📅 | |
 | `SIZEOF_HEADERS` built-in symbol | 📅 | |

@@ -204,6 +204,50 @@ pub(crate) fn evaluate_expression<'data, P: Platform>(
     }
 }
 
+pub(crate) fn evaluate_const<'data>(expr: &Expression<'data>) -> Result<u64> {
+    match expr {
+        Expression::Number(n) => Ok(*n),
+        Expression::Add(l, r) => Ok(evaluate_const(l)?.wrapping_add(evaluate_const(r)?)),
+        Expression::Subtract(l, r) => Ok(evaluate_const(l)?.wrapping_sub(evaluate_const(r)?)),
+        Expression::Multiply(l, r) => Ok(evaluate_const(l)?.wrapping_mul(evaluate_const(r)?)),
+        Expression::Divide(l, r) => {
+            let divisor = evaluate_const(r)?;
+            if divisor == 0 {
+                bail!("Division by zero in linker script expression");
+            }
+            Ok(evaluate_const(l)?.wrapping_div(divisor))
+        }
+        Expression::LessThan(l, r) => Ok(u64::from(evaluate_const(l)? < evaluate_const(r)?)),
+        Expression::GreaterThan(l, r) => Ok(u64::from(evaluate_const(l)? > evaluate_const(r)?)),
+        Expression::LessEqual(l, r) => Ok(u64::from(evaluate_const(l)? <= evaluate_const(r)?)),
+        Expression::GreaterEqual(l, r) => Ok(u64::from(evaluate_const(l)? >= evaluate_const(r)?)),
+        Expression::Equal(l, r) => Ok(u64::from(evaluate_const(l)? == evaluate_const(r)?)),
+        Expression::NotEqual(l, r) => Ok(u64::from(evaluate_const(l)? != evaluate_const(r)?)),
+        Expression::Min(l, r) => Ok(evaluate_const(l)?.min(evaluate_const(r)?)),
+        Expression::Max(l, r) => Ok(evaluate_const(l)?.max(evaluate_const(r)?)),
+        Expression::BitwiseAnd(l, r) => Ok(evaluate_const(l)? & evaluate_const(r)?),
+        Expression::BitwiseOr(l, r) => Ok(evaluate_const(l)? | evaluate_const(r)?),
+        Expression::BitwiseXor(l, r) => Ok(evaluate_const(l)? ^ evaluate_const(r)?),
+        Expression::LeftShift(l, r) => {
+            Ok(evaluate_const(l)?.wrapping_shl(evaluate_const(r)? as u32))
+        }
+        Expression::RightShift(l, r) => {
+            Ok(evaluate_const(l)?.wrapping_shr(evaluate_const(r)? as u32))
+        }
+        Expression::LogicalAnd(l, r) => Ok(u64::from(
+            evaluate_const(l)? != 0 && evaluate_const(r)? != 0,
+        )),
+        Expression::LogicalOr(l, r) => Ok(u64::from(
+            evaluate_const(l)? != 0 || evaluate_const(r)? != 0,
+        )),
+        Expression::LogicalNot(expression) => Ok(u64::from(evaluate_const(expression)? == 0)),
+        Expression::BitwiseNot(expression) => Ok(!evaluate_const(expression)?),
+        Expression::Negate(expression) => Ok(evaluate_const(expression)?.wrapping_neg()),
+
+        _ => bail!("Expected constant expression"),
+    }
+}
+
 fn section_size<'data, P: Platform>(
     name: &[u8],
     section_layouts: &OutputSectionMap<OutputRecordLayout>,
@@ -602,6 +646,7 @@ mod tests {
                 assertions,
                 file_bytes: b"",
                 memory_regions: Vec::new(),
+                program_headers: Vec::new(),
             },
             symbol_id_range: SymbolIdRange::empty(),
             file_id: FileId::new(0, 0),

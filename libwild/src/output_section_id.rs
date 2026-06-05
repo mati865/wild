@@ -13,8 +13,10 @@
 //! related to `part_id.rs` and insert later in `SECTION_DEFINITIONS`, probably at the end so that
 //! you don't have to renumber. Also, update `NUM_BUILT_IN_REGULAR_SECTIONS`.
 
+use crate::Result;
 use crate::alignment::Alignment;
 use crate::alignment::NUM_ALIGNMENTS;
+use crate::grouping::SequencedLinkerScript;
 use crate::layout_rules::SectionKind;
 use crate::linker_script;
 use crate::linker_script::Expression;
@@ -192,6 +194,7 @@ pub(crate) struct OutputOrderBuilder<'scope, 'data, P: Platform> {
     output_sections: &'scope OutputSections<'data, P>,
     secondary: &'scope OutputSectionMap<Vec<OutputSectionId>>,
     output_kind: OutputKind,
+    has_custom_phdrs: bool,
 }
 
 impl<'scope, 'data, P: Platform> OutputOrderBuilder<'scope, 'data, P> {
@@ -199,6 +202,7 @@ impl<'scope, 'data, P: Platform> OutputOrderBuilder<'scope, 'data, P> {
         output_kind: OutputKind,
         output_sections: &'scope OutputSections<'data, P>,
         secondary: &'scope OutputSectionMap<Vec<OutputSectionId>>,
+        has_custom_phdrs: bool,
     ) -> Self {
         Self {
             events: Vec::new(),
@@ -207,6 +211,7 @@ impl<'scope, 'data, P: Platform> OutputOrderBuilder<'scope, 'data, P> {
             active_segment_kinds: vec![None; P::program_segment_defs().len()],
             secondary,
             output_kind,
+            has_custom_phdrs,
         }
     }
 
@@ -308,6 +313,10 @@ impl<'scope, 'data, P: Platform> OutputOrderBuilder<'scope, 'data, P> {
         let mut stop = Vec::new();
         let mut start = Vec::new();
 
+        if self.has_custom_phdrs {
+            return (stop, start);
+        }
+
         if self.output_kind.is_partial_object() {
             return (start, stop);
         }
@@ -360,6 +369,35 @@ impl<'scope, 'data, P: Platform> OutputOrderBuilder<'scope, 'data, P> {
         (stop, start)
     }
 
+    pub(crate) fn add_segment_with_sections(
+        &mut self,
+        ptype: u32,
+        pflags: u32,
+        sections: &[OutputSectionId],
+        output_sections: &OutputSections<'data, P>,
+    ) -> ProgramSegmentId {
+        let segment_id = self
+            .program_segments
+            .add_segment(P::ProgramSegmentDef::from_linker_script(ptype, pflags));
+        self.events.push(OrderEvent::SegmentStart(segment_id));
+        for section in sections {
+            let section_info = output_sections.section_infos.get(*section);
+            if let Some(location) = &section_info.location
+                && section_info.section_attributes.is_alloc()
+            {
+                self.events.push(OrderEvent::SetLocation(location.clone()));
+            }
+            self.events.push(OrderEvent::Section(*section));
+
+            let secondaries: &Vec<OutputSectionId> = self.secondary.get(*section);
+            for sid in secondaries {
+                self.events.push(OrderEvent::Section(*sid));
+            }
+        }
+        self.events.push(OrderEvent::SegmentEnd(segment_id));
+        segment_id
+    }
+
     pub(crate) fn add_sections(&mut self, sections: &[OutputSectionId]) {
         for section in sections {
             self.add_section(*section);
@@ -371,7 +409,7 @@ impl<'scope, 'data, P: Platform> OutputOrderBuilder<'scope, 'data, P> {
             self.events.push(OrderEvent::SegmentEnd(segment_id));
         }
 
-        if !self.output_kind.is_partial_object() {
+        if !self.output_kind.is_partial_object() && !self.has_custom_phdrs {
             for def in P::unconditional_segment_defs() {
                 let segment_id = self.program_segments.add_segment(*def);
                 self.events.push(OrderEvent::SegmentStart(segment_id));
@@ -464,6 +502,7 @@ pub(crate) struct SectionOutputInfo<'data, P: Platform> {
     pub(crate) min_alignment: Alignment,
     pub(crate) location: Option<linker_script::Expression<'data>>,
     pub(crate) secondary_order: Option<SecondaryOrder>,
+    pub(crate) phdr_name: Option<&'data [u8]>,
 }
 
 impl OutputSectionId {
@@ -601,7 +640,7 @@ impl<'data, P: Platform> OutputSections<'data, P> {
             let location = args
                 .start_address_for_section(custom.name)
                 .map(linker_script::Expression::Number);
-            let section_id = self.add_named_section(custom.name, custom.alignment, location);
+            let section_id = self.add_named_section(custom.name, custom.alignment, location, None);
 
             section_part_ids[custom.index.0] = section_id.part_id_with_alignment(custom.alignment);
         }
@@ -628,6 +667,7 @@ impl<'data, P: Platform> OutputSections<'data, P> {
         name: SectionName<'data>,
         min_alignment: Alignment,
         location: Option<linker_script::Expression<'data>>,
+        phdr_name: Option<&'data [u8]>,
     ) -> OutputSectionId {
         *self.custom_by_name.entry(name).or_insert_with(|| {
             self.section_infos.add_new(SectionOutputInfo {
@@ -638,6 +678,7 @@ impl<'data, P: Platform> OutputSections<'data, P> {
                 min_alignment,
                 location,
                 secondary_order: None,
+                phdr_name,
             })
         })
     }
@@ -655,6 +696,7 @@ impl<'data, P: Platform> OutputSections<'data, P> {
             min_alignment,
             location: None,
             secondary_order,
+            phdr_name: None,
         })
     }
 
@@ -701,20 +743,45 @@ impl<'data, P: Platform> OutputSections<'data, P> {
     pub(crate) fn output_order(
         &self,
         output_kind: OutputKind,
-    ) -> (OutputOrder<'data>, ProgramSegments<P::ProgramSegmentDef>) {
+        linker_scripts: &[&SequencedLinkerScript<'data, P>],
+    ) -> Result<(OutputOrder<'data>, ProgramSegments<P::ProgramSegmentDef>)> {
         timing_phase!("Compute output order");
+
+        let has_custom_phdrs = linker_scripts
+            .iter()
+            .any(|s| !s.parsed.program_headers.is_empty());
 
         let mut custom = CustomSectionIds::default();
 
         let mut secondary: OutputSectionMap<Vec<OutputSectionId>> = self.new_section_map();
+
+        let mut phdr_map: Option<HashMap<&[u8], Vec<OutputSectionId>>> =
+            has_custom_phdrs.then(HashMap::new);
 
         self.section_infos.for_each(|id, info| {
             if let SectionKind::Secondary(primary) = info.kind {
                 secondary.get_mut(primary).push(id);
                 return;
             }
-            if id.as_usize() < NUM_BUILT_IN_SECTIONS {
-                return;
+
+            if has_custom_phdrs {
+                if let Some(phdr_name) = info.phdr_name {
+                    phdr_map
+                        .as_mut()
+                        .unwrap()
+                        .entry(phdr_name)
+                        .or_default()
+                        .push(id);
+                    return;
+                }
+
+                if id == FILE_HEADER || id == PROGRAM_HEADERS || id == SECTION_HEADERS {
+                    return;
+                }
+            } else {
+                if id.as_usize() < NUM_BUILT_IN_SECTIONS {
+                    return;
+                }
             }
 
             if info.section_attributes.is_executable() {
@@ -738,7 +805,23 @@ impl<'data, P: Platform> OutputSections<'data, P> {
             }
         });
 
-        P::build_output_order_and_program_segments(&custom, output_kind, self, &secondary)
+        if has_custom_phdrs {
+            P::build_custom_output_order_and_program_segments(
+                &custom,
+                output_kind,
+                self,
+                &secondary,
+                linker_scripts,
+                &mut phdr_map.unwrap(),
+            )
+        } else {
+            Ok(P::build_output_order_and_program_segments(
+                &custom,
+                output_kind,
+                self,
+                &secondary,
+            ))
+        }
     }
 
     #[must_use]
@@ -855,6 +938,7 @@ impl<'data, P: Platform> OutputSections<'data, P> {
             output_sections.add_named_section(
                 SectionName(name.as_bytes()),
                 crate::alignment::MIN,
+                None,
                 None,
             )
         };

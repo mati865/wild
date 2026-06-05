@@ -4,6 +4,7 @@ use crate::alignment::Alignment;
 use crate::bail;
 use crate::error::Warning;
 use crate::grouping::Group;
+use crate::grouping::SequencedLinkerScript;
 use crate::input_data::FileLoader;
 use crate::input_data::InputBytes;
 use crate::input_data::InputRef;
@@ -702,6 +703,22 @@ pub(crate) trait Platform:
         secondary: &OutputSectionMap<Vec<OutputSectionId>>,
     ) -> (OutputOrder<'data>, ProgramSegments<Self::ProgramSegmentDef>);
 
+    fn build_custom_output_order_and_program_segments<'data>(
+        custom: &CustomSectionIds,
+        output_kind: OutputKind,
+        output_sections: &OutputSections<'data, Self>,
+        secondary: &OutputSectionMap<Vec<OutputSectionId>>,
+        _linker_scripts: &[&SequencedLinkerScript<'data, Self>],
+        _phdr_map: &mut hashbrown::HashMap<&[u8], Vec<OutputSectionId>>,
+    ) -> Result<(OutputOrder<'data>, ProgramSegments<Self::ProgramSegmentDef>)> {
+        Ok(Self::build_output_order_and_program_segments(
+            custom,
+            output_kind,
+            output_sections,
+            secondary,
+        ))
+    }
+
     fn will_emit_section_symbol_for_partial_objects(
         _output_sections: &OutputSections<Self>,
         _section_id: OutputSectionId,
@@ -1146,6 +1163,10 @@ pub(crate) trait ProgramSegmentDef: Copy + Send + Sync + Display + 'static {
     /// Returns whether the current RW segment should end when this segment ends.
     fn should_cut_rw_segment_when_ending(self) -> bool {
         false
+    }
+
+    fn from_linker_script(_ptype: u32, _flags: u32) -> Self {
+        unreachable!("This function is only called from platforms that support linker scripts.");
     }
 }
 

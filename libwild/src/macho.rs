@@ -1189,6 +1189,7 @@ impl platform::Platform for MachO {
                 min_alignment: d.min_alignment,
                 location: None,
                 secondary_order: None,
+                phdr_name: None,
             })
             .collect()
     }
@@ -1467,7 +1468,8 @@ impl platform::Platform for MachO {
         crate::output_section_id::OutputOrder<'data>,
         crate::program_segments::ProgramSegments<Self::ProgramSegmentDef>,
     ) {
-        let mut builder = OutputOrderBuilder::<Self>::new(output_kind, output_sections, secondary);
+        let mut builder =
+            OutputOrderBuilder::<Self>::new(output_kind, output_sections, secondary, false);
 
         // File header and all load commands.
         builder.add_section(output_section_id::FILE_HEADER);

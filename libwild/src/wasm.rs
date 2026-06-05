@@ -1593,6 +1593,7 @@ impl platform::Platform for Wasm {
                 min_alignment: crate::alignment::MIN,
                 location: None,
                 secondary_order: None,
+                phdr_name: None,
             })
             .collect()
     }
@@ -1815,6 +1816,7 @@ impl platform::Platform for Wasm {
             output_kind,
             output_sections,
             secondary,
+            false,
         );
 
         builder.add_section(osid::FILE_HEADER);

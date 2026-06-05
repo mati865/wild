@@ -157,6 +157,7 @@ impl<'data> LayoutRulesBuilder<'data> {
         let mut symbol_defs = Vec::new();
         let mut assertions = Vec::new();
         let mut memory_regions = Vec::new();
+        let mut program_headers = Vec::new();
 
         let mut current_section_id = None;
         let mut loc = SymbolLoc::FirstSection;
@@ -227,6 +228,7 @@ impl<'data> LayoutRulesBuilder<'data> {
                                 SectionName(sec.output_section_name),
                                 min_alignment,
                                 section_location,
+                                sec.phdr,
                             );
                             current_section_id = Some(primary_section_id);
                             loc = SymbolLoc::SectionEnd(primary_section_id);
@@ -332,6 +334,8 @@ impl<'data> LayoutRulesBuilder<'data> {
                 assertions.push(assert_cmd.clone());
             } else if let linker_script::Command::Memory(regions) = cmd {
                 memory_regions = regions.clone();
+            } else if let linker_script::Command::Phdrs(phdrs) = cmd {
+                program_headers = phdrs.clone();
             }
         }
 
@@ -344,6 +348,7 @@ impl<'data> LayoutRulesBuilder<'data> {
             },
             file_bytes: input.script_bytes,
             memory_regions,
+            program_headers,
         })
     }
 

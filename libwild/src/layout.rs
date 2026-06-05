@@ -16,6 +16,7 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::file_writer;
 use crate::grouping::Group;
+use crate::grouping::SequencedLinkerScript;
 use crate::input_data::FileId;
 use crate::input_data::InputRef;
 use crate::input_data::PRELUDE_FILE_ID;
@@ -197,7 +198,18 @@ pub fn compute<'data, P: Platform, A: Arch<Platform = P>>(
 
     propagate_section_attributes(&group_states, &mut output_sections);
 
-    let (output_order, program_segments) = output_sections.output_order(symbol_db.output_kind);
+    let linker_scripts: Vec<&SequencedLinkerScript<P>> = symbol_db
+        .groups
+        .iter()
+        .filter_map(|group| match group {
+            Group::LinkerScripts(scripts) => Some(scripts),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+
+    let (output_order, program_segments) =
+        output_sections.output_order(symbol_db.output_kind, &linker_scripts)?;
 
     tracing::trace!(
         "Output order:\n{}",
@@ -233,17 +245,8 @@ pub fn compute<'data, P: Platform, A: Arch<Platform = P>>(
         &symbol_db,
     );
 
-    let memory_regions: Vec<crate::linker_script::MemoryRegion<'_>> = symbol_db
-        .groups
+    let memory_regions: Vec<crate::linker_script::MemoryRegion<'_>> = linker_scripts
         .iter()
-        .filter_map(|g| {
-            if let crate::grouping::Group::LinkerScripts(scripts) = g {
-                Some(scripts)
-            } else {
-                None
-            }
-        })
-        .flatten()
         .flat_map(|s| s.parsed.memory_regions.iter().cloned())
         .collect();
 
@@ -5271,10 +5274,14 @@ fn test_no_disallowed_overlaps() {
     use crate::output_section_id::OrderEvent;
 
     let mut output_sections = OutputSections::<Elf>::with_base_address(0x1000);
-    let (output_order, program_segments) =
-        output_sections.output_order(crate::output_kind::OutputKind::StaticExecutable(
-            crate::args::RelocationModel::NonRelocatable,
-        ));
+    let (output_order, program_segments) = output_sections
+        .output_order(
+            crate::output_kind::OutputKind::StaticExecutable(
+                crate::args::RelocationModel::NonRelocatable,
+            ),
+            &[],
+        )
+        .unwrap();
     let mut args = crate::args::elf::ElfArgs::default();
     if args.arch == crate::arch::Architecture::Unsupported {
         args.arch = crate::arch::Architecture::X86_64;
@@ -5403,7 +5410,7 @@ fn verify_consistent_allocation_handling<P: Platform>(
     args: &P::Args,
 ) -> Result {
     let output_sections = OutputSections::with_base_address(0);
-    let (output_order, _program_segments) = output_sections.output_order(output_kind);
+    let (output_order, _program_segments) = output_sections.output_order(output_kind, &[])?;
     let mut mem_sizes = output_sections.new_part_map();
     P::allocate_resolution(flags, &mut mem_sizes, output_kind, args);
     let mut memory_offsets = output_sections.new_part_map();

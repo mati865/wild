@@ -7,6 +7,7 @@ use crate::args::Modifiers;
 use crate::error;
 use crate::error::Context as _;
 use crate::error::Result;
+use object::Wrap;
 use std::path::Path;
 use winnow::BStr;
 use winnow::Parser as _;
@@ -74,6 +75,7 @@ pub(crate) enum Command<'a> {
     Provide(ProvideSymbolDefinition<'a>),
     Assert(AssertCommand<'a>),
     Memory(Vec<MemoryRegion<'a>>),
+    Phdrs(Vec<Phdr<'a>>),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -102,6 +104,7 @@ pub(crate) struct Section<'a> {
     pub(crate) commands: Vec<ContentsCommand<'a>>,
     pub(crate) alignment: Option<Alignment>,
     pub(crate) start_address_expression: Option<Expression<'a>>,
+    pub(crate) phdr: Option<&'a [u8]>,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -148,6 +151,13 @@ impl<'a> PartialEq for AssertCommand<'a> {
 }
 
 impl<'a> Eq for AssertCommand<'a> {}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub(crate) struct Phdr<'a> {
+    pub(crate) name: &'a [u8],
+    pub(crate) ptype: Expression<'a>,
+    pub(crate) flags: Option<Expression<'a>>,
+}
 
 /// Represents a parsed expression in linker scripts (e.g., in ASSERT commands).
 ///
@@ -357,6 +367,7 @@ fn parse_command<'input>(input: &mut &'input BStr) -> winnow::Result<Command<'in
         b"PROVIDE_HIDDEN" => Command::Provide(parse_provide(input, true)?),
         b"ASSERT" => Command::Assert(parse_assert(input)?),
         b"MEMORY" => Command::Memory(parse_memory(input)?),
+        b"PHDRS" => Command::Phdrs(parse_phdrs(input)?),
         other => {
             if input.starts_with(b"=") {
                 // Symbol definition
@@ -470,6 +481,66 @@ fn parse_memory<'input>(input: &mut &'input BStr) -> winnow::Result<Vec<MemoryRe
     skip_comments_and_whitespace(input)?;
 
     Ok(regions)
+}
+
+fn parse_phdr<'input>(input: &mut &'input BStr) -> winnow::Result<Phdr<'input>> {
+    let name = parse_token(input)?;
+    skip_comments_and_whitespace(input)?;
+
+    let ptype = if input.starts_with(b"PT_") {
+        let ptype_str = parse_token(input)?;
+
+        match ptype_str {
+            b"PT_NULL" => Expression::Number(object::elf::PT_NULL.into_inner().into()),
+            b"PT_LOAD" => Expression::Number(object::elf::PT_LOAD.into_inner().into()),
+            b"PT_DYNAMIC" => Expression::Number(object::elf::PT_DYNAMIC.into_inner().into()),
+            b"PT_INTERP" => Expression::Number(object::elf::PT_INTERP.into_inner().into()),
+            b"PT_NOTE" => Expression::Number(object::elf::PT_NOTE.into_inner().into()),
+            b"PT_SHLIB" => Expression::Number(object::elf::PT_SHLIB.into_inner().into()),
+            b"PT_PHDR" => Expression::Number(object::elf::PT_PHDR.into_inner().into()),
+            b"PT_TLS" => Expression::Number(object::elf::PT_TLS.into_inner().into()),
+            b"PT_GNU_EH_FRAME" => {
+                Expression::Number(object::elf::PT_GNU_EH_FRAME.into_inner().into())
+            }
+            b"PT_GNU_STACK" => Expression::Number(object::elf::PT_GNU_STACK.into_inner().into()),
+            b"PT_GNU_RELRO" => Expression::Number(object::elf::PT_GNU_RELRO.into_inner().into()),
+            b"PT_GNU_PROPERTY" => {
+                Expression::Number(object::elf::PT_GNU_PROPERTY.into_inner().into())
+            }
+            b"PT_GNU_SFRAME" => Expression::Number(object::elf::PT_GNU_SFRAME.into_inner().into()),
+            _ => {
+                return Err(ContextError::default());
+            }
+        }
+    } else {
+        parse_expression.parse_next(input)?
+    };
+
+    skip_comments_and_whitespace(input)?;
+
+    let flags = if opt("FLAGS").parse_next(input)?.is_some() {
+        '('.parse_next(input)?;
+        let flags = Some(parse_expression.parse_next(input)?);
+        ')'.parse_next(input)?;
+        skip_comments_and_whitespace(input)?;
+        flags
+    } else {
+        None
+    };
+
+    opt(';').parse_next(input)?;
+    skip_comments_and_whitespace(input)?;
+
+    Ok(Phdr { name, ptype, flags })
+}
+
+fn parse_phdrs<'input>(input: &mut &'input BStr) -> winnow::Result<Vec<Phdr<'input>>> {
+    '{'.parse_next(input)?;
+    skip_comments_and_whitespace(input)?;
+    let (phdrs, _) = repeat_till(0.., parse_phdr, '}').parse_next(input)?;
+    skip_comments_and_whitespace(input)?;
+
+    Ok(phdrs)
 }
 
 /// Parse an expression - entry point for expression parsing
@@ -1004,11 +1075,20 @@ fn parse_section_command<'input>(
 
     skip_comments_and_whitespace(input)?;
 
+    let phdr = if opt(":").parse_next(input)?.is_some() {
+        Some(parse_token(input)?)
+    } else {
+        None
+    };
+
+    skip_comments_and_whitespace(input)?;
+
     Ok(SectionCommand::Section(Section {
         output_section_name: name,
         commands,
         alignment,
         start_address_expression,
+        phdr,
     }))
 }
 
@@ -1335,6 +1415,7 @@ mod tests {
                 ],
                 alignment: None,
                 start_address_expression: None,
+                phdr: None,
             }),
         );
     }
@@ -1352,6 +1433,7 @@ mod tests {
                 })],
                 alignment: Some(Alignment::new(8).unwrap()),
                 start_address_expression: Some(Expression::Number(0)),
+                phdr: None,
             }),
         );
     }
@@ -1407,6 +1489,7 @@ mod tests {
                                 ],
                                 alignment: Some(Alignment::new(8).unwrap()),
                                 start_address_expression: None,
+                                phdr: None,
                             }),
                         ],
                     }),
@@ -1543,6 +1626,7 @@ mod tests {
                 ],
                 alignment: None,
                 start_address_expression: None,
+                phdr: None,
             }),
         );
     }
@@ -1560,6 +1644,7 @@ mod tests {
                 })],
                 alignment: None,
                 start_address_expression: None,
+                phdr: None,
             }),
         );
     }
@@ -1577,6 +1662,7 @@ mod tests {
                 })],
                 alignment: None,
                 start_address_expression: None,
+                phdr: None,
             }),
         );
     }
@@ -1602,6 +1688,7 @@ mod tests {
                             })],
                             alignment: None,
                             start_address_expression: None,
+                            phdr: None,
                         })],
                     }),
                     Command::Assert(AssertCommand {
@@ -1638,6 +1725,7 @@ mod tests {
                             })],
                             alignment: None,
                             start_address_expression: None,
+                            phdr: None,
                         }),
                         SectionCommand::Assert(AssertCommand {
                             expression: Expression::LessThan(
