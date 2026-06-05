@@ -57,8 +57,8 @@
 //! ExpectLoadAlignment:{alignment} {alignment} ... Checks that the first N PT_LOAD segments in the
 //! output binary have the specified alignment.
 //!
-//! ExpectProgramHeader:{type} Checks that the output binary contains a program header of the
-//! specified type.
+//! ExpectProgramHeader:{type} [Program Header properties] Checks that the output binary contains a
+//! program header of the specified type. See Program Header properties below.
 //!
 //! NoProgramHeader:{type} Checks that the output binary contains no program headers of the
 //! specified type.
@@ -226,9 +226,27 @@
 //! STB_GLOBAL or STB_WEAK).
 //!
 //! line={num} Parses debug info to check that the symbol is on the line specified.
+//!
+//! ## Program Header properties
+//!
+//! This describes the format of program header properties, which can be supplied to
+//! `ExpectProgramHeader`.
+//!
+//! A comma-separated list of key value pairs. Note, commas should not have spaces after them.
+//!
+//! Example: `//#ExpectProgramHeader:LOAD flags=R,sections=[.rodata,.text]`
+//!
+//! flags=R|W|X: Type: bitflags. Asserts the flags of the program header (PF_R, PF_W, PF_X) This can
+//! also be any combination of the flags together.
+//!
+//! sections=["section-name", ...]: Type: string. Asserts the names of the sections which are
+//! included in the program header's segment. By default, the list of sections given and the
+//! sections in the segment must exactly match, unless the '*' wildcard is included, in which case
+//! the segment may have more sections than what is listed.
 
 mod external_tests;
 
+use bitflags::bitflags;
 use itertools::Itertools;
 use libloading::Library;
 use libtest_mimic::Trial;
@@ -877,6 +895,41 @@ enum ProgramHeaderType {
     Tls = object::elf::PT_TLS.0,
 }
 
+bitflags! {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+    struct ProgramHeaderFlags: u32 {
+        const X = object::elf::PF_X.0;
+        const W = object::elf::PF_W.0;
+        const R = object::elf::PF_R.0;
+    }
+}
+
+impl ProgramHeaderFlags {
+    fn deserialize<'de, D>(d: D) -> Result<Option<Self>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(d)?;
+
+        let mut flags = Self::empty();
+
+        for c in s.chars() {
+            match c {
+                'R' => flags |= Self::R,
+                'W' => flags |= Self::W,
+                'X' => flags |= Self::X,
+                _ => {
+                    return Err(serde::de::Error::custom(
+                        "Invalid character in ProgramHeaderFlags",
+                    ));
+                }
+            }
+        }
+
+        Ok(Some(flags))
+    }
+}
+
 #[derive(Debug, Clone)]
 struct ErrorMatcher {
     regex: regex::Regex,
@@ -1204,7 +1257,7 @@ struct Assertions {
     expected_section_bytes: Vec<ExpectedSectionBytes>,
     output_file_matches: Vec<OutputFileMatch>,
     max_thunks: u64,
-    expected_program_headers: Vec<ProgramHeaderType>,
+    expected_program_headers: Vec<ExpectedProgramHeaders>,
     absent_program_headers: Vec<ProgramHeaderType>,
 }
 
@@ -1259,6 +1312,39 @@ impl ExpectedSymtabEntry {
         let assertions = serde_keyvalue::from_key_values(config_str)?;
         Ok(Self {
             name: name.to_owned(),
+            assertions,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExpectedProgramHeaders {
+    ptype: ProgramHeaderType,
+    assertions: PhdrAssertions,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct PhdrAssertions {
+    #[serde(deserialize_with = "ProgramHeaderFlags::deserialize", default)]
+    flags: Option<ProgramHeaderFlags>,
+
+    #[serde(default)]
+    sections: Vec<String>,
+}
+
+impl ExpectedProgramHeaders {
+    fn parse(s: &str) -> Result<Self> {
+        let Some((ptype, config_str)) = s.split_once(' ') else {
+            return Ok(Self {
+                ptype: s.parse()?,
+                assertions: Default::default(),
+            });
+        };
+
+        let assertions = serde_keyvalue::from_key_values(config_str)?;
+        Ok(Self {
+            ptype: ptype.parse()?,
             assertions,
         })
     }
@@ -1562,10 +1648,10 @@ fn process_directive(
                 alignments.collect::<Result<Vec<u64>>>()?;
         }
         "ExpectProgramHeader" => {
-            let header_type: ProgramHeaderType = arg
-                .parse()
-                .with_context(|| format!("Invalid program header type `{arg}`"))?;
-            config.assertions.expected_program_headers.push(header_type);
+            config
+                .assertions
+                .expected_program_headers
+                .push(ExpectedProgramHeaders::parse(arg)?);
         }
         "NoProgramHeader" => {
             let header_type: ProgramHeaderType = arg
@@ -3790,15 +3876,67 @@ impl Assertions {
         }
 
         let endian = obj.endian();
-        let mut header_types = HashSet::new();
 
-        for header in obj.elf_program_headers() {
+        let headers = obj.elf_program_headers();
+        let mut header_sections = Vec::with_capacity(headers.len());
+        let mut header_types = HashSet::new();
+        for header in headers {
+            header_sections.push(self.get_sections_in_segment(obj, header));
             header_types.insert(header.p_type(endian).0);
         }
 
-        for header in &self.expected_program_headers {
-            if !header_types.contains(&(*header as u32)) {
-                bail!("Expected program header `{header}' not found.");
+        for expected in &self.expected_program_headers {
+            let mut found = false;
+            for (header, actual_sections) in headers.iter().zip(&header_sections) {
+                if header.p_type(endian).0 == expected.ptype as u32 {
+                    let flags = expected.assertions.flags;
+                    let expected_sections = &expected.assertions.sections;
+                    if flags.is_none() && expected_sections.is_empty() {
+                        found = true;
+                        continue;
+                    }
+
+                    if let Some(expected_flags) = flags
+                        && header.p_flags(endian).0 != expected_flags.bits()
+                    {
+                        continue;
+                    }
+
+                    if !expected_sections.is_empty() {
+                        let mut has_wildcard = false;
+                        let mut sections_found = 0;
+
+                        for section in expected_sections {
+                            if section == "*" {
+                                sections_found += 1;
+                                has_wildcard = true;
+                                continue;
+                            }
+                            if actual_sections.contains(&section.as_str()) {
+                                sections_found += 1;
+                            }
+                        }
+
+                        if sections_found == expected_sections.len()
+                            && (has_wildcard || actual_sections.len() == expected_sections.len())
+                        {
+                            found = true;
+                            break;
+                        }
+                    } else {
+                        found = true;
+                        break;
+                    }
+                }
+            }
+
+            if !found {
+                bail!(
+                    "Expected program header `{}' with flags {:?} and sections {:?} not found.",
+                    expected.ptype,
+                    expected.assertions.flags,
+                    expected.assertions.sections,
+                );
             }
         }
 
@@ -3809,6 +3947,54 @@ impl Assertions {
         }
 
         Ok(())
+    }
+
+    fn get_sections_in_segment<'data>(
+        &self,
+        obj: &object::read::elf::ElfFile64<'data, object::Endianness>,
+        header: &object::elf::ProgramHeader64<object::Endianness>,
+    ) -> HashSet<&'data str> {
+        let endian = obj.endian();
+        let p_vaddr = header.p_vaddr(endian);
+        let p_memsz = header.p_memsz(endian);
+        let p_offset = header.p_offset(endian);
+        let p_filesz = header.p_filesz(endian);
+
+        let mut sections = HashSet::new();
+        for section in obj.sections() {
+            let Ok(name) = section.name() else {
+                continue;
+            };
+
+            let sh_addr = section.address();
+            let sh_size = section.size();
+            let Some((sh_offset, sh_filesz)) = section.file_range() else {
+                continue;
+            };
+
+            let is_alloc = match section.flags() {
+                object::SectionFlags::Elf { sh_flags, .. } => {
+                    (sh_flags.0 & object::elf::SHF_ALLOC.0) != 0
+                }
+                _ => section.flags() != object::SectionFlags::None,
+            };
+
+            if !is_alloc {
+                continue;
+            }
+
+            let in_mem =
+                sh_addr >= p_vaddr && sh_addr + sh_size <= p_vaddr + p_memsz && p_memsz > 0;
+            let in_file = sh_offset >= p_offset
+                && sh_offset + sh_filesz <= p_offset + p_filesz
+                && p_filesz > 0
+                && sh_filesz > 0;
+
+            if in_mem || in_file {
+                sections.insert(name);
+            }
+        }
+        sections
     }
 
     /// Returns whether we have assertions configured that require metrics to be enabled. Even if
