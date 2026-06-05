@@ -1158,6 +1158,7 @@ pub(crate) trait ProgramSegmentDef: Copy + Send + Sync + Display + 'static {
         self,
         section_info: &crate::output_section_id::SectionOutputInfo<Self::Platform>,
         section_id: OutputSectionId,
+        rosegment: bool,
     ) -> bool;
 
     /// Returns whether the current RW segment should end when this segment ends.
@@ -1241,6 +1242,10 @@ pub(crate) trait Args: std::fmt::Debug + Send + Sync + 'static {
 
     fn should_relax(&self) -> bool {
         false
+    }
+
+    fn rosegment(&self) -> bool {
+        true
     }
 
     fn should_emit_got_plt_syms(&self) -> bool {
