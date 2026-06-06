@@ -14,10 +14,6 @@
 //#ExpectSym:defsym_hex address=0x1244
 //#ExpectSym:sections_start address=0xabcd
 //#ExpectSym:sections_end address=0xcdef
-//#DiffIgnore:section.riscv.attributes
-//#DiffIgnore:segment.RISCV_ATTRIBUTES.*
-// GNU ld emits `.riscv.attributes`, but Wild does not
-//#DiffIgnore:riscv_attributes.*
 // Different linkers emit different corresponding sections.
 //#DiffIgnore:dynsym.sections_start.section
 //#DiffIgnore:dynsym.sections_end.section

@@ -1734,6 +1734,10 @@ impl platform::Platform for Elf {
             secnames::COMMENT_SECTION_NAME,
             output_section_id::COMMENT,
         ));
+        rule_builder.add_section_rule(SectionRule::exact(
+            secnames::RISCV_ATTRIBUTES_SECTION_NAME,
+            SectionRuleOutcome::RiscVAttribute,
+        ));
     }
 
     fn init_section_priority(name: &[u8]) -> Option<u16> {
@@ -1981,6 +1985,12 @@ impl platform::Platform for Elf {
             builder.add_section(id);
         }
 
+        builder.add_segment_with_sections(
+            pt::RISCV_ATTRIBUTES.0,
+            pf::READABLE.0,
+            &[output_section_id::RISCV_ATTRIBUTES],
+            output_sections,
+        );
         Ok(builder.build())
     }
 

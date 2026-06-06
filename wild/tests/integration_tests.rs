@@ -899,6 +899,7 @@ enum ProgramHeaderType {
     Null = object::elf::PT_NULL.0,
     Phdr = object::elf::PT_PHDR.0,
     Tls = object::elf::PT_TLS.0,
+    RiscvAttributes = object::elf::PT_RISCV_ATTRIBUTES.0,
 }
 
 bitflags! {
@@ -3986,12 +3987,14 @@ impl Assertions {
                 _ => section.flags() != object::SectionFlags::None,
             };
 
-            if !is_alloc {
+            if !is_alloc && header.p_type(endian) != object::elf::PT_RISCV_ATTRIBUTES {
                 continue;
             }
 
-            let in_mem =
-                sh_addr >= p_vaddr && sh_addr + sh_size <= p_vaddr + p_memsz && p_memsz > 0;
+            let in_mem = is_alloc
+                && sh_addr >= p_vaddr
+                && sh_addr + sh_size <= p_vaddr + p_memsz
+                && p_memsz > 0;
             let in_file = sh_offset >= p_offset
                 && sh_offset + sh_filesz <= p_offset + p_filesz
                 && p_filesz > 0

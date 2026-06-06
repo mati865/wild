@@ -782,7 +782,11 @@ impl<'data, P: Platform> OutputSections<'data, P> {
                     return;
                 }
 
-                if id == FILE_HEADER || id == PROGRAM_HEADERS || id == SECTION_HEADERS {
+                if id == FILE_HEADER
+                    || id == PROGRAM_HEADERS
+                    || id == SECTION_HEADERS
+                    || id == RISCV_ATTRIBUTES
+                {
                     return;
                 }
             } else {
