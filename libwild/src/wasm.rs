@@ -7,6 +7,7 @@ use crate::args::wasm::WasmArgs;
 use crate::ensure;
 use crate::error::Context as _;
 use crate::error::Result;
+use crate::layout::ImportedSymbol;
 use crate::layout_rules::SectionKind;
 use crate::output_section_id::SectionName;
 use crate::platform;
@@ -1402,7 +1403,7 @@ impl platform::Platform for Wasm {
     type ResolutionExt = ();
     type SymtabShndxEntry = ();
     type SymbolVersionIndex = ();
-    type LayoutExt = ();
+    type LayoutExt<'data> = ();
     type SectionIterator<'a> = core::slice::Iter<'a, SectionHeader>;
     type DynamicTagValues<'data> = DynamicTagValues<'data>;
     type RelocationList<'data> = RelocationList<'data>;
@@ -1603,7 +1604,7 @@ impl platform::Platform for Wasm {
         args: &Self::Args,
         objects: impl Iterator<Item = &'files Self::File<'data>>,
         states: impl Iterator<Item = &'states Self::ObjectLayoutStateExt<'data>> + Clone,
-    ) -> crate::error::Result<Self::LayoutExt>
+    ) -> crate::error::Result<Self::LayoutExt<'data>>
     where
         'data: 'files,
         'data: 'states,
@@ -1662,7 +1663,7 @@ impl platform::Platform for Wasm {
         state: &mut Self::EpilogueLayoutExt,
         mem_sizes: &mut crate::output_section_part_map::OutputSectionPartMap<u64>,
         dynamic_symbol_definitions: &[crate::layout::DynamicSymbolDefinition<'data, Self>],
-        properties: &Self::LayoutExt,
+        properties: &Self::LayoutExt<'data>,
         symbol_db: &crate::symbol_db::SymbolDb<'data, Self>,
     ) {
         todo!()
@@ -1680,6 +1681,7 @@ impl platform::Platform for Wasm {
         current_sizes: &crate::output_section_part_map::OutputSectionPartMap<u64>,
         extra_sizes: &mut crate::output_section_part_map::OutputSectionPartMap<u64>,
         dynamic_symbol_defs: &[crate::layout::DynamicSymbolDefinition<Self>],
+        imported_symbols: &[ImportedSymbol],
         args: &Self::Args,
     ) -> crate::error::Result {
         Ok(())
@@ -1689,7 +1691,7 @@ impl platform::Platform for Wasm {
         epilogue_state: &mut Self::EpilogueLayoutExt,
         memory_offsets: &mut crate::output_section_part_map::OutputSectionPartMap<u64>,
         symbol_db: &crate::symbol_db::SymbolDb<'data, Self>,
-        common_state: &Self::LayoutExt,
+        common_state: &Self::LayoutExt<'data>,
         dynsym_start_index: u32,
         dynamic_symbol_defs: &[crate::layout::DynamicSymbolDefinition<Self>],
     ) -> crate::error::Result {

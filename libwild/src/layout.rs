@@ -169,14 +169,15 @@ pub fn compute<'data, P: Platform, A: Arch<Platform = P>>(
         num_symbols: 0,
     });
 
-    let properties_and_attributes = P::create_layout_properties::<A>(
+    let mut properties_and_attributes = P::create_layout_properties::<A>(
         symbol_db.args,
         objects_iter(&group_states).map(|obj| obj.object),
         objects_iter(&group_states).map(|obj| &obj.format_specific),
     )?;
 
-    let finalise_sizes_resources = FinaliseSizesResources {
+    let mut finalise_sizes_resources = FinaliseSizesResources {
         dynamic_symbol_definitions: &dynamic_symbol_definitions,
+        imported_symbols: &[],
         symbol_db: &symbol_db,
         merged_strings: &merged_strings,
         format_specific: &properties_and_attributes,
@@ -188,6 +189,9 @@ pub fn compute<'data, P: Platform, A: Arch<Platform = P>>(
         &atomic_per_symbol_flags,
         &finalise_sizes_resources,
     )?;
+
+    let imported_symbols = collect_imported_symbols(&group_states);
+    finalise_sizes_resources.imported_symbols = &imported_symbols;
 
     // Dropping `symbol_info_printer` will cause it to print. So we'll either print now, or, if we
     // got an error or panic, then we'll have printed at that point.
@@ -403,6 +407,11 @@ pub fn compute<'data, P: Platform, A: Arch<Platform = P>>(
     let relocation_statistics = OutputSectionMap::with_size(section_layouts.len());
 
     let num_sections = output_sections.num_sections();
+    P::set_imported_symbols(
+        &mut properties_and_attributes,
+        &symbol_resolutions,
+        imported_symbols,
+    )?;
 
     let mut layout = Layout {
         symbol_db,
@@ -437,9 +446,10 @@ pub fn compute<'data, P: Platform, A: Arch<Platform = P>>(
 
 struct FinaliseSizesResources<'data, 'scope, P: Platform> {
     dynamic_symbol_definitions: &'scope [DynamicSymbolDefinition<'data, P>],
+    imported_symbols: &'scope [ImportedSymbol<'data>],
     symbol_db: &'scope SymbolDb<'data, P>,
     merged_strings: &'scope OutputSectionMap<MergedStringsSection<'data>>,
-    format_specific: &'scope P::LayoutExt,
+    format_specific: &'scope P::LayoutExt<'data>,
 }
 
 /// Update resolutions for symbol redirects.
@@ -598,6 +608,15 @@ fn merge_dynamic_symbol_definitions<'data, P: Platform>(
     Ok(dynamic_symbol_definitions)
 }
 
+fn collect_imported_symbols<'data, P: Platform>(
+    group_states: &[GroupState<'data, P>],
+) -> Vec<ImportedSymbol<'data>> {
+    group_states
+        .iter()
+        .flat_map(|group| group.common.imported_symbols.iter().copied())
+        .collect()
+}
+
 fn append_prelude_defsym_dynamic_symbols<'data, P: Platform>(
     group_states: &[GroupState<'data, P>],
     symbol_db: &SymbolDb<'data, P>,
@@ -679,7 +698,7 @@ pub struct Layout<'data, P: Platform> {
     pub(crate) has_variant_pcs: bool,
     pub(crate) per_symbol_flags: PerSymbolFlags,
     pub(crate) dynamic_symbol_definitions: Vec<DynamicSymbolDefinition<'data, P>>,
-    pub(crate) properties_and_attributes: P::LayoutExt,
+    pub(crate) properties_and_attributes: P::LayoutExt<'data>,
     /// Thunk address maps indexed by ThunkBlockId. Each entry maps SymbolId to the memory address
     /// of the thunk for that symbol within the block.
     pub(crate) thunk_block_addresses: Vec<BTreeMap<SymbolId, u64>>,
@@ -704,6 +723,12 @@ pub(crate) struct SegmentLayout {
 #[derive(Debug)]
 pub(crate) struct SymbolResolutions<P: Platform> {
     resolutions: Vec<Option<Resolution<P>>>,
+}
+
+impl<P: Platform> SymbolResolutions<P> {
+    pub(crate) fn get(&self, symbol_id: SymbolId) -> Option<&Resolution<P>> {
+        self.resolutions[symbol_id.as_usize()].as_ref()
+    }
 }
 
 pub(crate) enum FileLayout<'data, P: Platform> {
@@ -767,6 +792,7 @@ pub(crate) enum FileLayoutState<'data, P: Platform> {
     Prelude(PreludeLayoutState<'data, P>),
     Object(ObjectLayoutState<'data, P>),
     Dynamic(DynamicLayoutState<'data, P>),
+    StubLibrary(StubLibraryLayoutState<'data>),
     NotLoaded(NotLoaded),
     SyntheticSymbols(SyntheticSymbolsLayoutState<'data, P>),
     Epilogue(EpilogueLayoutState<P>),
@@ -793,6 +819,13 @@ pub(crate) struct SyntheticSymbolsLayoutState<'data, P: Platform> {
 
 pub(crate) struct EpilogueLayoutState<P: Platform> {
     format_specific: P::EpilogueLayoutExt,
+}
+
+#[derive(Debug)]
+pub(crate) struct StubLibraryLayoutState<'data> {
+    input: InputRef<'data>,
+    file_id: FileId,
+    symbol_id_range: SymbolIdRange,
 }
 
 #[derive(Debug)]
@@ -1076,6 +1109,29 @@ impl<'data, P: Platform> SymbolRequestHandler<'data, P> for LinkerScriptLayoutSt
     }
 }
 
+impl HandlerData for StubLibraryLayoutState<'_> {
+    fn file_id(&self) -> FileId {
+        self.file_id
+    }
+
+    fn symbol_id_range(&self) -> SymbolIdRange {
+        self.symbol_id_range
+    }
+}
+
+impl<'data, P: Platform> SymbolRequestHandler<'data, P> for StubLibraryLayoutState<'data> {
+    fn load_symbol<'scope, A: Arch<Platform = P>>(
+        &mut self,
+        _common: &mut CommonGroupState<'data, P>,
+        _symbol_id: SymbolId,
+        _resources: &GraphResources<'data, 'scope, P>,
+        _queue: &mut LocalWorkQueue,
+        _scope: &Scope<'scope>,
+    ) -> Result {
+        Ok(())
+    }
+}
+
 impl<P: Platform> HandlerData for SyntheticSymbolsLayoutState<'_, P> {
     fn file_id(&self) -> FileId {
         self.file_id
@@ -1128,6 +1184,9 @@ pub(crate) struct CommonGroupState<'data, P: Platform> {
     /// symbol. That's OK though because the epilogue will sort all dynamic symbols.
     dynamic_symbol_definitions: Vec<DynamicSymbolDefinition<'data, P>>,
 
+    /// A list of imported STUB library symbols (Mach-O specific).
+    imported_symbols: Vec<ImportedSymbol<'data>>,
+
     pub(crate) format_specific: P::CommonGroupStateExt,
 }
 
@@ -1137,6 +1196,7 @@ impl<'data, P: Platform> CommonGroupState<'data, P> {
             mem_sizes: output_sections.new_part_map(),
             section_attributes: output_sections.new_section_map(),
             dynamic_symbol_definitions: Default::default(),
+            imported_symbols: Default::default(),
             format_specific: Default::default(),
         }
     }
@@ -1183,6 +1243,19 @@ impl<'data, P: Platform> CommonGroupState<'data, P> {
 
     pub(crate) fn allocate(&mut self, part_id: PartId, size: u64) {
         self.mem_sizes.increment(part_id, size);
+    }
+
+    pub(crate) fn add_imported_symbol(
+        &mut self,
+        symbol_id: SymbolId,
+        name: &'data [u8],
+        library_index: u8,
+    ) {
+        self.imported_symbols.push(ImportedSymbol {
+            symbol_id,
+            name,
+            library_index,
+        });
     }
 
     /// Allocate resources and update attributes based on a section having been loaded.
@@ -1265,6 +1338,15 @@ pub(crate) struct DynamicSymbolDefinition<'data, P: Platform> {
     #[debug("{:?}", String::from_utf8_lossy(name))]
     pub(crate) name: &'data [u8],
     pub(crate) format_specific: P::DynamicSymbolDefinitionExt,
+}
+
+#[derive(derive_more::Debug, Clone, Copy)]
+pub(crate) struct ImportedSymbol<'data> {
+    pub(crate) symbol_id: SymbolId,
+    #[debug("{:?}", String::from_utf8_lossy(name))]
+    pub(crate) name: &'data [u8],
+    // One-based index of the stub library that defines the symbol.
+    pub(crate) library_index: u8,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1361,7 +1443,7 @@ pub(crate) struct FinaliseLayoutResources<'scope, 'data, P: Platform> {
     dynamic_symbol_definitions: &'scope Vec<DynamicSymbolDefinition<'data, P>>,
     segment_layouts: &'scope SegmentLayouts,
     program_segments: &'scope ProgramSegments<P::ProgramSegmentDef>,
-    format_specific: &'scope P::LayoutExt,
+    format_specific: &'scope P::LayoutExt<'data>,
 
     pub(crate) thunk_blocks: &'scope [crate::thunks::ThunkBlock],
 
@@ -1447,7 +1529,7 @@ impl<'data, P: Platform> Layout<'data, P> {
     }
 
     pub(crate) fn local_symbol_resolution(&self, symbol_id: SymbolId) -> Option<&Resolution<P>> {
-        self.symbol_resolutions.resolutions[symbol_id.as_usize()].as_ref()
+        self.symbol_resolutions.get(symbol_id)
     }
 
     pub(crate) fn resolutions_in_range(
@@ -2336,6 +2418,7 @@ fn activate<'data, 'scope, A: Arch>(
         FileLayoutState::Dynamic(s) => s.activate::<A>(common, resources, queue, scope)?,
         FileLayoutState::LinkerScript(s) => s.activate::<A>(common, resources, queue, scope)?,
         FileLayoutState::Epilogue(_) => {}
+        FileLayoutState::StubLibrary(_) => {}
         FileLayoutState::NotLoaded(_) => {}
         FileLayoutState::SyntheticSymbols(_) => {}
     }
@@ -2482,6 +2565,9 @@ impl<'data, P: Platform> FileLayoutState<'data, P> {
                 s.finalise_sizes(common, per_symbol_flags, resources)?;
                 s.finalise_symbol_sizes(common, per_symbol_flags, resources)?;
             }
+            FileLayoutState::StubLibrary(s) => {
+                s.finalise_symbol_sizes(common, per_symbol_flags, resources)?;
+            }
             FileLayoutState::NotLoaded(_) => {}
         }
 
@@ -2568,6 +2654,7 @@ impl<'data, P: Platform> FileLayoutState<'data, P> {
                 )?;
             }
             FileLayoutState::LinkerScript(_) => {}
+            FileLayoutState::StubLibrary(_) => {}
             FileLayoutState::NotLoaded(_) => {}
             FileLayoutState::SyntheticSymbols(state) => {
                 SymbolRequestHandler::load_symbol::<A>(
@@ -2617,6 +2704,10 @@ impl<'data, P: Platform> FileLayoutState<'data, P> {
                 resolutions_out,
                 resources,
             )?),
+            Self::StubLibrary(s) => {
+                s.finalise_layout(memory_offsets, resolutions_out, resources)?;
+                FileLayout::NotLoaded
+            }
             Self::LinkerScript(s) => {
                 s.finalise_layout(memory_offsets, resolutions_out, resources)?;
                 FileLayout::LinkerScript(s)
@@ -2669,11 +2760,18 @@ impl<P: Platform> std::fmt::Display for LinkerScriptLayoutState<'_, P> {
     }
 }
 
+impl std::fmt::Display for StubLibraryLayoutState<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.input, f)
+    }
+}
+
 impl<'data, P: Platform> std::fmt::Display for FileLayoutState<'data, P> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             FileLayoutState::Object(s) => std::fmt::Display::fmt(s, f),
             FileLayoutState::Dynamic(s) => std::fmt::Display::fmt(s, f),
+            FileLayoutState::StubLibrary(s) => std::fmt::Display::fmt(s, f),
             FileLayoutState::LinkerScript(s) => std::fmt::Display::fmt(s, f),
             FileLayoutState::Prelude(_) => std::fmt::Display::fmt("<prelude>", f),
             FileLayoutState::SyntheticSymbols(_) => std::fmt::Display::fmt("<synthetic>", f),
@@ -3634,6 +3732,7 @@ impl<'data, P: Platform> EpilogueLayoutState<P> {
             total_sizes,
             &mut extra_sizes,
             resources.dynamic_symbol_definitions,
+            resources.imported_symbols,
             resources.symbol_db.args,
         )?;
 
@@ -4393,18 +4492,49 @@ impl<P: Platform> ResolutionWriter<'_, '_, P> {
     }
 }
 
+impl<'data> StubLibraryLayoutState<'data> {
+    fn new(stub: &resolution::ResolvedStubLibrary<'data>) -> Self {
+        Self {
+            input: stub.input,
+            file_id: stub.file_id,
+            symbol_id_range: stub.symbol_id_range,
+        }
+    }
+
+    fn finalise_layout<P: Platform>(
+        &self,
+        memory_offsets: &mut OutputSectionPartMap<u64>,
+        resolutions_out: &mut ResolutionWriter<P>,
+        resources: &FinaliseLayoutResources<'_, 'data, P>,
+    ) -> Result {
+        for symbol_id in self.symbol_id_range {
+            let flags: ValueFlags = resources
+                .symbol_db
+                .flags_for_symbol(resources.per_symbol_flags, symbol_id);
+            if flags.has_resolution() && resources.symbol_db.is_canonical(symbol_id) {
+                resolutions_out.write(Some(P::create_resolution(
+                    flags,
+                    0,
+                    None,
+                    memory_offsets,
+                )))?;
+            } else {
+                resolutions_out.write(None)?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
 impl<'data, P: Platform> resolution::ResolvedFile<'data, P> {
     fn create_layout_state(self, args: &P::Args) -> FileLayoutState<'data, P> {
         match self {
             resolution::ResolvedFile::Object(s) => new_object_layout_state(s),
             resolution::ResolvedFile::Dynamic(s) => new_dynamic_object_layout_state(&s),
-            resolution::ResolvedFile::StubLibrary(s) => FileLayoutState::NotLoaded(NotLoaded {
-                symbol_id_range: s.symbol_id_range,
-                section_id_range: crate::input_section_id::SectionIdRange::input(
-                    crate::input_section_id::InputSectionId::from_usize(0),
-                    0,
-                ),
-            }),
+            resolution::ResolvedFile::StubLibrary(s) => {
+                FileLayoutState::StubLibrary(StubLibraryLayoutState::new(&s))
+            }
             resolution::ResolvedFile::Prelude(s) => {
                 FileLayoutState::Prelude(PreludeLayoutState::new(s, args))
             }
@@ -5227,6 +5357,9 @@ impl<'data, P: Platform> std::fmt::Debug for FileLayoutState<'data, P> {
             FileLayoutState::Object(s) => f.debug_tuple("Object").field(&s.input).finish(),
             FileLayoutState::Prelude(_) => f.debug_tuple("Internal").finish(),
             FileLayoutState::Dynamic(s) => f.debug_tuple("Dynamic").field(&s.input).finish(),
+            FileLayoutState::StubLibrary(s) => {
+                f.debug_tuple("StubLibrary").field(&s.input).finish()
+            }
             FileLayoutState::LinkerScript(s) => {
                 f.debug_tuple("LinkerScript").field(&s.input).finish()
             }

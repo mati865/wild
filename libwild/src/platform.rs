@@ -11,10 +11,12 @@ use crate::input_data::InputRef;
 use crate::layout;
 use crate::layout::CommonGroupState;
 use crate::layout::DynamicSymbolDefinition;
+use crate::layout::ImportedSymbol;
 use crate::layout::Layout;
 use crate::layout::ObjectLayoutState;
 use crate::layout::OutputRecordLayout;
 use crate::layout::PreludeLayoutState;
+use crate::layout::SymbolResolutions;
 use crate::layout_rules;
 use crate::layout_rules::LayoutRulesBuilder;
 use crate::layout_rules::SectionRule;
@@ -244,7 +246,7 @@ pub(crate) trait Platform:
     type SymbolVersionIndex: Send + Sync + Copy;
 
     /// Format-specific properties produced by the layout phase.
-    type LayoutExt: Send + Sync + 'static;
+    type LayoutExt<'data>: Send + Sync;
 
     type SectionIterator<'a>: Iterator<Item = &'a Self::SectionHeader>
     where
@@ -483,10 +485,18 @@ pub(crate) trait Platform:
         args: &Self::Args,
         objects: impl Iterator<Item = &'files Self::File<'data>>,
         states: impl Iterator<Item = &'states Self::ObjectLayoutStateExt<'data>> + Clone,
-    ) -> Result<Self::LayoutExt>
+    ) -> Result<Self::LayoutExt<'data>>
     where
         'data: 'files,
         'data: 'states;
+
+    fn set_imported_symbols<'data>(
+        _properties: &mut Self::LayoutExt<'data>,
+        _resolutions: &SymbolResolutions<Self>,
+        _imported_symbols: Vec<ImportedSymbol<'data>>,
+    ) -> Result {
+        Ok(())
+    }
 
     fn load_exception_frame_data<'data, 'scope, A: Arch<Platform = Self>>(
         object: &mut ObjectLayoutState<'data, Self>,
@@ -529,7 +539,7 @@ pub(crate) trait Platform:
         state: &mut Self::EpilogueLayoutExt,
         mem_sizes: &mut OutputSectionPartMap<u64>,
         dynamic_symbol_definitions: &[DynamicSymbolDefinition<'data, Self>],
-        properties: &Self::LayoutExt,
+        properties: &Self::LayoutExt<'data>,
         symbol_db: &SymbolDb<'data, Self>,
     );
 
@@ -543,6 +553,7 @@ pub(crate) trait Platform:
         current_sizes: &OutputSectionPartMap<u64>,
         extra_sizes: &mut OutputSectionPartMap<u64>,
         dynamic_symbol_defs: &[DynamicSymbolDefinition<Self>],
+        imported_symbols: &[ImportedSymbol],
         args: &Self::Args,
     ) -> Result;
 
@@ -559,7 +570,7 @@ pub(crate) trait Platform:
         epilogue_state: &mut Self::EpilogueLayoutExt,
         memory_offsets: &mut OutputSectionPartMap<u64>,
         symbol_db: &SymbolDb<'data, Self>,
-        common_state: &Self::LayoutExt,
+        common_state: &Self::LayoutExt<'data>,
         dynsym_start_index: u32,
         dynamic_symbol_defs: &[DynamicSymbolDefinition<Self>],
     ) -> Result;

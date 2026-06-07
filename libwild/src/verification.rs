@@ -93,6 +93,7 @@ fn should_ignore_alignment(part_id: PartId) -> bool {
             part_id::EH_FRAME,
             part_id::GNU_VERSION_D,
             part_id::CODE_SIGNATURE,
+            part_id::STRTAB,
         ]
         .contains(&part_id)
 }
@@ -114,12 +115,14 @@ pub(crate) fn clear_ignored(expected: &mut OutputSectionPartMap<u64>) {
         part_id::GNU_HASH,
         part_id::DYNAMIC,
         part_id::INTERP,
+        part_id::LOAD_DYLIB,
         part_id::FILE_HEADER,
         part_id::PROGRAM_HEADERS,
         part_id::SECTION_HEADERS,
         part_id::SHSTRTAB,
         part_id::TEXT_SEGMENT,
         part_id::DATA_SEGMENT,
+        part_id::DATA_CONST_SEGMENT,
         part_id::PAGEZERO_SEGMENT,
         part_id::LINK_EDIT_SEGMENT,
         part_id::ENTRY_POINT,

@@ -4,16 +4,21 @@
 use crate::OutputKind;
 use crate::alignment;
 use crate::alignment::Alignment;
+use crate::alignment::MACHO_PAGE_ALIGNMENT;
 use crate::args::macho::MachOArgs;
+use crate::bail;
 use crate::ensure;
 use crate::error;
 use crate::error::Result;
 use crate::file_writer::copy_section_data;
+use crate::grouping::SequencedInput;
 use crate::layout;
+use crate::layout::ImportedSymbol;
 use crate::layout::Layout;
 use crate::layout::OutputRecordLayout;
 use crate::layout::Resolution;
 use crate::layout::SymbolCopyInfo;
+use crate::layout::SymbolResolutions;
 use crate::layout_rules::SectionKind;
 use crate::layout_rules::SectionRule;
 use crate::macho_writer;
@@ -23,11 +28,17 @@ use crate::output_section_id::OrderEvent;
 use crate::output_section_id::OutputOrderBuilder;
 use crate::output_section_id::SectionName;
 use crate::output_section_id::SectionOutputInfo;
+use crate::output_section_part_map::OutputSectionPartMap;
 use crate::part_id;
+use crate::part_id::PartId;
 use crate::platform;
 use crate::platform::Args;
 use crate::platform::ObjectFile;
 use crate::symbol_db::Visibility;
+use crate::value_flags::ValueFlags;
+use anyhow::Context;
+use itertools::Itertools;
+use linker_utils::elf::RelocationKind::TlsGdGotBase;
 use object::Endianness;
 use object::SymbolIndex;
 use object::macho;
@@ -47,11 +58,14 @@ use object::read::macho::Nlist;
 use object::read::macho::Section;
 use object::read::macho::Segment;
 use std::borrow::Cow;
+use std::io::Read;
+use std::num::NonZeroU64;
 use zerocopy::BigEndian;
 use zerocopy::FromBytes;
 use zerocopy::Immutable;
 use zerocopy::IntoBytes;
 use zerocopy::KnownLayout;
+use zerocopy::U16;
 use zerocopy::U32;
 use zerocopy::U64;
 
@@ -69,10 +83,21 @@ pub(crate) const MACHO_COMMAND_ALIGNMENT: usize = 8;
 
 /// A path to the default dynamic linker.
 pub(crate) const DYLINKER_PATH: &[u8] = b"/usr/lib/dyld";
-// TODO: optionality of __DATA and __CONST_DATA segments not respected
-pub(crate) const DEFAULT_SEGMENT_COUNT: usize = 4;
-pub(crate) const CHAINED_FIXUP_TABLE_SIZE: u64 =
-    (size_of::<ChainedFixupsHeader>() + size_of::<u32>() * (DEFAULT_SEGMENT_COUNT + 1 + 1)) as u64;
+pub(crate) const LIBSYSTEM_PATH: &[u8] = b"/usr/lib/libSystem.B.dylib";
+
+// TODO: Getting the number of active segments in epilogue depends on determine_header_size
+// which is called later for the prologue. We potentially over-allocate a couple of bytes.
+pub(crate) const MAX_SEGMENT_COUNT: usize = 6;
+pub(crate) const CHAINED_FIXUP_TABLE_BASE_SIZE: u64 = (size_of::<ChainedFixupsHeader>()
+    + size_of::<u32>() * (MAX_SEGMENT_COUNT + /* leading segment count */ 1)
+    + size_of::<DyldChainedStartsInSegment>())
+    as u64;
+pub(crate) const CHAINED_FIXUP_IMPORT_SIZE: u64 = size_of::<u32>() as u64;
+pub(crate) const CHAINED_FIXUP_PAGE_START_SIZE: u64 = size_of::<u16>() as u64;
+pub(crate) const GOT_ENTRY_SIZE: u64 = 8;
+pub(crate) const PLT_ENTRY_SIZE: u64 = 12;
+
+pub(crate) const SEG_DATA_CONST: &str = "__DATA_CONST";
 
 type SectionHeader = Section64<crate::macho::Endianness>;
 type SectionTable<'data> = &'data [Section64<crate::macho::Endianness>];
@@ -85,6 +110,7 @@ pub(crate) type SegmentCommand = object::macho::SegmentCommand64<Endianness>;
 pub(crate) type SectionEntry = object::macho::Section64<Endianness>;
 pub(crate) type EntryPointCommand = object::macho::EntryPointCommand<Endianness>;
 pub(crate) type DylinkerCommand = object::macho::DylinkerCommand<Endianness>;
+pub(crate) type DylibCommand = object::macho::DylibCommand<Endianness>;
 pub(crate) type CodeSignatureCommand = object::macho::LinkeditDataCommand<Endianness>;
 pub(crate) type DyldChainedFixupsCommand = object::macho::LinkeditDataCommand<Endianness>;
 pub(crate) type ChainedFixupsHeader = DyldChainedFixupsHeader;
@@ -92,14 +118,8 @@ pub(crate) type SymtabCommand = object::macho::SymtabCommand<Endianness>;
 
 // TODO: move the following data types to object crate
 
-// values for dyld_chained_fixups_header.imports_format
-#[allow(non_camel_case_types)]
-#[repr(u32)]
-pub(crate) enum DyldChainedFixupsImporstFormat {
-    DYLD_CHAINED_IMPORT = 1,
-    DYLD_CHAINED_IMPORT_ADDEND = 2,
-    DYLD_CHAINED_IMPORT_ADDEND64 = 3,
-}
+pub(crate) const DYLD_CHAINED_IMPORT: u32 = 1;
+pub(crate) const DYLD_CHAINED_PTR_64_OFFSET: u16 = 6;
 
 // header of the LC_DYLD_CHAINED_FIXUPS payload
 #[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Clone, Copy)]
@@ -128,6 +148,34 @@ pub(crate) struct DyldChainedFixupsHeader {
 //     uint32_t    seg_info_offset[1];  // each entry is offset into this struct for that segment
 //     // followed by pool of dyld_chain_starts_in_segment data
 // };
+
+// This struct is embedded in dyld_chain_starts_in_image
+// and passed down to the kernel for page-in linking
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Clone, Copy)]
+#[repr(C)]
+pub(crate) struct DyldChainedStartsInSegment {
+    // size of this (amount kernel needs to copy)
+    pub(crate) size: U32<zerocopy::LittleEndian>,
+    // 0x1000 or 0x4000
+    pub(crate) page_size: U16<zerocopy::LittleEndian>,
+    // DYLD_CHAINED_PTR_*
+    pub(crate) pointer_format: U16<zerocopy::LittleEndian>,
+    // offset in memory to start of segment
+    pub(crate) segment_offset: U64<zerocopy::LittleEndian>,
+    // for 32-bit OS, any value beyond this is not a pointer
+    pub(crate) max_valid_pointer: U32<zerocopy::LittleEndian>,
+    // how many pages are in array
+    pub(crate) page_count: U16<zerocopy::LittleEndian>,
+    // each entry is offset in each page of first element in chain
+    // or DYLD_CHAINED_PTR_START_NONE if no fixups on paget
+    // uint16_t page_start[1];
+    //
+    // some 32-bit formats may require multiple starts per page.
+    // for those, if high bit is set in page_starts[], then it
+    // is index into chain_starts[] which is a list of starts
+    // the last of which has the high bit set
+    // uint16_t chain_starts[1];
+}
 
 // Code signature data structures are always stored big-endian, regardless of
 // the target architecture's byte order.
@@ -255,6 +303,19 @@ pub(crate) fn code_signature_identifier(args: &MachOArgs) -> &[u8] {
 
 pub(crate) fn code_signature_padded_identifier_size(args: &MachOArgs) -> u64 {
     (code_signature_identifier(args).len() as u64 + 1).next_multiple_of(CS_SECTION_ALIGNMENT)
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct LayoutExt<'data> {
+    /// Imported STUB library symbols, sorted by GOT.
+    pub(crate) imported_symbols: Vec<ImportedSymbolWithResolution<'data>>,
+}
+
+#[derive(derive_more::Debug, Clone, Copy)]
+pub(crate) struct ImportedSymbolWithResolution<'data> {
+    pub(crate) symbol: ImportedSymbol<'data>,
+    pub(crate) got_address: NonZeroU64,
+    pub(crate) plt_address: Option<NonZeroU64>,
 }
 
 #[derive(derive_more::Debug)]
@@ -506,7 +567,7 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
     }
 
     fn symbol_version_debug(&self, symbol_index: object::SymbolIndex) -> Option<String> {
-        todo!()
+        None
     }
 
     fn section_display_name(&self, index: object::SectionIndex) -> Cow<'data, str> {
@@ -708,7 +769,7 @@ impl platform::Symbol for SymtabEntry {
     }
 
     fn is_interposable(&self) -> bool {
-        false
+        self.visibility() == Visibility::Default
     }
 
     fn is_func(&self) -> bool {
@@ -820,6 +881,7 @@ impl platform::SegmentType for SegmentType {}
 #[derive(Debug, Copy, Clone, Default, PartialEq)]
 pub(crate) struct ProgramSegmentDef {
     pub(crate) segment_type: SegmentType,
+    pub(crate) part_id: Option<PartId>,
 }
 
 impl std::fmt::Display for ProgramSegmentDef {
@@ -876,14 +938,19 @@ impl platform::ProgramSegmentDef for ProgramSegmentDef {
             output_section_id::PAGEZERO_SEGMENT
             | output_section_id::TEXT_SEGMENT
             | output_section_id::DATA_SEGMENT
+            | output_section_id::DATA_CONST_SEGMENT
             | output_section_id::LINK_EDIT_SEGMENT
             | output_section_id::ENTRY_POINT
             | output_section_id::INTERP
+            | output_section_id::LOAD_DYLIB
             | output_section_id::DYLD_CHAINED_FIXUPS
             | output_section_id::SYMTAB_COMMAND
             | output_section_id::CODE_SIGNATURE_COMMAND => SegmentType::LoadCommands,
-            output_section_id::TEXT | output_section_id::CSTRING => SegmentType::TextSections,
+            output_section_id::TEXT | output_section_id::CSTRING | output_section_id::PLT_GOT => {
+                SegmentType::TextSections
+            }
             output_section_id::DATA => SegmentType::DataSections,
+            output_section_id::GOT => SegmentType::DataConstSections,
             output_section_id::CHAINED_FIXUP_TABLE
             | output_section_id::SYMTAB_GLOBAL
             | output_section_id::STRTAB
@@ -1000,10 +1067,10 @@ impl platform::Platform for MachO {
     type CommonGroupStateExt = ();
     type ArchIdentifier = ();
     type Args = MachOArgs;
-    type ResolutionExt = ();
+    type ResolutionExt = ResolutionExt;
     type SymtabShndxEntry = ();
     type SymbolVersionIndex = ();
-    type LayoutExt = ();
+    type LayoutExt<'data> = LayoutExt<'data>;
     type SectionIterator<'a> = core::slice::Iter<'a, SectionHeader>;
     type DynamicTagValues<'data> = DynamicTagValues<'data>;
     type RelocationList<'data> = RelocationList<'data>;
@@ -1197,11 +1264,43 @@ impl platform::Platform for MachO {
         args: &Self::Args,
         objects: impl Iterator<Item = &'files Self::File<'data>>,
         states: impl Iterator<Item = &'states Self::ObjectLayoutStateExt<'data>> + Clone,
-    ) -> crate::error::Result<Self::LayoutExt>
+    ) -> crate::error::Result<Self::LayoutExt<'data>>
     where
         'data: 'files,
         'data: 'states,
     {
+        Ok(LayoutExt::default())
+    }
+
+    fn set_imported_symbols<'data>(
+        properties: &mut Self::LayoutExt<'data>,
+        resolutions: &SymbolResolutions<Self>,
+        imported_symbols: Vec<ImportedSymbol<'data>>,
+    ) -> Result {
+        let mut imported_symbols = imported_symbols
+            .iter()
+            .map(|symbol| {
+                let resolution = resolutions
+                    .get(symbol.symbol_id)
+                    .with_context(|| "missing resolution for a stub library symbol".to_string())?;
+                let got_address = resolution
+                    .format_specific
+                    .got_address
+                    .ok_or_else(|| error!("missing GOT entry for a stub library symbol"))?;
+
+                Ok(ImportedSymbolWithResolution {
+                    symbol: *symbol,
+                    got_address,
+                    plt_address: resolution.format_specific.plt_address,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        properties.imported_symbols = imported_symbols
+            .into_iter()
+            .sorted_by_key(|symbol| symbol.got_address)
+            .collect();
+
         Ok(())
     }
 
@@ -1253,9 +1352,10 @@ impl platform::Platform for MachO {
         state: &mut Self::EpilogueLayoutExt,
         mem_sizes: &mut crate::output_section_part_map::OutputSectionPartMap<u64>,
         dynamic_symbol_definitions: &[crate::layout::DynamicSymbolDefinition<'data, Self>],
-        properties: &Self::LayoutExt,
+        properties: &Self::LayoutExt<'data>,
         symbol_db: &crate::symbol_db::SymbolDb<'data, Self>,
     ) {
+        mem_sizes.increment(part_id::CHAINED_FIXUP_TABLE, CHAINED_FIXUP_TABLE_BASE_SIZE);
     }
 
     fn finalise_sizes_all<'data>(
@@ -1269,8 +1369,24 @@ impl platform::Platform for MachO {
         current_sizes: &crate::output_section_part_map::OutputSectionPartMap<u64>,
         extra_sizes: &mut crate::output_section_part_map::OutputSectionPartMap<u64>,
         dynamic_symbol_defs: &[crate::layout::DynamicSymbolDefinition<Self>],
+        imported_symbols: &[ImportedSymbol],
         args: &Self::Args,
     ) -> crate::error::Result {
+        extra_sizes.increment(
+            part_id::CHAINED_FIXUP_TABLE,
+            imported_symbols
+                .iter()
+                .map(|s| CHAINED_FIXUP_IMPORT_SIZE + s.name.len() as u64 + 1)
+                .sum(),
+        );
+        // Chained fixups record start information per page. At this point the final GOT size is
+        // known, so reserve the fixup table entries needed to describe the GOT pages.
+        extra_sizes.increment(
+            part_id::CHAINED_FIXUP_TABLE,
+            CHAINED_FIXUP_PAGE_START_SIZE
+                * (imported_symbols.len() as u64).div_ceil(MACHO_PAGE_ALIGNMENT.value()),
+        );
+
         Ok(())
     }
 
@@ -1278,7 +1394,7 @@ impl platform::Platform for MachO {
         epilogue_state: &mut Self::EpilogueLayoutExt,
         memory_offsets: &mut crate::output_section_part_map::OutputSectionPartMap<u64>,
         symbol_db: &crate::symbol_db::SymbolDb<'data, Self>,
-        common_state: &Self::LayoutExt,
+        common_state: &Self::LayoutExt<'data>,
         dynsym_start_index: u32,
         dynamic_symbol_defs: &[crate::layout::DynamicSymbolDefinition<Self>],
     ) -> crate::error::Result {
@@ -1328,6 +1444,17 @@ impl platform::Platform for MachO {
                         )) as u64,
             );
         }
+        if has_active_segment(header_info, SegmentType::DataConstSections) {
+            sizes.increment(
+                part_id::DATA_CONST_SEGMENT,
+                (size_of::<SegmentCommand>()
+                    + size_of::<SectionEntry>()
+                        * count_sections_for_segment_type(
+                            output_sections,
+                            SegmentType::DataConstSections,
+                        )) as u64,
+            );
+        }
         sizes.increment(
             part_id::LINK_EDIT_SEGMENT,
             size_of::<SegmentCommand>() as u64,
@@ -1336,6 +1463,11 @@ impl platform::Platform for MachO {
         sizes.increment(
             part_id::INTERP,
             ((size_of::<DylinkerCommand>() + DYLINKER_PATH.len())
+                .next_multiple_of(MACHO_COMMAND_ALIGNMENT)) as u64,
+        );
+        sizes.increment(
+            part_id::LOAD_DYLIB,
+            ((size_of::<DylibCommand>() + LIBSYSTEM_PATH.len())
                 .next_multiple_of(MACHO_COMMAND_ALIGNMENT)) as u64,
         );
         sizes.increment(
@@ -1355,6 +1487,25 @@ impl platform::Platform for MachO {
         symbol_id: crate::symbol_db::SymbolId,
         flags: crate::value_flags::ValueFlags,
     ) -> crate::error::Result {
+        if flags.has_resolution() && symbol_db.is_stub_library_symbol(symbol_id) {
+            let symbol_name = symbol_db.symbol_name(symbol_id)?;
+            let SequencedInput::StubLibrary(stub) =
+                symbol_db.file(symbol_db.file_id_for_symbol(symbol_id))
+            else {
+                bail!("stub library expected");
+            };
+            // TODO: support more stub libraries once we can emit arbitrary number of LC_LOAD_DYLIB
+            // commands!
+            ensure!(
+                stub.file_id.file() == 0,
+                "Only single stub library supported"
+            );
+            common.add_imported_symbol(
+                symbol_id,
+                symbol_name.bytes(),
+                u8::try_from(stub.file_id.file() + 1).with_context(|| "too many stub libraries")?,
+            );
+        }
         Ok(())
     }
 
@@ -1364,6 +1515,12 @@ impl platform::Platform for MachO {
         output_kind: crate::output_kind::OutputKind,
         _args: &Self::Args,
     ) {
+        if flags.is_dynamic() && flags.needs_plt() {
+            mem_sizes.increment(part_id::PLT_GOT, PLT_ENTRY_SIZE);
+        }
+        if flags.is_dynamic() && flags.needs_got() {
+            mem_sizes.increment(part_id::GOT, GOT_ENTRY_SIZE);
+        }
     }
 
     fn allocate_object_symtab_space<'data>(
@@ -1415,7 +1572,6 @@ impl platform::Platform for MachO {
     ) {
         // Allocate one extra character as n_strx == 0 is treated as unnamed.
         common.allocate(part_id::STRTAB, 1);
-        common.allocate(part_id::CHAINED_FIXUP_TABLE, CHAINED_FIXUP_TABLE_SIZE);
         common.allocate(
             part_id::CODE_SIGNATURE,
             CS_HEADERS_SIZE + code_signature_padded_identifier_size(symbol_db.args),
@@ -1436,12 +1592,28 @@ impl platform::Platform for MachO {
         dynamic_symbol_index: Option<std::num::NonZeroU32>,
         memory_offsets: &mut crate::output_section_part_map::OutputSectionPartMap<u64>,
     ) -> crate::layout::Resolution<Self> {
-        Resolution {
+        let mut resolution: Resolution<MachO> = Resolution {
             raw_value,
             dynamic_symbol_index,
-            format_specific: (),
+            format_specific: ResolutionExt {
+                got_address: None,
+                plt_address: None,
+            },
             flags,
+        };
+
+        if flags.needs_plt() {
+            let plt_address = allocate_plt(memory_offsets);
+            resolution.raw_value = plt_address.get();
+            resolution.format_specific.plt_address = Some(plt_address);
+            resolution.format_specific.got_address = Some(allocate_got(memory_offsets));
+        } else if flags.needs_got() {
+            let got_address = allocate_got(memory_offsets);
+            resolution.raw_value = got_address.get();
+            resolution.format_specific.got_address = Some(got_address);
         }
+
+        resolution
     }
 
     fn raw_symbol_name<'data>(
@@ -1475,20 +1647,24 @@ impl platform::Platform for MachO {
         builder.add_section(output_section_id::PAGEZERO_SEGMENT);
         builder.add_section(output_section_id::TEXT_SEGMENT);
         builder.add_section(output_section_id::DATA_SEGMENT);
+        builder.add_section(output_section_id::DATA_CONST_SEGMENT);
         builder.add_section(output_section_id::LINK_EDIT_SEGMENT);
         builder.add_section(output_section_id::ENTRY_POINT);
         builder.add_section(output_section_id::INTERP); // DYLINKER
+        builder.add_section(output_section_id::LOAD_DYLIB);
         builder.add_section(output_section_id::DYLD_CHAINED_FIXUPS);
         builder.add_section(output_section_id::SYMTAB_COMMAND);
         builder.add_section(output_section_id::CODE_SIGNATURE_COMMAND);
         // Content of the sections (e.g. __text, __data).
         builder.add_section(output_section_id::TEXT);
         builder.add_section(output_section_id::CSTRING);
+        builder.add_section(output_section_id::PLT_GOT);
         builder.add_section(output_section_id::DATA);
+        builder.add_section(output_section_id::GOT);
         // The rest (e.g. symbol table, string table).
+        builder.add_section(output_section_id::STRTAB);
         builder.add_section(output_section_id::CHAINED_FIXUP_TABLE);
         builder.add_section(output_section_id::SYMTAB_GLOBAL);
-        builder.add_section(output_section_id::STRTAB);
         builder.add_section(output_section_id::CODE_SIGNATURE);
 
         builder.build()
@@ -1566,6 +1742,11 @@ const SECTION_DEFINITIONS: [BuiltInSectionDetails; NUM_BUILT_IN_SECTIONS] = {
         target_segment_type: Some(SegmentType::LoadCommands),
         ..DEFAULT_DEFS
     };
+    defs[output_section_id::DATA_CONST_SEGMENT.as_usize()] = BuiltInSectionDetails {
+        kind: SectionKind::Primary(SectionName(SEG_DATA_CONST.as_bytes())),
+        target_segment_type: Some(SegmentType::LoadCommands),
+        ..DEFAULT_DEFS
+    };
     defs[output_section_id::LINK_EDIT_SEGMENT.as_usize()] = BuiltInSectionDetails {
         kind: SectionKind::Primary(SectionName(SEG_LINKEDIT.as_bytes())),
         target_segment_type: Some(SegmentType::LoadCommands),
@@ -1578,6 +1759,11 @@ const SECTION_DEFINITIONS: [BuiltInSectionDetails; NUM_BUILT_IN_SECTIONS] = {
     };
     defs[output_section_id::INTERP.as_usize()] = BuiltInSectionDetails {
         kind: SectionKind::Primary(SectionName(b"LC_LOAD_DYLINKER")),
+        target_segment_type: Some(SegmentType::LoadCommands),
+        ..DEFAULT_DEFS
+    };
+    defs[output_section_id::LOAD_DYLIB.as_usize()] = BuiltInSectionDetails {
+        kind: SectionKind::Primary(SectionName(b"LC_LOAD_DYLIB")),
         target_segment_type: Some(SegmentType::LoadCommands),
         ..DEFAULT_DEFS
     };
@@ -1596,6 +1782,11 @@ const SECTION_DEFINITIONS: [BuiltInSectionDetails; NUM_BUILT_IN_SECTIONS] = {
         target_segment_type: Some(SegmentType::LoadCommands),
         ..DEFAULT_DEFS
     };
+    defs[output_section_id::STRTAB.as_usize()] = BuiltInSectionDetails {
+        kind: SectionKind::Primary(SectionName(b"STRTAB")),
+        target_segment_type: Some(SegmentType::LinkeditSections),
+        ..DEFAULT_DEFS
+    };
     defs[output_section_id::CHAINED_FIXUP_TABLE.as_usize()] = BuiltInSectionDetails {
         kind: SectionKind::Primary(SectionName(b"DYLD_CHAINED_FIXUPS_TABLE")),
         target_segment_type: Some(SegmentType::LinkeditSections),
@@ -1606,17 +1797,25 @@ const SECTION_DEFINITIONS: [BuiltInSectionDetails; NUM_BUILT_IN_SECTIONS] = {
         target_segment_type: Some(SegmentType::LinkeditSections),
         ..DEFAULT_DEFS
     };
-    defs[output_section_id::STRTAB.as_usize()] = BuiltInSectionDetails {
-        kind: SectionKind::Primary(SectionName(b"STRTAB")),
-        target_segment_type: Some(SegmentType::LinkeditSections),
-        ..DEFAULT_DEFS
-    };
     defs[output_section_id::CODE_SIGNATURE.as_usize()] = BuiltInSectionDetails {
         kind: SectionKind::Primary(SectionName(b"CODE_SIGNATURE")),
         target_segment_type: Some(SegmentType::LinkeditSections),
         min_alignment: Alignment {
             exponent: CS_SECTION_ALIGNMENT_EXP,
         },
+        ..DEFAULT_DEFS
+    };
+    defs[output_section_id::GOT.as_usize()] = BuiltInSectionDetails {
+        kind: SectionKind::Primary(SectionName(b"__got")),
+        ..DEFAULT_DEFS
+    };
+    defs[output_section_id::PLT_GOT.as_usize()] = BuiltInSectionDetails {
+        kind: SectionKind::Primary(SectionName(b"__stubs")),
+        section_flags: macho::S_SYMBOL_STUBS
+            .to_flags()
+            .with(macho::S_ATTR_PURE_INSTRUCTIONS)
+            .with(macho::S_ATTR_SOME_INSTRUCTIONS),
+        min_alignment: Alignment { exponent: 2 },
         ..DEFAULT_DEFS
     };
     // Multi-part generated sections
@@ -1643,6 +1842,24 @@ const SECTION_DEFINITIONS: [BuiltInSectionDetails; NUM_BUILT_IN_SECTIONS] = {
     defs
 };
 
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct ResolutionExt {
+    pub(crate) got_address: Option<NonZeroU64>,
+    pub(crate) plt_address: Option<NonZeroU64>,
+}
+
+fn allocate_got(memory_offsets: &mut OutputSectionPartMap<u64>) -> NonZeroU64 {
+    let got_address = NonZeroU64::new(*memory_offsets.get(part_id::GOT)).unwrap();
+    memory_offsets.increment(part_id::GOT, GOT_ENTRY_SIZE);
+    got_address
+}
+
+fn allocate_plt(memory_offsets: &mut OutputSectionPartMap<u64>) -> NonZeroU64 {
+    let plt_address = NonZeroU64::new(*memory_offsets.get(part_id::PLT_GOT)).unwrap();
+    memory_offsets.increment(part_id::PLT_GOT, PLT_ENTRY_SIZE);
+    plt_address
+}
+
 // TODO: sort properly
 const DEFAULT_SECTION_RULES: &[SectionRule<'static>] = &[
     SectionRule::exact_section_keep(b"__text", crate::output_section_id::TEXT),
@@ -1651,24 +1868,34 @@ const DEFAULT_SECTION_RULES: &[SectionRule<'static>] = &[
     // SectionRule::exact_section_keep(b"__compact_unwind", crate::output_section_id::EH_FRAME),
 ];
 
-const PROGRAM_SEGMENT_DEFS: &[ProgramSegmentDef] = &[
+pub(crate) const PROGRAM_SEGMENT_DEFS: &[ProgramSegmentDef] = &[
     ProgramSegmentDef {
         segment_type: SegmentType::Text,
+        // Not a real segment from the Macho-O definition.
+        part_id: Some(part_id::TEXT_SEGMENT),
     },
     ProgramSegmentDef {
+        // Not a real segment from the Macho-O definition.
         segment_type: SegmentType::LoadCommands,
+        // included in SegmentType::Text
+        part_id: None,
     },
     ProgramSegmentDef {
         segment_type: SegmentType::TextSections,
+        // included in SegmentType::Text
+        part_id: None,
     },
     ProgramSegmentDef {
         segment_type: SegmentType::DataSections,
+        part_id: Some(part_id::DATA_SEGMENT),
     },
     ProgramSegmentDef {
         segment_type: SegmentType::DataConstSections,
+        part_id: Some(part_id::DATA_CONST_SEGMENT),
     },
     ProgramSegmentDef {
         segment_type: SegmentType::LinkeditSections,
+        part_id: Some(part_id::LINK_EDIT_SEGMENT),
     },
 ];
 
@@ -1684,7 +1911,10 @@ fn count_sections_for_segment_type(
     output_sections: &crate::output_section_id::OutputSections<MachO>,
     segment_type: SegmentType,
 ) -> usize {
-    let segment_def = ProgramSegmentDef { segment_type };
+    let segment_def = ProgramSegmentDef {
+        segment_type,
+        part_id: None,
+    };
     output_sections
         .ids_with_info()
         .filter(|(section_id, _)| {
@@ -1769,8 +1999,19 @@ fn process_relocation<'data, 'scope, A: platform::Arch<Platform = MachO>>(
         flags.merge(resources.local_flags_for_symbol(local_symbol_id));
         let rel_offset = rel_info.r_address;
 
-        let rel_info = A::relocation_from_raw(rel_info)?;
-        let mut flags_to_add = layout::resolution_flags(rel_info.kind);
+        let relocation = A::relocation_from_raw(rel_info)?;
+        let mut flags_to_add = layout::resolution_flags(relocation.kind);
+        if matches!(
+            symbol_db.file(symbol_db.file_id_for_symbol(symbol_id)),
+            SequencedInput::StubLibrary(_)
+        ) {
+            flags_to_add |= ValueFlags::GOT;
+            // TODO: classify symbols more reliably, likely by checking whether their section is
+            // __text.
+            if rel_info.r_type == object::macho::ARM64_RELOC_BRANCH26 {
+                flags_to_add |= ValueFlags::FUNCTION | ValueFlags::PLT;
+            }
+        }
 
         let atomic_flags = &resources.per_symbol_flags.get_atomic(symbol_id);
         let previous_flags = atomic_flags.fetch_or(flags_to_add);

@@ -1,3 +1,4 @@
+use crate::alignment::MACHO_PAGE_ALIGNMENT;
 use crate::bail;
 use crate::elf::get_page_mask;
 use crate::ensure;
@@ -8,6 +9,7 @@ use crate::file_writer::SizedOutput;
 use crate::file_writer::split_buffers_by_alignment;
 use crate::file_writer::split_output_by_group;
 use crate::file_writer::split_output_into_sections;
+use crate::layout::EpilogueLayout;
 use crate::layout::FileLayout;
 use crate::layout::HeaderInfo;
 use crate::layout::Layout;
@@ -17,6 +19,7 @@ use crate::layout::PreludeLayout;
 use crate::layout::Resolution;
 use crate::layout::Section;
 use crate::layout::SymbolCopyInfo;
+use crate::macho::CHAINED_FIXUP_PAGE_START_SIZE;
 use crate::macho::CS_ADHOC;
 use crate::macho::CS_BLOB_HEADERS_SIZE;
 use crate::macho::CS_BLOCK_SIZE;
@@ -34,16 +37,24 @@ use crate::macho::CodeSignatureBlobIndex;
 use crate::macho::CodeSignatureCodeDirectory;
 use crate::macho::CodeSignatureCommand;
 use crate::macho::CodeSignatureSuperBlob;
-use crate::macho::DEFAULT_SEGMENT_COUNT;
+use crate::macho::DYLD_CHAINED_IMPORT;
+use crate::macho::DYLD_CHAINED_PTR_64_OFFSET;
 use crate::macho::DYLINKER_PATH;
 use crate::macho::DyldChainedFixupsCommand;
-use crate::macho::DyldChainedFixupsImporstFormat;
+use crate::macho::DyldChainedStartsInSegment;
+use crate::macho::DylibCommand;
 use crate::macho::DylinkerCommand;
 use crate::macho::EntryPointCommand;
 use crate::macho::FileHeader;
+use crate::macho::GOT_ENTRY_SIZE;
+use crate::macho::LIBSYSTEM_PATH;
 use crate::macho::MACHO_COMMAND_ALIGNMENT;
 use crate::macho::MACHO_START_MEM_ADDRESS;
+use crate::macho::MAX_SEGMENT_COUNT;
 use crate::macho::MachO;
+use crate::macho::PLT_ENTRY_SIZE;
+use crate::macho::PROGRAM_SEGMENT_DEFS;
+use crate::macho::SEG_DATA_CONST;
 use crate::macho::SectionEntry;
 use crate::macho::SegmentCommand;
 use crate::macho::SegmentSectionsInfo;
@@ -72,6 +83,7 @@ use linker_utils::elf::RelocationKind;
 use object::BigEndian;
 use object::Endianness;
 use object::SymbolIndex;
+use object::U16;
 use object::U32;
 use object::from_bytes_mut;
 use object::macho;
@@ -79,6 +91,7 @@ use object::macho::CPU_SUBTYPE_ARM64_ALL;
 use object::macho::CPU_TYPE_ARM64;
 use object::macho::LC_CODE_SIGNATURE;
 use object::macho::LC_DYLD_CHAINED_FIXUPS;
+use object::macho::LC_LOAD_DYLIB;
 use object::macho::LC_LOAD_DYLINKER;
 use object::macho::LC_MAIN;
 use object::macho::LC_SEGMENT_64;
@@ -140,6 +153,10 @@ pub(crate) fn write<'data, A: Arch<Platform = MachO>>(
             Ok(())
         })?;
 
+    let mut section_buffers = split_output_into_sections(layout, &mut sized_output.out).0;
+    write_got_entries(layout, section_buffers.get_mut(output_section_id::GOT))?;
+    write_plt_entries::<A>(layout, section_buffers.get_mut(output_section_id::PLT_GOT))?;
+
     write_code_signature(layout, sized_output)?;
 
     Ok(())
@@ -157,6 +174,7 @@ fn write_file<'data, A: Arch<Platform = MachO>>(
             write_object::<A>(s, buffers, layout, symbol_writer)?;
         }
         FileLayout::Prelude(s) => write_prelude::<A>(s, buffers, layout)?,
+        FileLayout::Epilogue(s) => write_epilogue::<A>(s, buffers, layout)?,
         _ => {
             // TODO
         }
@@ -189,6 +207,11 @@ fn write_prelude<'data, A: Arch<Platform = MachO>>(
             .map_err(|_| error!("Invalid INTERP command allocation"))?;
     write_dylinker_command::<A>(dylinker_command, dylinker_path_buffer);
 
+    let (dylib_command, dylib_path_buffer): (&mut DylibCommand, &mut [u8]) =
+        from_bytes_mut(buffers.get_mut(part_id::LOAD_DYLIB))
+            .map_err(|_| error!("Invalid LOAD_DYLIB command allocation"))?;
+    write_dylib_command::<A>(dylib_command, dylib_path_buffer);
+
     let chained_fixups_command: &mut DyldChainedFixupsCommand =
         from_bytes_mut(buffers.get_mut(part_id::DYLD_CHAINED_FIXUPS))
             .map_err(|_| error!("Invalid DYLD_CHAINED_FIXUPS command allocation"))?
@@ -205,28 +228,78 @@ fn write_prelude<'data, A: Arch<Platform = MachO>>(
             .0;
     write_code_signature_command::<A>(layout, code_signature_command);
 
-    let chained_fixup_table = buffers.get_mut(part_id::CHAINED_FIXUP_TABLE);
-    // TODO: remove in the future once we handle a dynamic number of segments
-    chained_fixup_table.fill(0);
-    let starts_len = size_of::<u32>() * (DEFAULT_SEGMENT_COUNT + 1);
-    let min_len = size_of::<ChainedFixupsHeader>() + starts_len;
-    if chained_fixup_table.len() < min_len {
-        bail!(
-            "CHAINED_FIXUP_TABLE allocation too small. Need at least {} bytes, got {}",
-            min_len,
-            chained_fixup_table.len()
-        );
-    }
-    let (chained_fixups_header, rest): (&mut ChainedFixupsHeader, &mut [u8]) =
-        ChainedFixupsHeader::mut_from_prefix(chained_fixup_table)
-            .map_err(|_| error!("Invalid chained fixups header allocation"))?;
-    let (starts_in_image, _) =
-        slice_from_bytes_mut::<U32<Endianness>>(rest, DEFAULT_SEGMENT_COUNT + 1)
-            .map_err(|_| error!("Invalid chained fixups starts allocation"))?;
-    write_chained_fixup_table::<A>(chained_fixups_header, starts_in_image)?;
-
     // Fill up one extra character as n_strx == 0 is treated as unnamed.
     buffers.get_mut(part_id::STRTAB).fill(0);
+
+    Ok(())
+}
+
+fn write_epilogue<A: Arch<Platform = MachO>>(
+    _epilogue: &EpilogueLayout<MachO>,
+    buffers: &mut OutputSectionPartMap<&mut [u8]>,
+    layout: &MachOLayout<'_>,
+) -> Result {
+    write_chained_fixup_table::<A>(layout, buffers.get_mut(part_id::CHAINED_FIXUP_TABLE))?;
+
+    Ok(())
+}
+
+fn write_got_entries(layout: &MachOLayout<'_>, got: &mut [u8]) -> Result {
+    let got_layout = layout.section_layouts.get(output_section_id::GOT);
+
+    let sorted_symbols = &layout.properties_and_attributes.imported_symbols;
+    for (i, imported_symbol) in sorted_symbols.iter().enumerate() {
+        let offset = imported_symbol
+            .got_address
+            .get()
+            .checked_sub(got_layout.mem_offset)
+            .ok_or_else(|| error!("GOT entry address is before __got"))?
+            as usize;
+        let end = offset + GOT_ENTRY_SIZE as usize;
+
+        /* DYLD_CHAINED_PTR_64 format:
+        uint64_t dyld_chained_ptr_64_bind:
+          ordinal: 24
+          addend: 8 // 0 thru 255
+          reserved: 19 // all zeros
+          next: 12 // 4-byte stride
+          bind: 1 // == 1
+        */
+        let bind = 1u64 << 63;
+        // TODO: when crossing a page boundary, next is equal to zero
+        let next = if i == sorted_symbols.len() - 1 { 0 } else { 2 };
+        let next = next << 51;
+        let ordinal = i as u64;
+        got[offset..end].copy_from_slice(&(bind | next | ordinal).to_le_bytes());
+    }
+
+    Ok(())
+}
+
+fn write_plt_entries<A: Arch<Platform = MachO>>(
+    layout: &MachOLayout<'_>,
+    plt: &mut [u8],
+) -> Result {
+    let plt_layout = layout.section_layouts.get(output_section_id::PLT_GOT);
+
+    for imported_symbol in &layout.properties_and_attributes.imported_symbols {
+        let Some(stub_address) = imported_symbol.plt_address else {
+            continue;
+        };
+
+        let offset = stub_address
+            .get()
+            .checked_sub(plt_layout.mem_offset)
+            .ok_or_else(|| error!("STUB entry address is before __stubs"))?
+            as usize;
+        let end = offset + PLT_ENTRY_SIZE as usize;
+
+        A::write_plt_entry(
+            &mut plt[offset..end],
+            imported_symbol.got_address.get(),
+            stub_address.get(),
+        )?;
+    }
 
     Ok(())
 }
@@ -338,6 +411,32 @@ fn write_segment_commands<A: Arch<Platform = MachO>>(
         write_sections(SEG_DATA, data_sections, &data_segment_sections)?;
     }
 
+    if let Some(data_const_segment_info) =
+        get_segment_sections(layout, SegmentType::DataConstSections)
+    {
+        let data_const_segment_sections = data_const_segment_info.segment_sections;
+        let data_const_segment_size = data_const_segment_info.segment_size;
+        let (data_const_segment, data_const_sections) = split_segment_command_buffer(
+            buffers.get_mut(part_id::DATA_CONST_SEGMENT),
+            data_const_segment_sections.len(),
+        )?;
+        write_segment(
+            SEG_DATA_CONST,
+            macho::VM_PROT_READ | macho::VM_PROT_WRITE,
+            data_const_segment,
+            data_const_segment_size.file_offset as u64,
+            data_const_segment_size.file_size as u64,
+            data_const_segment_size.mem_offset,
+            data_const_segment_size.mem_size,
+            data_const_segment_sections.len(),
+        );
+        write_sections(
+            SEG_DATA_CONST,
+            data_const_sections,
+            &data_const_segment_sections,
+        )?;
+    }
+
     let linkedit_segment_size = get_segment_sections(layout, SegmentType::LinkeditSections)
         .ok_or_else(|| error!("LinkeditSections segment is mandatory"))?
         .segment_size;
@@ -407,13 +506,19 @@ fn write_sections(
         section.addr.set(LE, size.mem_offset);
         section.size.set(LE, size.mem_size);
         section.offset.set(LE, size.file_offset as u32);
-        // TODO
-        section.align.set(LE, 0);
+        section.align.set(LE, u32::from(size.alignment.exponent));
         section.reloff.set(LE, 0);
         section.nreloc.set(LE, 0);
         section.flags.set(LE, *section_flags);
         section.reserved1.set(LE, 0);
-        section.reserved2.set(LE, 0);
+        // TODO: find a better place
+        let reserved2 =
+            if section_flags.0 & macho::SECTION_TYPE == u32::from(macho::S_SYMBOL_STUBS.0) {
+                PLT_ENTRY_SIZE as u32
+            } else {
+                0
+            };
+        section.reserved2.set(LE, reserved2);
         section.reserved3.set(LE, 0);
     }
 
@@ -484,6 +589,7 @@ fn apply_relocation<'data, A: Arch<Platform = MachO>>(
 
     let rel_info = A::relocation_from_raw(rel)?;
     let (resolution, _symbol_index, local_symbol_id) = get_resolution(rel, object_layout, layout)?;
+    let flags = layout.flags_for_symbol(local_symbol_id);
 
     let mask = get_page_mask(rel_info.mask);
     let value = match rel_info.kind {
@@ -493,10 +599,16 @@ fn apply_relocation<'data, A: Arch<Platform = MachO>>(
             .raw_value
             .bitand(mask.symbol_plus_addend)
             .wrapping_sub(place.bitand(mask.place)),
+        RelocationKind::GotRelative => resolution
+            .raw_value
+            .bitand(mask.symbol_plus_addend)
+            .wrapping_sub(place.bitand(mask.place)),
+        RelocationKind::Got => resolution.raw_value.bitand(mask.symbol_plus_addend),
         _ => todo!(),
     };
 
     tracing::trace!(
+            %flags,
             ?rel_info.kind,
             %rel_info.size,
             value,
@@ -612,6 +724,37 @@ fn write_dylinker_command<A: Arch<Platform = MachO>>(
     path_buffer[DYLINKER_PATH.len()..].zero();
 }
 
+fn write_dylib_command<A: Arch<Platform = MachO>>(
+    command: &mut DylibCommand,
+    path_buffer: &mut [u8],
+) {
+    command.cmd.set(LE, LC_LOAD_DYLIB);
+    command.cmdsize.set(
+        LE,
+        ((size_of::<DylibCommand>() + LIBSYSTEM_PATH.len())
+            .next_multiple_of(MACHO_COMMAND_ALIGNMENT)) as u32,
+    );
+    command
+        .dylib
+        .name
+        .offset
+        .set(LE, size_of::<DylibCommand>() as u32);
+    // TODO
+    command.dylib.timestamp.set(LE, 2);
+    // TODO
+    command
+        .dylib
+        .current_version
+        .set(LE, macho::Version(1356 << 16));
+    command
+        .dylib
+        .compatibility_version
+        .set(LE, macho::Version(1 << 16));
+
+    path_buffer[0..LIBSYSTEM_PATH.len()].copy_from_slice(LIBSYSTEM_PATH);
+    path_buffer[LIBSYSTEM_PATH.len()..].zero();
+}
+
 fn write_dyld_chained_fixups_command<A: Arch<Platform = MachO>>(
     layout: &MachOLayout,
     command: &mut DyldChainedFixupsCommand,
@@ -666,36 +809,119 @@ fn write_code_signature_command<A: Arch<Platform = MachO>>(
 }
 
 fn write_chained_fixup_table<A: Arch<Platform = MachO>>(
-    header: &mut ChainedFixupsHeader,
-    starts_in_image: &mut [U32<Endianness>],
+    layout: &MachOLayout,
+    chained_fixup_table: &mut [u8],
 ) -> Result {
-    let starts_len = size_of::<u32>() * (DEFAULT_SEGMENT_COUNT + 1);
-    if starts_in_image.len() != DEFAULT_SEGMENT_COUNT + 1 {
-        bail!(
-            "Invalid chained fixups starts allocation. Expected {} entries, got {}",
-            DEFAULT_SEGMENT_COUNT + 1,
-            starts_in_image.len()
+    let symbols = &layout.properties_and_attributes.imported_symbols;
+
+    let active_segments = PROGRAM_SEGMENT_DEFS
+        .iter()
+        .filter(|segment| {
+            segment.part_id.is_some()
+                && get_segment_sections(layout, segment.segment_type).is_some()
+        })
+        .collect_vec();
+    // The __PAGEZERO segment needs to be added manually.
+    let segment_count = active_segments.len() + 1;
+    ensure!(
+        segment_count <= MAX_SEGMENT_COUNT,
+        "unexpected number of active segments"
+    );
+    let starts_in_image_len = size_of::<u32>() * (segment_count + 1);
+    let starts_in_segment_len =
+        size_of::<DyldChainedStartsInSegment>() + CHAINED_FIXUP_PAGE_START_SIZE as usize;
+    let imports_len = size_of::<u32>() * symbols.len();
+
+    let starts_offset = size_of::<ChainedFixupsHeader>();
+    let imports_offset = starts_offset + starts_in_image_len + starts_in_segment_len;
+    let symbols_offset = imports_offset + imports_len;
+
+    let (header, rest) = ChainedFixupsHeader::mut_from_prefix(chained_fixup_table)
+        .map_err(|_| error!("Invalid chained fixups header allocation"))?;
+    let (starts_in_image, rest) = slice_from_bytes_mut::<U32<Endianness>>(rest, segment_count + 1)
+        .map_err(|_| error!("Invalid chained fixups starts allocation"))?;
+
+    // 1) fill up ChainedFixupsHeader
+    header.fixups_version.set(0);
+    header.starts_offset.set(starts_offset as u32);
+    header.imports_offset.set(imports_offset as u32);
+    header.symbols_offset.set(symbols_offset as u32);
+    header.imports_count.set(symbols.len() as u32);
+    header.imports_format.set(DYLD_CHAINED_IMPORT);
+    header.symbols_format.set(0);
+
+    let data_const_segment_index = active_segments
+        .iter()
+        .position(|segment_type| segment_type.segment_type == SegmentType::DataConstSections);
+
+    // 2) fill up dyld_chained_starts_in_image, which is `seg_count` (u32) followed by
+    //    `seg_info_offset` ([u32; seg_count]); only __DATA_CONST,__got segment is covered
+    starts_in_image[0].set(LE, segment_count as u32);
+    starts_in_image[1..].fill(U32::new(LE, 0));
+
+    // Early exit if we don't have any GOT entry to be encoded.
+    let Some(data_const_segment_index) = data_const_segment_index else {
+        rest.zero();
+        return Ok(());
+    };
+
+    starts_in_image[data_const_segment_index + 1].set(LE, starts_in_image_len as u32);
+
+    let (starts_in_segment, rest) = DyldChainedStartsInSegment::mut_from_prefix(rest)
+        .map_err(|_| error!("Invalid chained fixups starts in segment allocation"))?;
+    let (page_starts, rest) = slice_from_bytes_mut::<U16<Endianness>>(rest, 1)
+        .map_err(|_| error!("Invalid chained fixups page starts allocation"))?;
+    let (imports, string_pool) = slice_from_bytes_mut::<U32<Endianness>>(rest, symbols.len())
+        .map_err(|_| error!("Invalid chained fixups imports allocation"))?;
+
+    // 3) fill up DyldChainedStartsInSegment for the __got section
+    let data_const_segment = get_segment_sections(layout, SegmentType::DataConstSections)
+        .ok_or_else(|| error!("__DATA_CONST segment expected"))?
+        .segment_size;
+
+    starts_in_segment.size.set(starts_in_segment_len as u32);
+    starts_in_segment
+        .page_size
+        .set(MACHO_PAGE_ALIGNMENT.value() as u16);
+    starts_in_segment
+        .pointer_format
+        .set(DYLD_CHAINED_PTR_64_OFFSET);
+    starts_in_segment
+        .segment_offset
+        .set(data_const_segment.file_offset as u64);
+    starts_in_segment.max_valid_pointer.set(0);
+    // TODO:
+    starts_in_segment.page_count.set(1);
+    page_starts[0].set(LE, 0);
+
+    // 4) fill up all imported symbols chunked by the pages
+    // TODO: support more pages
+    assert!(symbols.len() < MACHO_PAGE_ALIGNMENT.value() as usize / size_of::<u32>());
+
+    let sorted_symbols = &layout.properties_and_attributes.imported_symbols;
+    let mut symbol_offsets = Vec::with_capacity(sorted_symbols.len());
+    let mut str_offset = 0;
+    for imported_symbol in sorted_symbols {
+        let symbol = &imported_symbol.symbol;
+        string_pool[str_offset..str_offset + symbol.name.len()].copy_from_slice(symbol.name);
+        string_pool[str_offset + symbol.name.len()] = b'\0';
+        symbol_offsets.push(str_offset);
+        str_offset += symbol.name.len() + 1;
+    }
+
+    // Emit `dyld_chained_import` that is built by 3 pieces:
+    // lib_ordinal: 8
+    // weak_import: 1
+    // name_offset: 23
+    for (i, imported_symbol) in sorted_symbols.iter().enumerate() {
+        imports[i].set(
+            Endianness::Little,
+            u32::from(imported_symbol.symbol.library_index) | ((symbol_offsets[i] as u32) << 9),
         );
     }
 
-    header.fixups_version.set(0);
-    header
-        .starts_offset
-        .set(size_of::<ChainedFixupsHeader>() as u32);
-    header
-        .imports_offset
-        .set((size_of::<ChainedFixupsHeader>() + starts_len) as u32);
-    header
-        .symbols_offset
-        .set((size_of::<ChainedFixupsHeader>() + starts_len) as u32);
-    header.imports_count.set(0);
-    header
-        .imports_format
-        .set(DyldChainedFixupsImporstFormat::DYLD_CHAINED_IMPORT as u32);
-    header.symbols_format.set(0);
-
-    starts_in_image[0].set(LE, DEFAULT_SEGMENT_COUNT as u32);
-    starts_in_image[1..].fill(U32::new(LE, 0));
+    // Pad a couple of bytes (related to the MAX_SEGMENT_COUNT).
+    string_pool[str_offset..].fill(0);
 
     Ok(())
 }
