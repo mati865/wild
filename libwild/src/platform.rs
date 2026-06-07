@@ -749,6 +749,10 @@ pub(crate) trait Platform:
         _total_sizes: &mut OutputSectionPartMap<u64>,
     ) {
     }
+
+    fn get_sizeof_headers(_header_info: &layout::HeaderInfo) -> u64 {
+        0
+    }
 }
 
 /// Abstracts over the different object file formats that we support (or may support). e.g. ELF.

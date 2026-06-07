@@ -250,6 +250,14 @@ pub fn compute<'data, P: Platform, A: Arch<Platform = P>>(
         .flat_map(|s| s.parsed.memory_regions.iter().cloned())
         .collect();
 
+    let sizeof_headers = if let Some(FileLayoutState::Prelude(internal)) =
+        group_states.first().and_then(|g| g.files.first())
+    {
+        P::get_sizeof_headers(internal.header_info.as_ref().unwrap())
+    } else {
+        unreachable!();
+    };
+
     let mut section_part_layouts = layout_section_parts::<A::Platform>(
         &section_part_sizes,
         &output_sections,
@@ -257,6 +265,7 @@ pub fn compute<'data, P: Platform, A: Arch<Platform = P>>(
         &output_order,
         &symbol_db,
         &memory_regions,
+        sizeof_headers,
     )?;
 
     if symbol_db.args.should_relax() && A::supports_size_reduction_relaxations() {
@@ -270,6 +279,7 @@ pub fn compute<'data, P: Platform, A: Arch<Platform = P>>(
             &symbol_db,
             &per_symbol_flags,
             &memory_regions,
+            sizeof_headers,
         )?;
     }
 
@@ -372,6 +382,7 @@ pub fn compute<'data, P: Platform, A: Arch<Platform = P>>(
         &mut symbol_resolutions.resolutions,
         &output_sections,
         &section_layouts,
+        sizeof_headers,
     )?;
     crate::gc_stats::maybe_write_gc_stats(&group_layouts, &symbol_db)?;
 
@@ -381,6 +392,7 @@ pub fn compute<'data, P: Platform, A: Arch<Platform = P>>(
         &section_layouts,
         &output_sections,
         &symbol_resolutions.resolutions,
+        sizeof_headers,
     )?;
 
     let thunk_block_addresses = thunk_block_addresses_out
@@ -436,6 +448,7 @@ fn update_redirect_resolutions<'data, P: Platform>(
     resolutions: &mut [Option<Resolution<P>>],
     output_sections: &OutputSections<'data, P>,
     section_layouts: &OutputSectionMap<OutputRecordLayout>,
+    sizeof_headers: u64,
 ) -> Result {
     verbose_timing_phase!("Update symdef resolutions");
 
@@ -453,6 +466,7 @@ fn update_redirect_resolutions<'data, P: Platform>(
                         output_sections,
                         section_layouts,
                         &[],
+                        sizeof_headers,
                     )?;
                     symbol_id = symbol_id.next();
                 }
@@ -468,6 +482,7 @@ fn update_redirect_resolutions<'data, P: Platform>(
                             output_sections,
                             section_layouts,
                             &script.parsed.memory_regions,
+                            sizeof_headers,
                         )?;
                         symbol_id = symbol_id.next();
                     }
@@ -490,6 +505,7 @@ fn update_defsym_symbol_resolution<'data, P: Platform>(
     output_sections: &OutputSections<'data, P>,
     section_layouts: &OutputSectionMap<OutputRecordLayout>,
     memory_regions: &[crate::linker_script::MemoryRegion<'data>],
+    sizeof_headers: u64,
 ) -> Result {
     if let SymbolPlacement::Redirect(redirect) = &def_info.placement {
         let value = crate::expression_eval::evaluate_expression(
@@ -499,6 +515,7 @@ fn update_defsym_symbol_resolution<'data, P: Platform>(
             output_sections,
             memory_regions,
             symbol_db,
+            sizeof_headers,
             &|name| {
                 let Some(target_symbol_id) =
                     symbol_db.get_unversioned(&UnversionedSymbolName::prehashed(name))
@@ -4751,6 +4768,7 @@ fn perform_iterative_relaxation<'data, A: Arch>(
     symbol_db: &SymbolDb<'data, A::Platform>,
     per_symbol_flags: &PerSymbolFlags,
     memory_regions: &[crate::linker_script::MemoryRegion<'data>],
+    sizeof_headers: u64,
 ) -> Result {
     timing_phase!("Iterative relaxation");
 
@@ -4807,6 +4825,7 @@ fn perform_iterative_relaxation<'data, A: Arch>(
             output_order,
             symbol_db,
             memory_regions,
+            sizeof_headers,
         )?;
     }
     Ok(())
@@ -4819,6 +4838,7 @@ fn layout_section_parts<'data, P: Platform>(
     output_order: &OutputOrder<'data>,
     symbol_db: &SymbolDb<'data, P>,
     memory_regions: &[crate::linker_script::MemoryRegion<'data>],
+    sizeof_headers: u64,
 ) -> Result<OutputSectionPartMap<OutputRecordLayout>> {
     let args = symbol_db.args;
     let segment_alignments = compute_segment_alignments::<P>(
@@ -4841,6 +4861,7 @@ fn layout_section_parts<'data, P: Platform>(
             output_sections,
             memory_regions,
             symbol_db,
+            sizeof_headers,
             &|_| {
                 bail!("Symbols with the set location operation are not yet supported.");
             },
@@ -5299,6 +5320,7 @@ fn test_no_disallowed_overlaps() {
         &output_order,
         &symbol_db,
         &[],
+        0,
     )
     .unwrap();
 

@@ -2108,6 +2108,10 @@ impl platform::Platform for Elf {
     fn default_symtab_entry() -> Self::SymtabEntry {
         Default::default()
     }
+
+    fn get_sizeof_headers(header_info: &layout::HeaderInfo) -> u64 {
+        u64::from(FILE_HEADER_SIZE) + program_headers_size(header_info)
+    }
 }
 
 /// Marks the symbol version associated with the dynamic symbol `GLIBC_ABI_DT_RELR` as needed.

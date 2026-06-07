@@ -34,6 +34,7 @@ pub(crate) fn evaluate_assertions<'data, P: Platform>(
     section_layouts: &OutputSectionMap<OutputRecordLayout>,
     output_sections: &OutputSections<'data, P>,
     resolutions: &[Option<Resolution<P>>],
+    sizeof_headers: u64,
 ) -> Result {
     for group in &symbol_db.groups {
         let Group::LinkerScripts(scripts) = group else {
@@ -50,6 +51,7 @@ pub(crate) fn evaluate_assertions<'data, P: Platform>(
                     output_sections,
                     &parsed.memory_regions,
                     symbol_db,
+                    sizeof_headers,
                     &|name| {
                         let Some(target_symbol_id) =
                             symbol_db.get_unversioned(&UnversionedSymbolName::prehashed(name))
@@ -85,6 +87,7 @@ pub(crate) fn evaluate_expression<'data, P: Platform>(
     output_sections: &OutputSections<'data, P>,
     memory_regions: &[MemoryRegion<'data>],
     symbol_db: &SymbolDb<'data, P>,
+    sizeof_headers: u64,
     symbol_resolution_callback: &dyn Fn(&[u8]) -> Result<u64>,
 ) -> Result<u64> {
     macro_rules! eval {
@@ -96,6 +99,7 @@ pub(crate) fn evaluate_expression<'data, P: Platform>(
                 output_sections,
                 memory_regions,
                 symbol_db,
+                sizeof_headers,
                 symbol_resolution_callback,
             )
         };
@@ -201,6 +205,7 @@ pub(crate) fn evaluate_expression<'data, P: Platform>(
                 eval!(default_expr)
             }
         }
+        Expression::SizeofHeaders => Ok(sizeof_headers),
     }
 }
 
@@ -330,6 +335,7 @@ mod tests {
                 sections,
                 &[],
                 symbol_db,
+                0,
                 &|_| Ok(1),
             )
         })
@@ -666,7 +672,7 @@ mod tests {
                 remainder: b"",
             }]);
             symbol_db.add_group(group);
-            assert!(evaluate_assertions::<Elf>(symbol_db, layouts, sections, &[]).is_ok());
+            assert!(evaluate_assertions::<Elf>(symbol_db, layouts, sections, &[], 0).is_ok());
         });
     }
 
@@ -679,7 +685,7 @@ mod tests {
                 remainder: b"",
             }]);
             symbol_db.add_group(group);
-            let err = evaluate_assertions::<Elf>(symbol_db, layouts, sections, &[]).unwrap_err();
+            let err = evaluate_assertions::<Elf>(symbol_db, layouts, sections, &[], 0).unwrap_err();
             assert!(err.to_string().contains("intentional failure"));
         });
     }
@@ -707,6 +713,7 @@ mod tests {
                     sections,
                     &regions,
                     symbol_db,
+                    0,
                     &|_| Ok(0),
                 )
             };

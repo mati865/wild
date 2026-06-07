@@ -222,6 +222,7 @@ pub(crate) enum Expression<'a> {
     LogicalNot(Box<Expression<'a>>),
     BitwiseNot(Box<Expression<'a>>),
     Negate(Box<Expression<'a>>),
+    SizeofHeaders,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -249,7 +250,8 @@ impl<'a> Expression<'a> {
             | Expression::Length(_)
             | Expression::Addr(_)
             | Expression::Loadaddr(_)
-            | Expression::Symbol(_) => {}
+            | Expression::Symbol(_)
+            | Expression::SizeofHeaders => {}
             Expression::Add(l, r)
             | Expression::Subtract(l, r)
             | Expression::Multiply(l, r)
@@ -893,6 +895,8 @@ fn parse_identifier_or_function<'a>(input: &mut &'a BStr) -> winnow::Result<Expr
             }
             _ => Err(ContextError::default()),
         }
+    } else if ident == b"SIZEOF_HEADERS" {
+        Ok(Expression::SizeofHeaders)
     } else {
         // It's a symbol
         Ok(Expression::Symbol(ident))

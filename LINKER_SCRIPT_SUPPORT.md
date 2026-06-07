@@ -83,7 +83,7 @@ end lists the features required to link the Linux kernel.
 | `MAX(a, b)` | ✅ | |
 | Ternary operator (`condition ? a : b`) | 📅 | |
 | `DEFINED(sym)` | 📅 | |
-| `SIZEOF_HEADERS` | 📅 | |
+| `SIZEOF_HEADERS` | ✅ | |
 | `SEGMENT_START(segment, default)` | ✅ | Supports `"text"`, `"data"`, `"bss"`, `"rodata"`; returns `-Ttext`/`-Tdata`/`-Tbss` override if provided, otherwise `default`; unknown segment names always return `default` |
 
 ## MEMORY Command
@@ -123,4 +123,4 @@ see at a glance what remains before Wild can link the kernel.
 | `PHDRS` command for explicit program header definition | 🧪 | The FILEHDR and PHDRS keywords aren't yet supported. |
 | Ternary operator (`condition ? a : b`) | 📅 | |
 | `DEFINED(sym)` function | 📅 | |
-| `SIZEOF_HEADERS` built-in symbol | 📅 | |
+| `SIZEOF_HEADERS` built-in symbol | ✅ | |
