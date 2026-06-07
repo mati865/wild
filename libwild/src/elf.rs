@@ -3368,7 +3368,6 @@ impl RiscVArch {
             .iter()
             .map(|(arch, (major, minor))| format!("{arch}{major}p{minor}"))
             .join("_")
-            .clone()
     }
 }
 
