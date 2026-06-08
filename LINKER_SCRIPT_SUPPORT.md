@@ -42,8 +42,8 @@ end lists the features required to link the Linux kernel.
 | `KEEP(...)` to prevent garbage collection | ✅ | |
 | `PROVIDE(sym = expr)` inside sections | ✅ | |
 | `PROVIDE_HIDDEN(sym = expr)` inside sections | ✅ | |
-| Symbol assignment inside sections (`sym = .`) | 🧪 | Only assignment of the location counter (`sym = .`) is supported; arbitrary expressions on the right-hand side are not |
-| Location counter assignment (`. = expr`) | 🧪 | Hex address literals (e.g. `. = 0x1000`) supported between output sections only; not inside section contents |
+| Symbol assignment inside sections (`sym = .`) | ✅ | |
+| Location counter assignment (`. = expr`) | 🧪 | constant expressions (e.g. `. = 0x1000 * 2`) supported between output sections only; not inside section contents |
 | `ALIGN(n)` on the location counter (`. = ALIGN(n)`) | ✅ | |
 | Per-section `ALIGN(n)` specifier | ✅ | |
 | `ASSERT(expr, "msg")` inside `SECTIONS` | ✅ | |
@@ -124,3 +124,4 @@ see at a glance what remains before Wild can link the kernel.
 | Ternary operator (`condition ? a : b`) | 📅 | |
 | `DEFINED(sym)` function | 📅 | |
 | `SIZEOF_HEADERS` built-in symbol | ✅ | |
+| `/DISCARD/` command | ✅ | |
