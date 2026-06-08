@@ -28,6 +28,7 @@ use std::fmt::Display;
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 pub mod elf;
 pub mod macho;
@@ -56,6 +57,9 @@ pub(crate) const WRITE_VERIFY_ALLOCATIONS_ENV: &str = "WILD_VERIFY_ALLOCATIONS";
 #[derive(derive_more::Debug)]
 pub struct CommonArgs {
     pub(crate) unrecognized_options: Vec<String>,
+
+    pub(crate) output: Arc<Path>,
+    pub(crate) relocation_model: RelocationModel,
 
     /// The number of actually available threads (considering jobserver)
     pub(crate) available_threads: NonZeroUsize,
@@ -270,6 +274,8 @@ pub(crate) enum RelocationModel {
 impl Default for CommonArgs {
     fn default() -> Self {
         Self {
+            output: Arc::from(Path::new("a.out")),
+            relocation_model: RelocationModel::NonRelocatable,
             available_threads: NonZeroUsize::new(1).unwrap(),
             num_threads: None,
             jobserver_client: None,
@@ -957,6 +963,15 @@ impl<T: platform::Args> ArgumentParser<T> {
     }
 }
 
+impl<T> ArgumentParser<T> {
+    fn insert_long_option(&mut self, name: &'static str, handler: OptionHandler<T>) {
+        assert!(
+            self.options.insert(name, handler).is_none(),
+            "Option --{name} registered more than once"
+        );
+    }
+}
+
 struct OptionHandler<T> {
     help_text: &'static str,
     handler: OptionHandlerFn<T>,
@@ -1135,7 +1150,7 @@ impl<'a, T> OptionDeclaration<'a, T, NoParam> {
         };
 
         for name in self.long_names {
-            self.parser.options.insert(name, option_handler.clone());
+            self.parser.insert_long_option(name, option_handler.clone());
         }
 
         for option in self.short_names {
@@ -1158,7 +1173,7 @@ impl<'a, T> OptionDeclaration<'a, T, WithParam> {
         };
 
         for name in self.long_names {
-            self.parser.options.insert(name, option_handler.clone());
+            self.parser.insert_long_option(name, option_handler.clone());
         }
 
         for option in self.short_names {
@@ -1188,7 +1203,7 @@ impl<'a, T> OptionDeclaration<'a, T, WithThreeParams> {
         };
 
         for name in self.long_names {
-            self.parser.options.insert(name, option_handler.clone());
+            self.parser.insert_long_option(name, option_handler.clone());
         }
 
         for option in self.short_names {
@@ -1208,7 +1223,7 @@ impl<'a, T> OptionDeclaration<'a, T, WithOptionalParam> {
         };
 
         for name in self.long_names {
-            self.parser.options.insert(name, option_handler.clone());
+            self.parser.insert_long_option(name, option_handler.clone());
         }
 
         for option in self.short_names {
@@ -1338,6 +1353,32 @@ fn declare_common_args<T: platform::Args>(parser: &mut ArgumentParser<T>) {
         .help("Show symbol information. Accepts symbol name or ID.")
         .execute(|args, _modifier_stack, value| {
             args.common_mut().sym_info = Some(value.to_owned());
+            Ok(())
+        });
+    parser
+        .declare()
+        .long("validate-output")
+        .execute(|args, _modifier_stack| {
+            args.common_mut().validate_output = true;
+            Ok(())
+        });
+    parser
+        .declare()
+        .long("update-in-place")
+        .help("Update file in place")
+        .execute(|args, _modifier_stack| {
+            args.common_mut().file_write_mode = Some(FileWriteMode::UpdateInPlace);
+            Ok(())
+        });
+    parser
+        .declare_with_optional_param()
+        .long("time")
+        .help("Show timing information")
+        .execute(|args, _modifier_stack, value| {
+            args.common_mut().time_phase_options = match value {
+                Some(v) => Some(parse_time_phase_options(v)?),
+                None => Some(Vec::new()),
+            };
             Ok(())
         });
 }
