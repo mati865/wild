@@ -75,7 +75,7 @@ end lists the features required to link the Linux kernel.
 | `SIZEOF(section)` | ✅ | |
 | `ALIGNOF(section)` | ✅ | |
 | `ADDR(section)` | ✅ | |
-| `LOADADDR(section)` | 🧪 | Implemented as alias for `ADDR` (returns VMA); full LMA requires `AT(addr)` support |
+| `LOADADDR(section)` | ✅ | |
 | `ALIGN(expr)` | ✅ | |
 | `LENGTH(region)` | ✅ | |
 | `ORIGIN(region)` | ✅ | |

@@ -145,7 +145,7 @@ pub(crate) fn evaluate_expression<'data, P: Platform>(
 
         // TODO: This is a temporary alias for ADDR.
         // Needs to be updated when AT(expr) and disjoint LMA/VMA tracking are implemented.
-        Expression::Loadaddr(name) => section_address(name, section_layouts, output_sections),
+        Expression::Loadaddr(name) => section_load_address(name, section_layouts, output_sections),
 
         Expression::Align(expr) => {
             let align = eval!(expr)?;
@@ -293,6 +293,22 @@ fn section_address<'data, P: Platform>(
             )
         })?;
     Ok(section_layouts.get(id).mem_offset)
+}
+
+fn section_load_address<'data, P: Platform>(
+    name: &[u8],
+    section_layouts: &OutputSectionMap<OutputRecordLayout>,
+    output_sections: &OutputSections<'data, P>,
+) -> Result<u64> {
+    let id = output_sections
+        .section_id_by_name(SectionName(name))
+        .ok_or_else(|| {
+            crate::error!(
+                "LOADADDR: section '{}' not found",
+                String::from_utf8_lossy(name)
+            )
+        })?;
+    Ok(section_layouts.get(id).lma_offset)
 }
 
 #[cfg(test)]
