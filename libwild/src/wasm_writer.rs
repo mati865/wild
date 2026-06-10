@@ -10,10 +10,12 @@ use crate::wasm::WASM_MAGIC;
 use crate::wasm::WASM_VERSION;
 use crate::wasm::Wasm;
 use crate::wasm::WasmLayout;
+use wasm_encoder::CodeSection;
 use wasm_encoder::ExportSection;
 use wasm_encoder::FunctionSection;
 use wasm_encoder::GlobalSection;
 use wasm_encoder::ImportSection;
+use wasm_encoder::MemorySection;
 use wasm_encoder::TypeSection;
 
 pub(crate) fn write<'data, A: Arch<Platform = Wasm>>(
@@ -33,7 +35,11 @@ pub(crate) fn write<'data, A: Arch<Platform = Wasm>>(
 
     copy_metadata_sections(&layout.properties_and_attributes, &mut section_buffers)?;
 
-    bail!("Wasm code and data section emission is not implemented yet");
+    if let Some(unsupported) = layout.properties_and_attributes.unsupported_output.first() {
+        bail!("Wasm {unsupported} emission is not implemented yet");
+    }
+
+    Ok(())
 }
 
 fn copy_metadata_sections(
@@ -60,6 +66,14 @@ fn copy_metadata_sections(
     copy_encoded_section(
         encoded.export.as_ref(),
         section_buffers.get_mut(crate::output_section_id::WASM_EXPORT),
+    )?;
+    copy_encoded_section(
+        encoded.code.as_ref(),
+        section_buffers.get_mut(crate::output_section_id::WASM_CODE),
+    )?;
+    copy_encoded_section(
+        encoded.memory.as_ref(),
+        section_buffers.get_mut(crate::output_section_id::WASM_MEMORY),
     )?;
     Ok(())
 }
@@ -149,6 +163,24 @@ pub(crate) fn build_global_section(globals: &[OutputGlobal<'_>]) -> Result<Globa
     Ok(section)
 }
 
+pub(crate) fn build_memory_section(memories: &[wasmparser::MemoryType]) -> MemorySection {
+    let mut section = MemorySection::new();
+    for &memory in memories {
+        section.memory(convert_memory_type(memory));
+    }
+    section
+}
+
+pub(crate) fn build_code_section<'a>(
+    function_bodies: impl IntoIterator<Item = &'a [u8]>,
+) -> CodeSection {
+    let mut section = CodeSection::new();
+    for body in function_bodies {
+        section.raw(body);
+    }
+    section
+}
+
 /// Build an `export` section.
 pub(crate) fn build_export_section(exports: &[OutputExport<'_>]) -> ExportSection {
     let mut section = ExportSection::new();
@@ -212,6 +244,16 @@ fn convert_global_type(t: wasmparser::GlobalType) -> Result<wasm_encoder::Global
         mutable: t.mutable,
         shared: t.shared,
     })
+}
+
+fn convert_memory_type(t: wasmparser::MemoryType) -> wasm_encoder::MemoryType {
+    wasm_encoder::MemoryType {
+        minimum: t.initial,
+        maximum: t.maximum,
+        memory64: t.memory64,
+        shared: t.shared,
+        page_size_log2: t.page_size_log2,
+    }
 }
 
 fn convert_export_kind(k: wasmparser::ExternalKind) -> wasm_encoder::ExportKind {
