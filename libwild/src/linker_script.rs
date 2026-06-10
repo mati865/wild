@@ -105,6 +105,7 @@ pub(crate) struct Section<'a> {
     pub(crate) alignment: Option<Alignment>,
     pub(crate) start_address_expression: Option<Expression<'a>>,
     pub(crate) phdr: Option<&'a [u8]>,
+    pub(crate) at_address: Option<Expression<'a>>,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -1067,9 +1068,14 @@ fn parse_section_command<'input>(
     skip_comments_and_whitespace(input)?;
 
     let mut alignment = None;
+    let mut at_address = None;
 
     while !input.starts_with(b"{") {
-        alignment = Some(parse_alignment.parse_next(input)?);
+        if opt("AT").parse_next(input)?.is_some() {
+            at_address = Some(parse_at_address.parse_next(input)?);
+        } else {
+            alignment = Some(parse_alignment.parse_next(input)?);
+        }
     }
 
     '{'.parse_next(input)?;
@@ -1093,6 +1099,7 @@ fn parse_section_command<'input>(
         alignment,
         start_address_expression,
         phdr,
+        at_address,
     }))
 }
 
@@ -1109,6 +1116,17 @@ fn parse_alignment(input: &mut &BStr) -> winnow::Result<Alignment> {
     ')'.parse_next(input)?;
     skip_comments_and_whitespace(input)?;
     Ok(alignment)
+}
+
+fn parse_at_address<'input>(input: &mut &'input BStr) -> winnow::Result<Expression<'input>> {
+    skip_comments_and_whitespace(input)?;
+    '('.parse_next(input)?;
+    skip_comments_and_whitespace(input)?;
+    let address = parse_expression.parse_next(input)?;
+    skip_comments_and_whitespace(input)?;
+    ')'.parse_next(input)?;
+    skip_comments_and_whitespace(input)?;
+    Ok(address)
 }
 
 fn parse_contents_command<'input>(
@@ -1420,6 +1438,7 @@ mod tests {
                 alignment: None,
                 start_address_expression: None,
                 phdr: None,
+                at_address: None,
             }),
         );
     }
@@ -1438,6 +1457,7 @@ mod tests {
                 alignment: Some(Alignment::new(8).unwrap()),
                 start_address_expression: Some(Expression::Number(0)),
                 phdr: None,
+                at_address: None,
             }),
         );
     }
@@ -1494,6 +1514,7 @@ mod tests {
                                 alignment: Some(Alignment::new(8).unwrap()),
                                 start_address_expression: None,
                                 phdr: None,
+                                at_address: None,
                             }),
                         ],
                     }),
@@ -1631,6 +1652,7 @@ mod tests {
                 alignment: None,
                 start_address_expression: None,
                 phdr: None,
+                at_address: None,
             }),
         );
     }
@@ -1649,6 +1671,7 @@ mod tests {
                 alignment: None,
                 start_address_expression: None,
                 phdr: None,
+                at_address: None,
             }),
         );
     }
@@ -1667,6 +1690,7 @@ mod tests {
                 alignment: None,
                 start_address_expression: None,
                 phdr: None,
+                at_address: None,
             }),
         );
     }
@@ -1693,6 +1717,7 @@ mod tests {
                             alignment: None,
                             start_address_expression: None,
                             phdr: None,
+                            at_address: None,
                         })],
                     }),
                     Command::Assert(AssertCommand {
@@ -1730,6 +1755,7 @@ mod tests {
                             alignment: None,
                             start_address_expression: None,
                             phdr: None,
+                            at_address: None,
                         }),
                         SectionCommand::Assert(AssertCommand {
                             expression: Expression::LessThan(

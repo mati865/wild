@@ -1082,6 +1082,7 @@ impl platform::Platform for MachO {
                 kind: d.kind,
                 min_alignment: d.min_alignment,
                 location: None,
+                load_location: None,
                 secondary_order: None,
                 phdr_name: None,
             })

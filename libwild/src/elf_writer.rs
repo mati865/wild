@@ -385,7 +385,7 @@ fn write_program_headers(
             .p_offset
             .set(e, segment_sizes.file_offset as u64);
         segment_header.p_vaddr.set(e, segment_sizes.mem_offset);
-        segment_header.p_paddr.set(e, segment_sizes.mem_offset);
+        segment_header.p_paddr.set(e, segment_sizes.lma_offset);
         segment_header
             .p_filesz
             .set(e, segment_sizes.file_size as u64);

@@ -228,6 +228,7 @@ impl<'data> LayoutRulesBuilder<'data> {
                                 SectionName(sec.output_section_name),
                                 min_alignment,
                                 section_location,
+                                sec.at_address.clone(),
                                 sec.phdr,
                             );
                             current_section_id = Some(primary_section_id);

@@ -3793,7 +3793,7 @@ fn read_segment_elf<'data>(elf_file: &ElfFile64<'data>, address: u64) -> Option<
         if raw_seg.p_type(e) != object::elf::PT_LOAD {
             continue;
         }
-        let seg_address = raw_seg.p_paddr(e);
+        let seg_address = raw_seg.p_vaddr(e);
         let seg_len = raw_seg.p_memsz(e);
         let seg_end = seg_address + seg_len;
 

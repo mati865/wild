@@ -1338,6 +1338,9 @@ struct PhdrAssertions {
 
     #[serde(default)]
     sections: Vec<String>,
+
+    paddr: Option<u64>,
+    vaddr: Option<u64>,
 }
 
 impl ExpectedProgramHeaders {
@@ -3897,15 +3900,23 @@ impl Assertions {
             let mut found = false;
             for (header, actual_sections) in headers.iter().zip(&header_sections) {
                 if header.p_type(endian).0 == expected.ptype as u32 {
-                    let flags = expected.assertions.flags;
-                    let expected_sections = &expected.assertions.sections;
-                    if flags.is_none() && expected_sections.is_empty() {
-                        found = true;
+                    let assertions = &expected.assertions;
+                    let expected_sections = &assertions.sections;
+
+                    if let Some(expected_flags) = assertions.flags
+                        && header.p_flags(endian).0 != expected_flags.bits()
+                    {
                         continue;
                     }
 
-                    if let Some(expected_flags) = flags
-                        && header.p_flags(endian).0 != expected_flags.bits()
+                    if let Some(expected_paddr) = assertions.paddr
+                        && header.p_paddr(endian) != expected_paddr
+                    {
+                        continue;
+                    }
+
+                    if let Some(expected_vaddr) = assertions.vaddr
+                        && header.p_vaddr(endian) != expected_vaddr
                     {
                         continue;
                     }

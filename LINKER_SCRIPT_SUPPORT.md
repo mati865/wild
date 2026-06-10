@@ -50,7 +50,7 @@ end lists the features required to link the Linux kernel.
 | `OVERLAY { ... }` | ❌ | |
 | Output section type specifiers (`(NOLOAD)`, `(COPY)`, etc.) | 📅 | |
 | `FILL(value)` and `=fillexp` | 📅 | |
-| `AT(addr)` load-address specifier on output sections | 📅 | |
+| `AT(addr)` load-address specifier on output sections | ✅ | |
 | Numeric address between section name and `:` (e.g. `name 0 : { ... }`) | 🧪 | Only numeric literals are currently supported |
 | `SORT_BY_NAME(...)`, `SORT_BY_ALIGNMENT(...)`, `SORT_BY_INIT_PRIORITY(...)` | 📅 | |
 | `EXCLUDE_FILE(...)` inside input section matchers | 📅 | |
@@ -115,7 +115,7 @@ see at a glance what remains before Wild can link the kernel.
 | `OVERLAY { ... }` sections | ❌ | |
 | Output section type specifiers (`(NOLOAD)`, `(COPY)`) | 📅 | |
 | `FILL(value)` and `=fillexp` | 📅 | |
-| `AT(addr)` load-address specifier on output sections | 📅 | |
+| `AT(addr)` load-address specifier on output sections | ✅ | |
 | `>region` and `AT>region` memory region placement | 📅 | |
 | `SORT_BY_NAME(...)`, `SORT_BY_ALIGNMENT(...)`, `SORT_BY_INIT_PRIORITY(...)` | 📅 | |
 | `EXCLUDE_FILE(...)` inside input section matchers | 📅 | |

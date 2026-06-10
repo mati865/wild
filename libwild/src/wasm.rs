@@ -1986,6 +1986,7 @@ impl platform::Platform for Wasm {
                 kind: d.kind,
                 min_alignment: crate::alignment::MIN,
                 location: None,
+                load_location: None,
                 secondary_order: None,
                 phdr_name: None,
             })
