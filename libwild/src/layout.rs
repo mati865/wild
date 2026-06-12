@@ -220,7 +220,7 @@ pub fn compute<'data, P: Platform, A: Arch<Platform = P>>(
         output_order.display::<A::Platform>(&output_sections, &program_segments)
     );
 
-    let mut section_part_sizes = compute_total_section_part_sizes(
+    let (mut section_part_sizes, gdb_index_data) = compute_total_section_part_sizes(
         &mut group_states,
         &mut output_sections,
         &output_order,
@@ -435,6 +435,7 @@ pub fn compute<'data, P: Platform, A: Arch<Platform = P>>(
         properties_and_attributes,
         thunk_block_addresses,
         compressed_debug_sections: OutputSectionMap::with_size(num_sections),
+        gdb_index_data,
     };
 
     P::maybe_compress_debug_sections::<A>(&mut layout)?;
@@ -704,6 +705,7 @@ pub struct Layout<'data, P: Platform> {
     pub(crate) thunk_block_addresses: Vec<BTreeMap<SymbolId, u64>>,
 
     pub(crate) compressed_debug_sections: OutputSectionMap<Option<CompressedSection>>,
+    pub(crate) gdb_index_data: Option<P::GdbIndexScanResult>,
 }
 
 #[derive(Debug, Default)]
@@ -1237,6 +1239,8 @@ impl<'data, P: Platform> CommonGroupState<'data, P> {
             part_id::SYMTAB_SHNDX_GLOBAL,
             *self.mem_sizes.get(part_id::SYMTAB_SHNDX_GLOBAL),
         );
+
+        memory_offsets.increment(part_id::GDB_INDEX, *self.mem_sizes.get(part_id::GDB_INDEX));
 
         strtab_offset_start
     }
@@ -1968,12 +1972,27 @@ fn compute_total_section_part_sizes<'data, P: Platform>(
     per_symbol_flags: &mut PerSymbolFlags,
     must_keep_sections: OutputSectionMap<bool>,
     resources: &FinaliseSizesResources<'data, '_, P>,
-) -> Result<OutputSectionPartMap<u64>> {
+) -> Result<(OutputSectionPartMap<u64>, Option<P::GdbIndexScanResult>)> {
     timing_phase!("Compute total section sizes");
 
     let mut total_sizes: OutputSectionPartMap<u64> = output_sections.new_part_map();
     for group_state in group_states.iter() {
         total_sizes.merge(&group_state.common.mem_sizes);
+    }
+
+    // Compute and allocate the .gdb_index section size if --gdb-index is enabled.
+    let (gdb_index_size, gdb_index_data) = if resources.symbol_db.args.should_write_gdb_index() {
+        P::compute_gdb_index_size(group_states)?
+    } else {
+        (0, None)
+    };
+    if gdb_index_size > 0 {
+        let first_group = group_states.first_mut().unwrap();
+        first_group
+            .common
+            .mem_sizes
+            .increment(part_id::GDB_INDEX, gdb_index_size);
+        total_sizes.increment(part_id::GDB_INDEX, gdb_index_size);
     }
 
     // We need to apply late-stage adjustments for the epilogue before we do so for the prelude,
@@ -2014,7 +2033,7 @@ fn compute_total_section_part_sizes<'data, P: Platform>(
         }
     }
 
-    Ok(total_sizes)
+    Ok((total_sizes, gdb_index_data))
 }
 
 /// Allocates space for thunk blocks in each object that owns one.

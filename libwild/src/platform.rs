@@ -764,6 +764,16 @@ pub(crate) trait Platform:
     fn get_sizeof_headers(_header_info: &layout::HeaderInfo) -> u64 {
         0
     }
+
+    /// Scan result for the `.gdb_index` section, if applicable.
+    type GdbIndexScanResult: Send + Sync;
+
+    /// Compute the size of the `.gdb_index` section and return the scan result for the write phase.
+    fn compute_gdb_index_size(
+        _groups: &[crate::layout::GroupState<Self>],
+    ) -> crate::error::Result<(u64, Option<Self::GdbIndexScanResult>)> {
+        Ok((0, None))
+    }
 }
 
 /// Abstracts over the different object file formats that we support (or may support). e.g. ELF.
@@ -1342,6 +1352,10 @@ pub(crate) trait Args: std::fmt::Debug + Send + Sync + 'static {
 
     fn relocation_model(&self) -> crate::args::RelocationModel {
         self.common().relocation_model
+    }
+
+    fn should_write_gdb_index(&self) -> bool {
+        false
     }
 
     fn should_output_executable(&self) -> bool;

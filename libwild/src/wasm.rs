@@ -1929,6 +1929,7 @@ impl platform::Platform for Wasm {
     type SymtabShndxEntry = ();
     type SymbolVersionIndex = ();
     type LayoutExt<'data> = WasmLayout<'data>;
+    type GdbIndexScanResult = ();
     type SectionIterator<'a> = core::slice::Iter<'a, SectionHeader>;
     type DynamicTagValues<'data> = DynamicTagValues<'data>;
     type RelocationList<'data> = RelocationList<'data>;
