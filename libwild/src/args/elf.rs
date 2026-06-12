@@ -10,7 +10,7 @@ use crate::arch::Architecture;
 use crate::args::CommonArgs;
 use crate::args::CopyRelocations;
 use crate::args::CopyRelocationsDisabledReason;
-use crate::args::FileWriteMode;
+use crate::args::FileReplacementMode;
 use crate::args::Modifiers;
 use crate::args::RelocationModel;
 use crate::args::UnresolvedSymbols;
@@ -18,6 +18,7 @@ use crate::args::VersionMode;
 use crate::bail;
 use crate::error::Context as _;
 use crate::error::Result;
+use crate::file_writer::FileWriteMode;
 use crate::linker_script::maybe_forced_sysroot;
 use crate::output_kind::OutputKind;
 use crate::output_section_id::SectionName;
@@ -942,7 +943,7 @@ fn setup_argument_parser() -> ArgumentParser<ElfArgs> {
         .long("mmap-output-file")
         .help("Write output file using mmap (default)")
         .execute(|args, _modifier_stack| {
-            args.common_mut().mmap_output_file = true;
+            args.common_mut().file_write_mode = Some(FileWriteMode::Mmap);
             Ok(())
         });
 
@@ -951,7 +952,7 @@ fn setup_argument_parser() -> ArgumentParser<ElfArgs> {
         .long("no-mmap-output-file")
         .help("Write output file without mmap")
         .execute(|args, _modifier_stack| {
-            args.common_mut().mmap_output_file = false;
+            args.common_mut().file_write_mode = Some(FileWriteMode::BufferThenWrite);
             Ok(())
         });
 
@@ -1676,7 +1677,7 @@ fn setup_argument_parser() -> ArgumentParser<ElfArgs> {
         .long("no-update-in-place")
         .help("Delete and recreate the file")
         .execute(|args, _modifier_stack| {
-            args.common_mut().file_write_mode = Some(FileWriteMode::UnlinkAndReplace);
+            args.common_mut().file_replacement_mode = Some(FileReplacementMode::UnlinkAndReplace);
             Ok(())
         });
 
