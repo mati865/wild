@@ -1,6 +1,5 @@
-#![allow(dead_code)]
-
 use crate::bail;
+use crate::ensure;
 use crate::error::Result;
 use crate::file_writer::SizedOutput;
 use crate::file_writer::split_output_into_sections;
@@ -9,8 +8,13 @@ use crate::platform::Arch;
 use crate::wasm::WASM_MAGIC;
 use crate::wasm::WASM_VERSION;
 use crate::wasm::Wasm;
+use crate::wasm::WasmFunctionBody;
 use crate::wasm::WasmLayout;
-use wasm_encoder::CodeSection;
+use crate::wasm::WasmRelocation;
+use crate::wasm::apply_relocation;
+use crate::wasm::section_id;
+use crate::wasm::write_uleb128;
+use linker_utils::utils::uleb128_size;
 use wasm_encoder::ExportSection;
 use wasm_encoder::FunctionSection;
 use wasm_encoder::GlobalSection;
@@ -34,6 +38,10 @@ pub(crate) fn write<'data, A: Arch<Platform = Wasm>>(
     preamble[4..8].copy_from_slice(&WASM_VERSION.to_le_bytes());
 
     copy_metadata_sections(&layout.properties_and_attributes, &mut section_buffers)?;
+    write_code_section(
+        &layout.properties_and_attributes.function_bodies,
+        section_buffers.get_mut(crate::output_section_id::WASM_CODE),
+    )?;
 
     if let Some(unsupported) = layout.properties_and_attributes.unsupported_output.first() {
         bail!("Wasm {unsupported} emission is not implemented yet");
@@ -68,10 +76,6 @@ fn copy_metadata_sections(
         section_buffers.get_mut(crate::output_section_id::WASM_EXPORT),
     )?;
     copy_encoded_section(
-        encoded.code.as_ref(),
-        section_buffers.get_mut(crate::output_section_id::WASM_CODE),
-    )?;
-    copy_encoded_section(
         encoded.memory.as_ref(),
         section_buffers.get_mut(crate::output_section_id::WASM_MEMORY),
     )?;
@@ -81,24 +85,90 @@ fn copy_metadata_sections(
 fn copy_encoded_section(encoded: Option<&Vec<u8>>, out: &mut [u8]) -> Result<()> {
     match encoded {
         Some(encoded) => {
-            if out.len() != encoded.len() {
-                bail!(
-                    "Wasm metadata section size mismatch: allocated {}, encoded {}",
-                    out.len(),
-                    encoded.len()
-                );
-            }
+            ensure!(
+                out.len() == encoded.len(),
+                "Wasm metadata section size allocated {}, encoded {}",
+                out.len(),
+                encoded.len()
+            );
             out.copy_from_slice(encoded);
         }
         None => {
-            if !out.is_empty() {
-                bail!(
-                    "Wasm metadata section unexpectedly allocated {} bytes",
-                    out.len()
-                );
-            }
+            ensure!(
+                out.is_empty(),
+                "Wasm metadata section unexpectedly allocated {} bytes",
+                out.len()
+            );
         }
     }
+    Ok(())
+}
+
+// Each `WasmFunctionBody.bytes` is the raw body content (locals + operators) without a size prefix.
+// This function writes the LEB128 size prefix for each body.
+fn write_code_section(bodies: &[WasmFunctionBody<'_>], out: &mut [u8]) -> Result<()> {
+    if bodies.is_empty() {
+        ensure!(
+            out.is_empty(),
+            "Wasm code section buffer is {} bytes but no bodies to write",
+            out.len()
+        );
+        return Ok(());
+    }
+
+    let mut pos = 0;
+
+    // Section id.
+    out[pos] = section_id::CODE;
+    pos += 1;
+
+    let count = bodies.len() as u64;
+    // Compute payload size: count LEB + sum(body_size_leb + body_bytes) for each body.
+    let count_leb_size = uleb128_size(count);
+    let bodies_with_prefix_total: usize = bodies
+        .iter()
+        .map(|b| {
+            let body_len = b.bytes.len() as u64;
+            uleb128_size(body_len) + b.bytes.len()
+        })
+        .sum();
+    let payload_size = (count_leb_size + bodies_with_prefix_total) as u64;
+
+    pos += write_uleb128(&mut out[pos..], payload_size);
+
+    // Body count as LEB128.
+    pos += write_uleb128(&mut out[pos..], count);
+
+    // Function bodies: size prefix + body bytes.
+    for body in bodies {
+        let body_len = body.bytes.len() as u64;
+        pos += write_uleb128(&mut out[pos..], body_len);
+        let body_start = pos;
+        let len = body.bytes.len();
+        out[pos..pos + len].copy_from_slice(body.bytes);
+        for resolved in &body.relocations {
+            let reloc = WasmRelocation {
+                ty: resolved.ty,
+                offset: resolved.offset,
+                index: 0,
+                addend: 0,
+            };
+            apply_relocation(
+                &mut out[body_start..body_start + len],
+                &reloc,
+                resolved.value,
+            )?;
+        }
+        pos += len;
+    }
+
+    ensure!(
+        pos == out.len(),
+        "Wasm code section wrote {} bytes but buffer is {} bytes",
+        pos,
+        out.len()
+    );
+
     Ok(())
 }
 
@@ -167,16 +237,6 @@ pub(crate) fn build_memory_section(memories: &[wasmparser::MemoryType]) -> Memor
     let mut section = MemorySection::new();
     for &memory in memories {
         section.memory(convert_memory_type(memory));
-    }
-    section
-}
-
-pub(crate) fn build_code_section<'a>(
-    function_bodies: impl IntoIterator<Item = &'a [u8]>,
-) -> CodeSection {
-    let mut section = CodeSection::new();
-    for body in function_bodies {
-        section.raw(body);
     }
     section
 }
