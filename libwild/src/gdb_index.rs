@@ -27,10 +27,10 @@ use linker_utils::elf::secnames::DEBUG_INFO_SECTION_NAME_STR;
 use linker_utils::utils::u32_from_slice;
 use linker_utils::utils::u64_from_slice;
 use object::read::elf::SectionHeader as _;
-use rayon::iter::IntoParallelRefIterator;
-use rayon::iter::ParallelIterator;
+use rayon::iter::IntoParallelRefIterator as _;
+use rayon::iter::ParallelIterator as _;
+use rayon::slice::ParallelSliceMut as _;
 use std::borrow::Cow;
-use std::collections::BTreeSet;
 use std::mem::size_of;
 use zerocopy::FromBytes;
 use zerocopy::Immutable;
@@ -349,7 +349,7 @@ fn build_cu_list(output_buf: &[u8], layout: &Layout<'_, Elf>) -> Result<Vec<GdbI
 }
 
 struct SymData {
-    cv_entries: BTreeSet<u32>,
+    cv_entries: Vec<u32>,
     hash: u32,
 }
 
@@ -377,6 +377,8 @@ fn scan_one_object<'data>(
     object: &ObjectLayoutState<'data, Elf>,
     sections: &[SectionSlot],
 ) -> Result<Option<PerObjectGdbScan<'data>>> {
+    verbose_timing_phase!("Parse GDB index inputs");
+
     let boundaries = match section_by_name(object.object, DEBUG_INFO_SECTION_NAME_STR)? {
         Some(data) => parse_cu_boundaries(&data)?,
         None => return Ok(None),
@@ -454,18 +456,25 @@ fn merge_gdb_index_scans(per_object: Vec<Option<PerObjectGdbScan>>) -> GdbIndexS
         for (name, local_cu_idx, attrs) in scan.symbol_entries {
             let entry = encode_cu_vector_entry(base + local_cu_idx, attrs);
             let sd = sym_map.entry(name).or_insert_with_key(|name| SymData {
-                cv_entries: BTreeSet::new(),
+                cv_entries: Vec::with_capacity(4),
                 hash: gdb_hash(name),
             });
-            sd.cv_entries.insert(entry);
+            sd.cv_entries.push(entry);
         }
     }
 
-    let sorted: Vec<(&[u8], SymData)> = sym_map
-        .into_iter()
-        .sorted_unstable_by_key(|(a, _)| *a)
-        .collect();
+    let mut sorted = sort_symbols(sym_map);
+
+    sort_cv_entries(&mut sorted);
+
     let ht_slots = compute_hash_table_slots(sorted.len());
+
+    tracing::trace!(
+        ht_slots,
+        total_cus,
+        symbol_count = sorted.len(),
+        total_cv_entries = sorted.iter().map(|e| e.1.cv_entries.len()).sum::<usize>()
+    );
 
     GdbIndexScanResult {
         total_cus,
@@ -473,6 +482,26 @@ fn merge_gdb_index_scans(per_object: Vec<Option<PerObjectGdbScan>>) -> GdbIndexS
         sorted_symbols: sorted,
         ht_slots,
         per_object_cu_counts,
+    }
+}
+
+fn sort_symbols(sym_map: HashMap<&[u8], SymData>) -> Vec<(&[u8], SymData)> {
+    timing_phase!("Sort symbols");
+
+    let mut sorted: Vec<(&[u8], SymData)> = sym_map.into_iter().collect_vec();
+    sorted.par_sort_unstable_by_key(|(a, _)| *a);
+    sorted
+}
+
+fn sort_cv_entries(sorted: &mut Vec<(&[u8], SymData)>) {
+    timing_phase!("Sort CV entries");
+
+    for (_, sd) in sorted {
+        sd.cv_entries.sort_unstable();
+        debug_assert!(
+            sd.cv_entries.array_windows().all(|[a, b]| a != b),
+            "Duplicate CV entries detected"
+        );
     }
 }
 
