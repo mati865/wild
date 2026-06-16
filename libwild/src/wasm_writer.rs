@@ -14,7 +14,7 @@ use crate::wasm::WasmRelocation;
 use crate::wasm::apply_relocation;
 use crate::wasm::section_id;
 use crate::wasm::write_uleb128;
-use linker_utils::utils::uleb128_size;
+use leb128::write::unsigned_len as uleb128_size;
 use wasm_encoder::ExportSection;
 use wasm_encoder::FunctionSection;
 use wasm_encoder::GlobalSection;
