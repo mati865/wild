@@ -35,6 +35,7 @@ use crate::program_segments::ProgramSegments;
 use crate::timing_phase;
 use core::slice;
 use hashbrown::HashMap;
+use itertools::multizip;
 use std::fmt::Debug;
 use std::fmt::Display;
 use std::ops::Range;
@@ -185,6 +186,7 @@ pub(crate) struct OutputOrderBuilder<'scope, 'data, P: Platform> {
 
     /// Indexes correspond to elements of `PROGRAM_SEGMENT_DEFS`.
     active_segment_kinds: Vec<Option<ProgramSegmentId>>,
+    active_segment_regions: Vec<Option<&'data [u8]>>,
 
     output_sections: &'scope OutputSections<'data, P>,
     secondary: &'scope OutputSectionMap<Vec<OutputSectionId>>,
@@ -204,6 +206,7 @@ impl<'scope, 'data, P: Platform> OutputOrderBuilder<'scope, 'data, P> {
             program_segments: ProgramSegments::empty(),
             output_sections,
             active_segment_kinds: vec![None; P::program_segment_defs().len()],
+            active_segment_regions: vec![None; P::program_segment_defs().len()],
             secondary,
             output_kind,
             has_custom_phdrs,
@@ -292,6 +295,7 @@ impl<'scope, 'data, P: Platform> OutputOrderBuilder<'scope, 'data, P> {
             && let Some(segment_id) = self.active_segment_kinds[def_index].take()
         {
             self.events.push(OrderEvent::SegmentEnd(segment_id));
+            self.active_segment_regions[def_index] = None;
         }
     }
 
@@ -324,42 +328,59 @@ impl<'scope, 'data, P: Platform> OutputOrderBuilder<'scope, 'data, P> {
         let section_info = self.output_sections.output_info(section_id);
         if section_info.location.is_some() {
             // If we're setting the location, then first end all active segments.
-            for id in &mut self.active_segment_kinds {
+            for (id, region) in self
+                .active_segment_kinds
+                .iter_mut()
+                .zip(&mut self.active_segment_regions)
+            {
                 if let Some(id) = id.take() {
                     stop.push(id);
+                    *region = None;
                 }
             }
         }
 
-        P::program_segment_defs()
-            .iter()
-            .zip(self.active_segment_kinds.iter_mut())
-            .for_each(|(segment_def, active_id)| {
-                let should_be_active = self
-                    .output_sections
-                    .should_include_in_segment(section_id, *segment_def);
+        let section_region = section_info.region_name;
+        multizip((
+            P::program_segment_defs(),
+            self.active_segment_kinds.iter_mut(),
+            self.active_segment_regions.iter_mut(),
+        ))
+        .for_each(|(segment_def, active_id, active_region)| {
+            let should_be_active = self
+                .output_sections
+                .should_include_in_segment(section_id, *segment_def);
 
-                match (active_id.as_ref().copied(), should_be_active) {
-                    // Remain inactive
-                    (None, false) => {}
+            match (active_id.as_ref(), should_be_active) {
+                // Remain inactive
+                (None, false) => {}
 
-                    // Remain active
-                    (Some(_), true) => {}
-
-                    // Start segment
-                    (None, true) => {
-                        let segment_id = self.program_segments.add_segment(*segment_def);
-                        start.push(segment_id);
-                        *active_id = Some(segment_id);
-                    }
-
-                    // End segment
-                    (Some(segment_id), false) => {
-                        stop.push(segment_id);
-                        *active_id = None;
+                // Remain active
+                (Some(segment_id), true) => {
+                    if *active_region != section_region {
+                        stop.push(*segment_id);
+                        let new_segment_id = self.program_segments.add_segment(*segment_def);
+                        start.push(new_segment_id);
+                        *active_id = Some(new_segment_id);
+                        *active_region = section_region;
                     }
                 }
-            });
+                // Start segment
+                (None, true) => {
+                    let segment_id = self.program_segments.add_segment(*segment_def);
+                    start.push(segment_id);
+                    *active_id = Some(segment_id);
+                    *active_region = section_region;
+                }
+
+                // End segment
+                (Some(segment_id), false) => {
+                    stop.push(*segment_id);
+                    *active_id = None;
+                    *active_region = None;
+                }
+            }
+        });
 
         (stop, start)
     }
@@ -499,6 +520,7 @@ pub(crate) struct SectionOutputInfo<'data, P: Platform> {
     pub(crate) load_location: Option<linker_script::Expression<'data>>,
     pub(crate) secondary_order: Option<SecondaryOrder>,
     pub(crate) phdr_name: Option<&'data [u8]>,
+    pub(crate) region_name: Option<&'data [u8]>,
 }
 
 impl OutputSectionId {
@@ -637,7 +659,7 @@ impl<'data, P: Platform> OutputSections<'data, P> {
                 .start_address_for_section(custom.name)
                 .map(linker_script::Expression::Number);
             let section_id =
-                self.add_named_section(custom.name, custom.alignment, location, None, None);
+                self.add_named_section(custom.name, custom.alignment, location, None, None, None);
 
             section_part_ids[custom.index.0] = section_id.part_id_with_alignment(custom.alignment);
         }
@@ -666,6 +688,7 @@ impl<'data, P: Platform> OutputSections<'data, P> {
         location: Option<linker_script::Expression<'data>>,
         load_location: Option<linker_script::Expression<'data>>,
         phdr_name: Option<&'data [u8]>,
+        region_name: Option<&'data [u8]>,
     ) -> OutputSectionId {
         *self.custom_by_name.entry(name).or_insert_with(|| {
             self.section_infos.add_new(SectionOutputInfo {
@@ -678,6 +701,7 @@ impl<'data, P: Platform> OutputSections<'data, P> {
                 load_location,
                 secondary_order: None,
                 phdr_name,
+                region_name,
             })
         })
     }
@@ -699,6 +723,7 @@ impl<'data, P: Platform> OutputSections<'data, P> {
             load_location,
             secondary_order,
             phdr_name: None,
+            region_name: primary_info.region_name,
         })
     }
 
@@ -947,6 +972,7 @@ impl<'data, P: Platform> OutputSections<'data, P> {
             output_sections.add_named_section(
                 SectionName(name.as_bytes()),
                 crate::alignment::MIN,
+                None,
                 None,
                 None,
                 None,

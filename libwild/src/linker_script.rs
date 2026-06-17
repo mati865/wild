@@ -106,6 +106,7 @@ pub(crate) struct Section<'a> {
     pub(crate) start_address_expression: Option<Expression<'a>>,
     pub(crate) phdr: Option<&'a [u8]>,
     pub(crate) at_address: Option<Expression<'a>>,
+    pub(crate) region: Option<&'a [u8]>,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -1085,11 +1086,17 @@ fn parse_section_command<'input>(
 
     skip_comments_and_whitespace(input)?;
 
-    let phdr = if opt(":").parse_next(input)?.is_some() {
-        Some(parse_token(input)?)
-    } else {
-        None
-    };
+    let mut phdr = None;
+    let mut region = None;
+    while let Some(prefix) = opt(alt((b":", b">"))).parse_next(input)? {
+        skip_comments_and_whitespace(input)?;
+        match prefix {
+            b":" => phdr = Some(parse_token(input)?),
+            b">" => region = Some(parse_token(input)?),
+            _ => unreachable!(),
+        }
+        skip_comments_and_whitespace(input)?;
+    }
 
     skip_comments_and_whitespace(input)?;
 
@@ -1100,6 +1107,7 @@ fn parse_section_command<'input>(
         start_address_expression,
         phdr,
         at_address,
+        region,
     }))
 }
 
@@ -1439,6 +1447,7 @@ mod tests {
                 start_address_expression: None,
                 phdr: None,
                 at_address: None,
+                region: None,
             }),
         );
     }
@@ -1458,6 +1467,7 @@ mod tests {
                 start_address_expression: Some(Expression::Number(0)),
                 phdr: None,
                 at_address: None,
+                region: None,
             }),
         );
     }
@@ -1515,6 +1525,7 @@ mod tests {
                                 start_address_expression: None,
                                 phdr: None,
                                 at_address: None,
+                                region: None,
                             }),
                         ],
                     }),
@@ -1653,6 +1664,7 @@ mod tests {
                 start_address_expression: None,
                 phdr: None,
                 at_address: None,
+                region: None,
             }),
         );
     }
@@ -1672,6 +1684,7 @@ mod tests {
                 start_address_expression: None,
                 phdr: None,
                 at_address: None,
+                region: None,
             }),
         );
     }
@@ -1691,6 +1704,7 @@ mod tests {
                 start_address_expression: None,
                 phdr: None,
                 at_address: None,
+                region: None,
             }),
         );
     }
@@ -1718,6 +1732,7 @@ mod tests {
                             start_address_expression: None,
                             phdr: None,
                             at_address: None,
+                            region: None,
                         })],
                     }),
                     Command::Assert(AssertCommand {
@@ -1756,6 +1771,7 @@ mod tests {
                             start_address_expression: None,
                             phdr: None,
                             at_address: None,
+                            region: None,
                         }),
                         SectionCommand::Assert(AssertCommand {
                             expression: Expression::LessThan(

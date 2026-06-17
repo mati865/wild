@@ -7,10 +7,10 @@ use crate::bail;
 use crate::error::Context;
 use crate::error::Result;
 use crate::grouping::Group;
+use crate::layout;
 use crate::layout::OutputRecordLayout;
 use crate::layout::Resolution;
 use crate::linker_script::Expression;
-use crate::linker_script::MemoryRegion;
 use crate::output_section_id::OutputSections;
 use crate::output_section_id::SectionName;
 use crate::output_section_map::OutputSectionMap;
@@ -19,6 +19,7 @@ use crate::platform::Args;
 use crate::platform::Platform;
 use crate::symbol::UnversionedSymbolName;
 use crate::symbol_db::SymbolDb;
+use hashbrown::HashMap;
 
 /// Compute 1-based line number by counting newlines before `remainder` in `file_bytes`.
 fn line_number(file_bytes: &[u8], remainder: &[u8]) -> u32 {
@@ -35,6 +36,7 @@ pub(crate) fn evaluate_assertions<'data, P: Platform>(
     output_sections: &OutputSections<'data, P>,
     resolutions: &[Option<Resolution<P>>],
     sizeof_headers: u64,
+    memory_regions: &HashMap<&[u8], layout::MemoryRegion>,
 ) -> Result {
     for group in &symbol_db.groups {
         let Group::LinkerScripts(scripts) = group else {
@@ -49,7 +51,7 @@ pub(crate) fn evaluate_assertions<'data, P: Platform>(
                     &SymbolLoc::None,
                     section_layouts,
                     output_sections,
-                    &parsed.memory_regions,
+                    memory_regions,
                     symbol_db,
                     sizeof_headers,
                     &|name| {
@@ -85,7 +87,7 @@ pub(crate) fn evaluate_expression<'data, P: Platform>(
     expr_loc: &SymbolLoc<'data>,
     section_layouts: &OutputSectionMap<OutputRecordLayout>,
     output_sections: &OutputSections<'data, P>,
-    memory_regions: &[MemoryRegion<'data>],
+    memory_regions: &HashMap<&[u8], layout::MemoryRegion>,
     symbol_db: &SymbolDb<'data, P>,
     sizeof_headers: u64,
     symbol_resolution_callback: &dyn Fn(&[u8]) -> Result<u64>,
@@ -175,28 +177,22 @@ pub(crate) fn evaluate_expression<'data, P: Platform>(
         Expression::Negate(e) => Ok(eval!(e)?.wrapping_neg()),
 
         Expression::Origin(name) => {
-            let region = memory_regions
-                .iter()
-                .find(|r| r.name == *name)
-                .ok_or_else(|| {
-                    crate::error!(
-                        "ORIGIN: memory region '{}' not found",
-                        String::from_utf8_lossy(name)
-                    )
-                })?;
-            eval!(&region.origin)
+            let region = memory_regions.get(name).ok_or_else(|| {
+                crate::error!(
+                    "ORIGIN: memory region '{}' not found",
+                    String::from_utf8_lossy(name)
+                )
+            })?;
+            Ok(region.origin)
         }
         Expression::Length(name) => {
-            let region = memory_regions
-                .iter()
-                .find(|r| r.name == *name)
-                .ok_or_else(|| {
-                    crate::error!(
-                        "LENGTH: memory region '{}' not found",
-                        String::from_utf8_lossy(name)
-                    )
-                })?;
-            eval!(&region.length)
+            let region = memory_regions.get(name).ok_or_else(|| {
+                crate::error!(
+                    "LENGTH: memory region '{}' not found",
+                    String::from_utf8_lossy(name)
+                )
+            })?;
+            Ok(region.length)
         }
         Expression::SegmentStart(name, default_expr) => {
             if let Some(val) = symbol_db.args.segment_start_override(*name) {
@@ -318,6 +314,7 @@ mod tests {
     use crate::grouping::Group;
     use crate::grouping::SequencedLinkerScript;
     use crate::input_data::FileId;
+    use crate::layout::MemoryRegion;
     use crate::linker_script::AssertCommand;
     use crate::parsing::ProcessedLinkerScript;
     use crate::symbol_db::SymbolDb;
@@ -349,7 +346,7 @@ mod tests {
                 &SymbolLoc::None,
                 layouts,
                 sections,
-                &[],
+                &HashMap::new(),
                 symbol_db,
                 0,
                 &|_| Ok(1),
@@ -688,7 +685,10 @@ mod tests {
                 remainder: b"",
             }]);
             symbol_db.add_group(group);
-            assert!(evaluate_assertions::<Elf>(symbol_db, layouts, sections, &[], 0).is_ok());
+            assert!(
+                evaluate_assertions::<Elf>(symbol_db, layouts, sections, &[], 0, &HashMap::new())
+                    .is_ok()
+            );
         });
     }
 
@@ -701,7 +701,9 @@ mod tests {
                 remainder: b"",
             }]);
             symbol_db.add_group(group);
-            let err = evaluate_assertions::<Elf>(symbol_db, layouts, sections, &[], 0).unwrap_err();
+            let err =
+                evaluate_assertions::<Elf>(symbol_db, layouts, sections, &[], 0, &HashMap::new())
+                    .unwrap_err();
             assert!(err.to_string().contains("intentional failure"));
         });
     }
@@ -709,18 +711,24 @@ mod tests {
     #[test]
     fn test_memory_functions_evaluation() {
         with_dummy_context(|layouts, sections, symbol_db| {
-            let regions = [
-                MemoryRegion {
-                    name: b"rom",
-                    origin: Expression::Number(0x08000000),
-                    length: Expression::Number(0x100000),
-                },
-                MemoryRegion {
-                    name: b"ram",
-                    origin: Expression::Number(0x20000000),
-                    length: Expression::Number(0x40000),
-                },
-            ];
+            let regions = HashMap::from([
+                (
+                    b"rom" as &[u8],
+                    MemoryRegion {
+                        origin: 0x08000000,
+                        length: 0x100000,
+                        used: 0,
+                    },
+                ),
+                (
+                    b"ram" as &[u8],
+                    MemoryRegion {
+                        origin: 0x20000000,
+                        length: 0x40000,
+                        used: 0,
+                    },
+                ),
+            ]);
             let eval = |expr: &Expression<'static>| {
                 evaluate_expression::<Elf>(
                     expr,

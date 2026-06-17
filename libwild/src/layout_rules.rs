@@ -231,6 +231,7 @@ impl<'data> LayoutRulesBuilder<'data> {
                                 section_location,
                                 sec.at_address.clone(),
                                 sec.phdr,
+                                sec.region,
                             );
                             current_section_id = Some(primary_section_id);
                             loc = SymbolLoc::SectionEnd(primary_section_id);

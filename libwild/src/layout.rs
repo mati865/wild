@@ -14,6 +14,7 @@ use crate::error;
 use crate::error::Context;
 use crate::error::Error;
 use crate::error::Result;
+use crate::expression_eval::evaluate_const;
 use crate::file_writer;
 use crate::grouping::Group;
 use crate::grouping::SequencedLinkerScript;
@@ -253,10 +254,26 @@ pub fn compute<'data, P: Platform, A: Arch<Platform = P>>(
         &symbol_db,
     );
 
-    let memory_regions: Vec<crate::linker_script::MemoryRegion<'_>> = linker_scripts
-        .iter()
-        .flat_map(|s| s.parsed.memory_regions.iter().cloned())
-        .collect();
+    let mut memory_regions = HashMap::new();
+    for s in &linker_scripts {
+        for region in &s.parsed.memory_regions {
+            memory_regions
+                .try_insert(
+                    region.name,
+                    MemoryRegion {
+                        origin: evaluate_const(&region.origin)?,
+                        length: evaluate_const(&region.length)?,
+                        used: 0,
+                    },
+                )
+                .map_err(|_| {
+                    error!(
+                        "region '{}' already defined",
+                        String::from_utf8_lossy(region.name)
+                    )
+                })?;
+        }
+    }
 
     let sizeof_headers = if let Some(FileLayoutState::Prelude(internal)) =
         group_states.first().and_then(|g| g.files.first())
@@ -272,7 +289,7 @@ pub fn compute<'data, P: Platform, A: Arch<Platform = P>>(
         &program_segments,
         &output_order,
         &symbol_db,
-        &memory_regions,
+        &mut memory_regions,
         sizeof_headers,
     )?;
 
@@ -286,7 +303,7 @@ pub fn compute<'data, P: Platform, A: Arch<Platform = P>>(
             &output_order,
             &symbol_db,
             &per_symbol_flags,
-            &memory_regions,
+            &mut memory_regions,
             sizeof_headers,
         )?;
     }
@@ -391,6 +408,7 @@ pub fn compute<'data, P: Platform, A: Arch<Platform = P>>(
         &output_sections,
         &section_layouts,
         sizeof_headers,
+        &memory_regions,
     )?;
     crate::gc_stats::maybe_write_gc_stats(&group_layouts, &symbol_db)?;
 
@@ -401,6 +419,7 @@ pub fn compute<'data, P: Platform, A: Arch<Platform = P>>(
         &output_sections,
         &symbol_resolutions.resolutions,
         sizeof_headers,
+        &memory_regions,
     )?;
 
     let thunk_block_addresses = thunk_block_addresses_out
@@ -465,6 +484,7 @@ fn update_redirect_resolutions<'data, P: Platform>(
     output_sections: &OutputSections<'data, P>,
     section_layouts: &OutputSectionMap<OutputRecordLayout>,
     sizeof_headers: u64,
+    memory_regions: &HashMap<&[u8], MemoryRegion>,
 ) -> Result {
     verbose_timing_phase!("Update symdef resolutions");
 
@@ -481,7 +501,7 @@ fn update_redirect_resolutions<'data, P: Platform>(
                         resolutions,
                         output_sections,
                         section_layouts,
-                        &[],
+                        memory_regions,
                         sizeof_headers,
                     )?;
                     symbol_id = symbol_id.next();
@@ -497,7 +517,7 @@ fn update_redirect_resolutions<'data, P: Platform>(
                             resolutions,
                             output_sections,
                             section_layouts,
-                            &script.parsed.memory_regions,
+                            memory_regions,
                             sizeof_headers,
                         )?;
                         symbol_id = symbol_id.next();
@@ -520,7 +540,7 @@ fn update_defsym_symbol_resolution<'data, P: Platform>(
     resolutions: &mut [Option<Resolution<P>>],
     output_sections: &OutputSections<'data, P>,
     section_layouts: &OutputSectionMap<OutputRecordLayout>,
-    memory_regions: &[crate::linker_script::MemoryRegion<'data>],
+    memory_regions: &HashMap<&[u8], MemoryRegion>,
     sizeof_headers: u64,
 ) -> Result {
     if let SymbolPlacement::Redirect(redirect) = &def_info.placement {
@@ -1528,6 +1548,12 @@ impl WorkItem {
             WorkItem::ExportDynamic(symbol_id) => symbol_db.file_id_for_symbol(symbol_id),
         }
     }
+}
+
+pub(crate) struct MemoryRegion {
+    pub(crate) origin: u64,
+    pub(crate) length: u64,
+    pub(crate) used: u64,
 }
 
 impl<'data, P: Platform> Layout<'data, P> {
@@ -4975,7 +5001,7 @@ fn perform_iterative_relaxation<'data, A: Arch>(
     output_order: &OutputOrder<'data>,
     symbol_db: &SymbolDb<'data, A::Platform>,
     per_symbol_flags: &PerSymbolFlags,
-    memory_regions: &[crate::linker_script::MemoryRegion<'data>],
+    memory_regions: &mut HashMap<&[u8], MemoryRegion>,
     sizeof_headers: u64,
 ) -> Result {
     timing_phase!("Iterative relaxation");
@@ -5045,7 +5071,7 @@ fn layout_section_parts<'data, P: Platform>(
     program_segments: &ProgramSegments<P::ProgramSegmentDef>,
     output_order: &OutputOrder<'data>,
     symbol_db: &SymbolDb<'data, P>,
-    memory_regions: &[crate::linker_script::MemoryRegion<'data>],
+    memory_regions: &mut HashMap<&[u8], MemoryRegion>,
     sizeof_headers: u64,
 ) -> Result<OutputSectionPartMap<OutputRecordLayout>> {
     let args = symbol_db.args;
@@ -5061,23 +5087,24 @@ fn layout_section_parts<'data, P: Platform>(
     // commands.
     let empty_section_layouts = OutputSectionMap::with_size(output_sections.num_sections());
 
-    let expression_eval = |expr: &Expression<'data>| {
-        crate::expression_eval::evaluate_expression(
-            expr,
-            &crate::parsing::SymbolLoc::None,
-            &empty_section_layouts,
-            output_sections,
-            memory_regions,
-            symbol_db,
-            sizeof_headers,
-            &|_| {
-                bail!("Symbols with the set location operation are not yet supported.");
-            },
-        )
-    };
+    let expression_eval =
+        |expr: &Expression<'data>, memory_regions: &HashMap<&[u8], MemoryRegion>| {
+            crate::expression_eval::evaluate_expression(
+                expr,
+                &crate::parsing::SymbolLoc::None,
+                &empty_section_layouts,
+                output_sections,
+                memory_regions,
+                symbol_db,
+                sizeof_headers,
+                &|_| {
+                    bail!("Symbols with the set location operation are not yet supported.");
+                },
+            )
+        };
 
     let mut file_offset = 0;
-    let mut mem_offset = expression_eval(&output_sections.base_address)?;
+    let mut mem_offset = expression_eval(&output_sections.base_address, memory_regions)?;
     let mut lma_offset = mem_offset;
     let mut nonalloc_mem_offsets: OutputSectionMap<u64> =
         OutputSectionMap::with_size(output_sections.num_sections());
@@ -5101,7 +5128,7 @@ fn layout_section_parts<'data, P: Platform>(
                         .unwrap_or_else(|| args.loadable_segment_alignment());
                     if let Some(expr) = pending_location.take() {
                         // The OrderEvent::SetLocation is ELF-specific only.
-                        mem_offset = expression_eval(&expr)?;
+                        mem_offset = expression_eval(&expr, memory_regions)?;
                         lma_offset = mem_offset;
                         file_offset =
                             segment_alignment.align_modulo(mem_offset, file_offset as u64) as usize;
@@ -5131,11 +5158,35 @@ fn layout_section_parts<'data, P: Platform>(
                 let section_info = output_sections.output_info(section_id);
                 let part_id_range = section_id.part_id_range();
                 let max_alignment = sizes.max_alignment(part_id_range.clone(), output_sections);
+                let region = section_info
+                    .region_name
+                    .map(|region_name| {
+                        memory_regions.get(region_name).with_context(|| {
+                            format!(
+                                "Memory region '{}' not declared",
+                                String::from_utf8_lossy(region_name),
+                            )
+                        })
+                    })
+                    .transpose()?;
+                if let Some(region) = region {
+                    mem_offset = region.origin + region.used;
+                }
                 if let Some(ref expr) = section_info.location {
-                    mem_offset = expression_eval(expr)?;
+                    let offset = expression_eval(expr, memory_regions)?;
+                    if let Some(region) = region
+                        && (offset < mem_offset || offset > mem_offset + region.length)
+                    {
+                        bail!(
+                            "address 0x{offset:x} of section '{}' is not within region `{}'",
+                            output_sections.display_name(section_id),
+                            String::from_utf8_lossy(section_info.region_name.unwrap()),
+                        );
+                    }
+                    mem_offset = offset;
                 }
                 if let Some(ref expr) = section_info.load_location {
-                    lma_offset = expression_eval(expr)?;
+                    lma_offset = expression_eval(expr, memory_regions)?;
                 } else {
                     lma_offset = mem_offset;
                 }
@@ -5226,6 +5277,20 @@ fn layout_section_parts<'data, P: Platform>(
                             file_offset += mem_size as usize;
                         }
                     });
+
+                if let Some(region_name) = section_info.region_name
+                    && let Some(region) = memory_regions.get_mut(region_name)
+                {
+                    let max_offset = region.origin + region.length;
+                    if mem_offset > max_offset {
+                        bail!(
+                            "region '{}' overflowed by {} bytes",
+                            String::from_utf8_lossy(region_name),
+                            mem_offset - max_offset
+                        )
+                    }
+                    region.used = mem_offset - region.origin;
+                }
             }
         }
     }
@@ -5548,7 +5613,7 @@ fn test_no_disallowed_overlaps() {
         &program_segments,
         &output_order,
         &symbol_db,
-        &[],
+        &mut HashMap::new(),
         0,
     )
     .unwrap();
