@@ -99,6 +99,8 @@ pub struct CommonArgs {
     pub(crate) version: std::borrow::Cow<'static, str>,
 
     has_flavor: bool,
+
+    pub(crate) file_writer_threads: u8,
 }
 
 pub type WarningCallback = dyn Fn(Warning) + Send + Sync + 'static;
@@ -306,6 +308,7 @@ impl Default for CommonArgs {
             warning_callback: Box::new(default_warning_callback),
             version: std::borrow::Cow::Borrowed("unknown version"),
             has_flavor: false,
+            file_writer_threads: 0,
         }
     }
 }

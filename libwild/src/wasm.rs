@@ -905,6 +905,7 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
         &self,
         section: &<Self::Platform as platform::Platform>::SectionHeader,
         out: &mut [u8],
+        write_threads: u8,
     ) -> crate::error::Result {
         let bytes = self.raw_section_data(section)?;
         ensure!(

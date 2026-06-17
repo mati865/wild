@@ -396,11 +396,16 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
         todo!()
     }
 
-    fn copy_section_data(&self, section: &SectionHeader, out: &mut [u8]) -> Result {
+    fn copy_section_data(
+        &self,
+        section: &SectionHeader,
+        out: &mut [u8],
+        write_threads: u8,
+    ) -> Result {
         let data = section
             .data(LE, self.data)
             .map_err(|_e| error!("cannot get section data"))?;
-        copy_section_data(data, out);
+        copy_section_data(data, out, write_threads);
 
         Ok(())
     }

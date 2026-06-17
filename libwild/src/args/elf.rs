@@ -439,6 +439,10 @@ pub(crate) fn parse<S: AsRef<str>, I: Iterator<Item = S>>(
         args.discard_sframe = true;
     }
 
+    if args.common.file_writer_threads == 0 {
+        args.common.file_writer_threads = args.common.available_threads.get() as u8;
+    }
+
     Ok(())
 }
 
@@ -1787,6 +1791,15 @@ fn setup_argument_parser() -> ArgumentParser<ElfArgs> {
         .help("Discard SFrame section")
         .execute(|args, _modifier_stack| {
             args.discard_sframe = true;
+            Ok(())
+        });
+
+    parser
+        .declare_with_param()
+        .long("file-writer-threads")
+        .help("number of threads to use for writing file")
+        .execute(|args, _modifier_stack, value| {
+            args.common_mut().file_writer_threads = value.parse::<u8>()?;
             Ok(())
         });
 

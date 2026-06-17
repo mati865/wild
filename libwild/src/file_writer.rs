@@ -17,6 +17,7 @@ use crate::timing_phase;
 use crate::verbose_timing_phase;
 use anyhow::anyhow;
 use memmap2::MmapOptions;
+use rayon::ThreadPoolBuilder;
 use rayon::iter::IndexedParallelIterator;
 use rayon::iter::ParallelIterator;
 use rayon::slice::ParallelSlice;
@@ -234,7 +235,7 @@ impl Output {
     pub fn write<'data, 'layout, P: Platform>(
         &self,
         layout: &'layout Layout<'data, P>,
-        write_fn: impl FnOnce(&mut SizedOutput, &'layout Layout<'data, P>) -> Result,
+        write_fn: impl FnOnce(&mut SizedOutput, &'layout Layout<'data, P>) -> Result + std::marker::Send,
     ) -> Result {
         timing_phase!("Write output file");
         if layout.args().common().write_layout {
@@ -254,18 +255,24 @@ impl Output {
                 self.create_file_non_lazily(file_size)?
             }
         };
-        write_fn(&mut sized_output, layout)?;
-        sized_output.flush()?;
-        sized_output.trace.close()?;
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(layout.args().common().file_writer_threads as usize)
+            .build()?;
+        pool.install(|| -> Result<()> {
+            write_fn(&mut sized_output, layout)?;
+            sized_output.flush()?;
+            sized_output.trace.close()?;
 
-        // While we have the output file mmapped with write permission, the file will be locked and
-        // unusable, so we can't really say that we've finished writing it until we've unmapped it.
-        {
-            timing_phase!("Unmap output file");
-            drop(sized_output);
-        }
+            // While we have the output file mmapped with write permission, the file will be locked
+            // and unusable, so we can't really say that we've finished writing it until
+            // we've unmapped it.
+            {
+                timing_phase!("Unmap output file");
+                drop(sized_output);
+            }
 
-        Ok(())
+            Ok(())
+        })
     }
 
     fn create_file_non_lazily(&self, file_size: u64) -> Result<SizedOutput> {
@@ -504,12 +511,12 @@ fn write_layout_to<'data, P: Platform>(layout: &Layout<'data, P>, path: &Path) -
 ///
 /// Small sections are copied with a single `copy_from_slice` call. Large sections may be split
 /// into chunks and copied in parallel on multiple threads.
-pub(crate) fn copy_section_data(data: &[u8], out: &mut [u8]) {
+pub(crate) fn copy_section_data(data: &[u8], out: &mut [u8], write_threads: u8) {
     /// Threshold size for using parallel copy for section data copying.
     pub(crate) const SECTION_PAR_COPY_SIZE_THRESHOLD: usize = 1_000_000;
 
     if data.len() >= SECTION_PAR_COPY_SIZE_THRESHOLD {
-        let threads = rayon::current_num_threads();
+        let threads = write_threads as usize;
         let chunk_size = (data.len() / threads).max(1);
 
         data.par_chunks(chunk_size)

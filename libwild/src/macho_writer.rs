@@ -696,7 +696,11 @@ fn write_section_raw<'out, 'data>(
 
         let section_size = object.object.section_size(object_section)?;
         let (out, padding) = out.split_at_mut(section_size as usize);
-        object.object.copy_section_data(object_section, out)?;
+        object.object.copy_section_data(
+            object_section,
+            out,
+            layout.args().common.file_writer_threads,
+        )?;
         padding.fill(0);
         Ok(out)
     } else {

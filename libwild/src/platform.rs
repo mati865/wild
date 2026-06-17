@@ -989,6 +989,7 @@ pub(crate) trait ObjectFile<'data>: Sized + Send + Sync + std::fmt::Debug + 'dat
         &self,
         section: &<Self::Platform as Platform>::SectionHeader,
         out: &mut [u8],
+        write_threads: u8,
     ) -> Result;
 
     /// Returns the contents of a section as a Cow. Will heap-allocate if the section is compressed.

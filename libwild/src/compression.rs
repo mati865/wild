@@ -389,6 +389,7 @@ fn build_regular_debug_section<A: Arch<Platform = Elf>>(
                                 object_layout.object.copy_section_data(
                                     object_section,
                                     &mut group_buf[offset..end],
+                                    layout.args().common.file_writer_threads,
                                 )?;
 
                                 let relocations = object_layout.relocations(section_index)?;
