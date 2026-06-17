@@ -3137,7 +3137,12 @@ impl<'data, C: ElfClass> platform::ObjectFile<'data> for File<'data, C> {
         }
     }
 
-    fn copy_section_data(&self, section: &SectionHeader<C>, out: &mut [u8]) -> Result {
+    fn copy_section_data(
+        &self,
+        section: &SectionHeader<C>,
+        out: &mut [u8],
+        write_threads: u8,
+    ) -> Result {
         let data = section.data(LittleEndian, self.data)?;
 
         if let Some((compression, _, _)) = section.compression(LittleEndian, self.data)? {
@@ -3147,7 +3152,7 @@ impl<'data, C: ElfClass> platform::ObjectFile<'data> for File<'data, C> {
                 out,
             )?;
         } else {
-            copy_section_data(data, out);
+            copy_section_data(data, out, write_threads);
         }
         Ok(())
     }

@@ -396,6 +396,7 @@ fn build_regular_debug_section<C: ElfClass, A: Arch<Platform = elf::Elf<C>>>(
                                 object_layout.object.copy_section_data(
                                     object_section,
                                     &mut group_buf[offset..end],
+                                    layout.args().common.file_writer_threads,
                                 )?;
 
                                 let relocations = object_layout.relocations(section_index)?;

@@ -2335,7 +2335,11 @@ fn write_section_raw<'out, 'data, C: ElfClass, A: Arch<Platform = elf::Elf<C>>>(
             None => {
                 let section_size = object.object.section_size(object_section)?;
                 let (out, padding) = out.split_at_mut(section_size as usize);
-                object.object.copy_section_data(object_section, out)?;
+                object.object.copy_section_data(
+                    object_section,
+                    out,
+                    layout.args().common.file_writer_threads,
+                )?;
                 fill_section_padding::<C, A>(padding, section_info);
                 Ok(out)
             }
