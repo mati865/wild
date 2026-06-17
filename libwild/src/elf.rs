@@ -2341,7 +2341,12 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
         }
     }
 
-    fn copy_section_data(&self, section: &SectionHeader, out: &mut [u8]) -> Result {
+    fn copy_section_data(
+        &self,
+        section: &SectionHeader,
+        out: &mut [u8],
+        write_threads: u8,
+    ) -> Result {
         let data = section.data(LittleEndian, self.data)?;
 
         if let Some((compression, _, _)) = section.compression(LittleEndian, self.data)? {
@@ -2349,7 +2354,7 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
         } else if section.sh_type(LittleEndian) == object::elf::SHT_NOBITS {
             out.fill(0);
         } else {
-            copy_section_data(data, out);
+            copy_section_data(data, out, write_threads);
         }
         Ok(())
     }
