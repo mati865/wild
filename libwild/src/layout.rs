@@ -171,11 +171,7 @@ pub fn compute<'data, P: Platform, A: Arch<Platform = P>>(
         num_symbols: 0,
     });
 
-    let mut properties_and_attributes = P::create_layout_properties::<A>(
-        symbol_db.args,
-        objects_iter(&group_states).map(|obj| obj.object),
-        objects_iter(&group_states).map(|obj| &obj.format_specific),
-    )?;
+    let mut finalise_sizes_ext = P::create_finalise_sizes_ext::<A>(symbol_db.args, &group_states)?;
 
     let mut finalise_sizes_resources = FinaliseSizesResources {
         dynamic_symbol_definitions: &dynamic_symbol_definitions,
@@ -183,7 +179,7 @@ pub fn compute<'data, P: Platform, A: Arch<Platform = P>>(
         imported_libraries: &[],
         symbol_db: &symbol_db,
         merged_strings: &merged_strings,
-        format_specific: &properties_and_attributes,
+        format_specific: &finalise_sizes_ext,
     };
 
     finalise_all_sizes(
@@ -379,7 +375,7 @@ pub fn compute<'data, P: Platform, A: Arch<Platform = P>>(
         dynamic_symbol_definitions: &dynamic_symbol_definitions,
         segment_layouts: &segment_layouts,
         program_segments: &program_segments,
-        format_specific: &properties_and_attributes,
+        format_specific: &finalise_sizes_ext,
         thunk_blocks: &thunk_blocks,
         thunk_block_addresses: &thunk_block_addresses_out,
     };
@@ -430,11 +426,14 @@ pub fn compute<'data, P: Platform, A: Arch<Platform = P>>(
     let relocation_statistics = OutputSectionMap::with_size(section_layouts.len());
 
     let num_sections = output_sections.num_sections();
+
     P::set_imported_symbols(
-        &mut properties_and_attributes,
+        &mut finalise_sizes_ext,
         &symbol_resolutions,
         imported_symbols,
     )?;
+
+    let format_specific = P::create_layout_ext(finalise_sizes_ext)?;
 
     let mut layout = Layout {
         symbol_db,
@@ -455,7 +454,7 @@ pub fn compute<'data, P: Platform, A: Arch<Platform = P>>(
         relocation_statistics,
         per_symbol_flags,
         dynamic_symbol_definitions,
-        properties_and_attributes,
+        format_specific,
         thunk_block_addresses,
         compressed_debug_sections: OutputSectionMap::with_size(num_sections),
         gdb_index_data,
@@ -474,7 +473,7 @@ struct FinaliseSizesResources<'data, 'scope, P: Platform> {
     imported_libraries: &'scope [ImportedLibrary<'data>],
     symbol_db: &'scope SymbolDb<'data, P>,
     merged_strings: &'scope OutputSectionMap<MergedStringsSection<'data>>,
-    format_specific: &'scope P::LayoutExt<'data>,
+    format_specific: &'scope P::FinaliseSizesExt<'data>,
 }
 
 /// Update resolutions for symbol redirects.
@@ -690,7 +689,7 @@ fn append_prelude_defsym_dynamic_symbols<'data, P: Platform>(
     Ok(())
 }
 
-fn objects_iter<'groups, 'data, P: Platform>(
+pub(crate) fn objects_iter<'groups, 'data, P: Platform>(
     group_states: &'groups [GroupState<'data, P>],
 ) -> impl Iterator<Item = &'groups ObjectLayoutState<'data, P>> + Clone {
     group_states.iter().flat_map(|group| {
@@ -734,7 +733,7 @@ pub struct Layout<'data, P: Platform> {
     pub(crate) has_variant_pcs: bool,
     pub(crate) per_symbol_flags: PerSymbolFlags,
     pub(crate) dynamic_symbol_definitions: Vec<DynamicSymbolDefinition<'data, P>>,
-    pub(crate) properties_and_attributes: P::LayoutExt<'data>,
+    pub(crate) format_specific: P::LayoutExt<'data>,
     /// Thunk address maps indexed by ThunkBlockId. Each entry maps SymbolId to the memory address
     /// of the thunk for that symbol within the block.
     pub(crate) thunk_block_addresses: Vec<BTreeMap<SymbolId, u64>>,
@@ -1499,7 +1498,7 @@ pub(crate) struct FinaliseLayoutResources<'scope, 'data, P: Platform> {
     dynamic_symbol_definitions: &'scope Vec<DynamicSymbolDefinition<'data, P>>,
     segment_layouts: &'scope SegmentLayouts,
     program_segments: &'scope ProgramSegments<P::ProgramSegmentDef>,
-    format_specific: &'scope P::LayoutExt<'data>,
+    format_specific: &'scope P::FinaliseSizesExt<'data>,
 
     pub(crate) thunk_blocks: &'scope [crate::thunks::ThunkBlock],
 
