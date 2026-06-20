@@ -4,7 +4,8 @@ SECTIONS {
     .text 0x100000 : AT(0x200000) {
         *(.text .text.*)
     }
-    .data 0x200000 : AT(0x300000) {
+
+    .data ADDR(.text) + 0x100000 : AT(ADDR(.data) + 0x100000) {
         *(.data)
     }
 }

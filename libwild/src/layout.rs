@@ -280,7 +280,7 @@ pub fn compute<'data, P: Platform, A: Arch<Platform = P>>(
         unreachable!();
     };
 
-    let mut section_part_layouts = layout_section_parts::<A::Platform>(
+    let (mut section_part_layouts, mut section_layouts) = layout_section::<A::Platform>(
         &section_part_sizes,
         &output_sections,
         &program_segments,
@@ -295,6 +295,7 @@ pub fn compute<'data, P: Platform, A: Arch<Platform = P>>(
             &mut group_states,
             &mut section_part_sizes,
             &mut section_part_layouts,
+            &mut section_layouts,
             &output_sections,
             &program_segments,
             &output_order,
@@ -305,24 +306,28 @@ pub fn compute<'data, P: Platform, A: Arch<Platform = P>>(
         )?;
     }
 
-    if let Some((record, last_part_id)) = section_part_layouts
-        .parts
+    if let Some((last_section_id, _)) = section_layouts
         .iter()
-        .enumerate()
-        .map(|(index, rec)| (rec, PartId::from_usize(index)))
-        .max_by_key(|(record, _)| record.file_offset + record.file_size)
+        .max_by_key(|(_, record)| record.file_end())
     {
-        let extra_file_size = A::Platform::last_part_size_to_extend(record, last_part_id)?;
+        let last_part_id = PartId::from_usize(last_section_id.part_id_range().end.as_usize() - 1);
+        let extra_file_size = A::Platform::last_part_size_to_extend(
+            section_part_layouts.get(last_part_id),
+            last_part_id,
+        )?;
         if extra_file_size > 0 {
             section_part_sizes.increment(last_part_id, extra_file_size as u64);
 
-            let rec = section_part_layouts.get_mut(last_part_id);
-            rec.file_size += extra_file_size;
-            rec.mem_size += extra_file_size as u64;
+            let part_layout = section_part_layouts.get_mut(last_part_id);
+            part_layout.file_size += extra_file_size;
+            part_layout.mem_size += extra_file_size as u64;
+
+            let section_layout = section_layouts.get_mut(last_section_id);
+            section_layout.file_size += extra_file_size;
+            section_layout.mem_size += extra_file_size as u64;
         }
     }
 
-    let section_layouts = layout_sections(&output_sections, &section_part_layouts);
     let mut merged_section_layouts = section_layouts.clone();
     merge_secondary_parts(&output_sections, &mut merged_section_layouts);
 
@@ -1756,40 +1761,42 @@ impl<'data, P: Platform> Layout<'data, P> {
     }
 }
 
-fn layout_sections<P: Platform>(
-    output_sections: &OutputSections<P>,
-    section_part_layouts: &OutputSectionPartMap<OutputRecordLayout>,
-) -> OutputSectionMap<OutputRecordLayout> {
-    section_part_layouts.merge_parts(|section_id, layouts| {
-        let info = output_sections.section_infos.get(section_id);
-        let mut file_offset = usize::MAX;
-        let mut mem_offset = u64::MAX;
-        let mut lma_offset = u64::MAX;
-        let mut file_end = 0;
-        let mut mem_end = 0;
-        let mut lma_end = 0;
-        let mut alignment = info.min_alignment;
+fn layout_section_from_part_layouts<'data, P: Platform>(
+    part: &OutputRecordLayout,
+    section_layout: &mut OutputRecordLayout,
+    section_info: &output_section_id::SectionOutputInfo<'data, P>,
+    is_first_part: bool,
+) {
+    if is_first_part {
+        *section_layout = *part;
+        section_layout.alignment = section_info.min_alignment;
+        if part.mem_size > 0 {
+            section_layout.alignment = section_layout.alignment.max(part.alignment);
+        }
+        return;
+    }
 
-        for part in layouts {
-            file_offset = file_offset.min(part.file_offset);
-            mem_offset = mem_offset.min(part.mem_offset);
-            lma_offset = lma_offset.min(part.lma_offset);
-            file_end = file_end.max(part.file_offset + part.file_size);
-            mem_end = mem_end.max(part.mem_offset + part.mem_size);
-            lma_end = lma_end.max(part.lma_offset + part.mem_size);
-            if part.mem_size > 0 {
-                alignment = alignment.max(part.alignment);
-            }
-        }
-        OutputRecordLayout {
-            file_size: file_end - file_offset,
-            mem_size: mem_end - mem_offset,
-            alignment,
-            file_offset,
-            mem_offset,
-            lma_offset,
-        }
-    })
+    let file_offset = section_layout.file_offset.min(part.file_offset);
+    let mem_offset = section_layout.mem_offset.min(part.mem_offset);
+    let lma_offset = section_layout.lma_offset.min(part.lma_offset);
+
+    let file_size = section_layout.file_end().max(part.file_end()) - file_offset;
+    let mem_size = section_layout.mem_end().max(part.mem_end()) - mem_offset;
+
+    let alignment = if part.mem_size > 0 {
+        section_layout.alignment.max(part.alignment)
+    } else {
+        section_layout.alignment
+    };
+
+    *section_layout = OutputRecordLayout {
+        file_size,
+        mem_size,
+        alignment,
+        file_offset,
+        mem_offset,
+        lma_offset,
+    };
 }
 
 pub(crate) fn merge_secondary_parts<P: Platform>(
@@ -4996,6 +5003,7 @@ fn perform_iterative_relaxation<'data, A: Arch>(
     group_states: &mut [GroupState<'data, A::Platform>],
     section_part_sizes: &mut OutputSectionPartMap<u64>,
     section_part_layouts: &mut OutputSectionPartMap<OutputRecordLayout>,
+    section_layouts: &mut OutputSectionMap<OutputRecordLayout>,
     output_sections: &OutputSections<'data, A::Platform>,
     program_segments: &ProgramSegments<<A::Platform as Platform>::ProgramSegmentDef>,
     output_order: &OutputOrder<'data>,
@@ -5052,7 +5060,7 @@ fn perform_iterative_relaxation<'data, A: Arch>(
                 .collect(),
         );
 
-        *section_part_layouts = layout_section_parts::<A::Platform>(
+        (*section_part_layouts, *section_layouts) = layout_section::<A::Platform>(
             section_part_sizes,
             output_sections,
             program_segments,
@@ -5065,7 +5073,7 @@ fn perform_iterative_relaxation<'data, A: Arch>(
     Ok(())
 }
 
-fn layout_section_parts<'data, P: Platform>(
+fn layout_section<'data, P: Platform>(
     sizes: &OutputSectionPartMap<u64>,
     output_sections: &OutputSections<'data, P>,
     program_segments: &ProgramSegments<P::ProgramSegmentDef>,
@@ -5073,7 +5081,10 @@ fn layout_section_parts<'data, P: Platform>(
     symbol_db: &SymbolDb<'data, P>,
     memory_regions: &mut HashMap<&[u8], MemoryRegion>,
     sizeof_headers: u64,
-) -> Result<OutputSectionPartMap<OutputRecordLayout>> {
+) -> Result<(
+    OutputSectionPartMap<OutputRecordLayout>,
+    OutputSectionMap<OutputRecordLayout>,
+)> {
     let args = symbol_db.args;
     let segment_alignments = compute_segment_alignments::<P>(
         sizes,
@@ -5083,16 +5094,16 @@ fn layout_section_parts<'data, P: Platform>(
         output_sections,
     );
 
-    // Create an empty section layout for now, until we can support using linker script
-    // commands.
-    let empty_section_layouts = OutputSectionMap::with_size(output_sections.num_sections());
+    let mut section_layouts = OutputSectionMap::with_size(output_sections.num_sections());
 
     let expression_eval =
-        |expr: &Expression<'data>, memory_regions: &HashMap<&[u8], MemoryRegion>| {
+        |expr: &Expression<'data>,
+         memory_regions: &HashMap<&[u8], MemoryRegion>,
+         section_layouts: &OutputSectionMap<OutputRecordLayout>| {
             crate::expression_eval::evaluate_expression(
                 expr,
                 &crate::parsing::SymbolLoc::None,
-                &empty_section_layouts,
+                section_layouts,
                 output_sections,
                 memory_regions,
                 symbol_db,
@@ -5104,7 +5115,11 @@ fn layout_section_parts<'data, P: Platform>(
         };
 
     let mut file_offset = 0;
-    let mut mem_offset = expression_eval(&output_sections.base_address, memory_regions)?;
+    let mut mem_offset = expression_eval(
+        &output_sections.base_address,
+        memory_regions,
+        &section_layouts,
+    )?;
     let mut lma_offset = mem_offset;
     let mut nonalloc_mem_offsets: OutputSectionMap<u64> =
         OutputSectionMap::with_size(output_sections.num_sections());
@@ -5128,7 +5143,7 @@ fn layout_section_parts<'data, P: Platform>(
                         .unwrap_or_else(|| args.loadable_segment_alignment());
                     if let Some(expr) = pending_location.take() {
                         // The OrderEvent::SetLocation is ELF-specific only.
-                        mem_offset = expression_eval(&expr, memory_regions)?;
+                        mem_offset = expression_eval(&expr, memory_regions, &section_layouts)?;
                         lma_offset = mem_offset;
                         file_offset =
                             segment_alignment.align_modulo(mem_offset, file_offset as u64) as usize;
@@ -5173,7 +5188,7 @@ fn layout_section_parts<'data, P: Platform>(
                     mem_offset = region.origin + region.used;
                 }
                 if let Some(ref expr) = section_info.location {
-                    let offset = expression_eval(expr, memory_regions)?;
+                    let offset = expression_eval(expr, memory_regions, &section_layouts)?;
                     if let Some(region) = region
                         && (offset < mem_offset || offset > mem_offset + region.length)
                     {
@@ -5185,17 +5200,13 @@ fn layout_section_parts<'data, P: Platform>(
                     }
                     mem_offset = offset;
                 }
-                if let Some(ref expr) = section_info.load_location {
-                    lma_offset = expression_eval(expr, memory_regions)?;
-                } else {
-                    lma_offset = mem_offset;
-                }
+                lma_offset = mem_offset;
 
                 records_out[part_id_range.clone()]
                     .iter_mut()
                     .zip(&sizes[part_id_range.clone()])
                     .enumerate()
-                    .for_each(|(offset, (part_layout, &part_size))| {
+                    .try_for_each(|(offset, (part_layout, &part_size))| -> Result {
                         let part_id = part_id_range.start.offset(offset);
                         let alignment = part_id.alignment(output_sections).min(max_alignment);
                         let merge_target = output_sections.primary_output_section(section_id);
@@ -5276,7 +5287,21 @@ fn layout_section_parts<'data, P: Platform>(
                             };
                             file_offset += mem_size as usize;
                         }
-                    });
+                        layout_section_from_part_layouts(
+                            part_layout,
+                            section_layouts.get_mut(section_id),
+                            section_info,
+                            offset == 0,
+                        );
+
+                        if let Some(ref expr) = section_info.load_location {
+                            lma_offset = expression_eval(expr, memory_regions, &section_layouts)?;
+                            part_layout.lma_offset = lma_offset;
+                            let section_layout = section_layouts.get_mut(section_id);
+                            section_layout.lma_offset = lma_offset;
+                        }
+                        Ok(())
+                    })?;
 
                 if let Some(region_name) = section_info.region_name
                     && let Some(region) = memory_regions.get_mut(region_name)
@@ -5295,7 +5320,7 @@ fn layout_section_parts<'data, P: Platform>(
         }
     }
 
-    Ok(records_out)
+    Ok((records_out, section_layouts))
 }
 
 /// Computes the maximum alignment for each LOAD segment by examining the alignments of all sections
@@ -5607,7 +5632,7 @@ fn test_no_disallowed_overlaps() {
     let symbol_db =
         crate::symbol_db::SymbolDb::<Elf>::new(&args, output_kind, &auxiliary, &herd).unwrap();
 
-    let section_part_layouts = layout_section_parts::<Elf>(
+    let (_, section_layouts) = layout_section::<Elf>(
         &section_part_sizes,
         &output_sections,
         &program_segments,
@@ -5617,8 +5642,6 @@ fn test_no_disallowed_overlaps() {
         0,
     )
     .unwrap();
-
-    let section_layouts = layout_sections(&output_sections, &section_part_layouts);
 
     // Make sure no alloc sections overlap
     let mut last_file_start = 0;
@@ -5761,6 +5784,14 @@ impl<'scope, 'data, P: Platform> FinaliseLayoutResources<'scope, 'data, P> {
 }
 
 impl OutputRecordLayout {
+    pub(crate) fn file_end(&self) -> usize {
+        self.file_offset + self.file_size
+    }
+
+    pub(crate) fn mem_end(&self) -> u64 {
+        self.mem_offset + self.mem_size
+    }
+
     fn merge(&mut self, other: &OutputRecordLayout) {
         debug_assert!(other.mem_offset >= self.mem_offset);
         debug_assert!(other.file_offset >= self.file_offset);
