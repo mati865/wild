@@ -630,6 +630,7 @@ pub(crate) trait Platform:
         header_info: &layout::HeaderInfo,
         output_sections: &OutputSections<Self>,
         resources: &layout::FinaliseSizesResources<'data, '_, Self>,
+        args: &Self::Args,
     );
 
     /// Gives the platform an opportunity to error out if an input stack section is requesting an
