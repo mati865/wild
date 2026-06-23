@@ -492,6 +492,9 @@ fn run_wasm_test(wat_file: &Path) -> Result {
     let mut extra_objects = Vec::new();
     let mut expect_error = false;
     let mut should_run = true;
+    let mut expected_sections = Vec::new();
+    let mut link_args = ArgumentSet::empty();
+    let mut wild_extra_link_args = ArgumentSet::empty();
     for line in source.lines() {
         if let Some(rest) = line.trim().strip_prefix(";;#") {
             if let Some(obj_name) = rest.strip_prefix("Object:") {
@@ -500,6 +503,15 @@ fn run_wasm_test(wat_file: &Path) -> Result {
                 expect_error = true;
             } else if let Some(val) = rest.strip_prefix("RunEnabled:") {
                 should_run = val.trim().parse().context("Invalid bool for RunEnabled")?;
+            } else if let Some(args) = rest.strip_prefix("LinkArgs:") {
+                let args = args
+                    .trim()
+                    .replace("$OUT_DIR", &build_dir.display().to_string());
+                link_args = ArgumentSet::parse(&args)?;
+            } else if let Some(args) = rest.strip_prefix("WildExtraLinkArgs:") {
+                wild_extra_link_args = ArgumentSet::parse(args.trim())?;
+            } else if let Some(section) = rest.strip_prefix("ExpectSection:") {
+                expected_sections.push(section.trim().to_owned());
             }
         }
     }
@@ -549,7 +561,8 @@ fn run_wasm_test(wat_file: &Path) -> Result {
         .arg(&wasm_ld_output)
         .arg("--no-entry")
         .arg("--export-all")
-        .arg("--no-check-features");
+        .arg("--no-check-features")
+        .args(&link_args.args);
 
     let wasm_ld_result = wasm_ld_cmd.output().context("Failed to run wasm-ld")?;
 
@@ -571,7 +584,10 @@ fn run_wasm_test(wat_file: &Path) -> Result {
     for obj in &all_objects {
         link_cmd.arg(obj);
     }
-    link_cmd.arg("-o").arg(&wasm_wild_output);
+    link_cmd
+        .arg("-o")
+        .arg(&wasm_wild_output)
+        .args(&wild_extra_link_args.args);
 
     let link_result = link_cmd.output().context("Failed to run wild")?;
 
@@ -590,10 +606,76 @@ fn run_wasm_test(wat_file: &Path) -> Result {
     );
 
     validate_wasm(&wasm_wild_output, "wild")?;
+    if !expected_sections.is_empty() {
+        ensure_wasm_sections_for_linkers(
+            &expected_sections,
+            &[(&wasm_ld_output, "wasm-ld"), (&wasm_wild_output, "wild")],
+        )?;
+    }
     if should_run {
         run_wasm_with_wasmtime(&wasm_wild_output, "wild")?;
     }
 
+    Ok(())
+}
+
+fn ensure_wasm_sections_for_linkers(
+    section_names: &[String],
+    outputs: &[(&Path, &str)],
+) -> Result<()> {
+    for (wasm_file, linker_name) in outputs {
+        ensure_wasm_sections(wasm_file, section_names, linker_name)?;
+    }
+    Ok(())
+}
+
+fn wasm_standard_sections(wasm_file: &Path) -> Result<std::collections::HashSet<String>> {
+    use wasmparser::Parser;
+    use wasmparser::Payload;
+
+    let bytes = std::fs::read(wasm_file)
+        .with_context(|| format!("Failed to read wasm file {}", wasm_file.display()))?;
+    let mut sections = std::collections::HashSet::new();
+    for payload in Parser::new(0).parse_all(&bytes) {
+        if let Some(name) = match payload? {
+            Payload::TypeSection(_) => Some("Type"),
+            Payload::ImportSection(_) => Some("Import"),
+            Payload::FunctionSection(_) => Some("Function"),
+            Payload::TableSection(_) => Some("Table"),
+            Payload::MemorySection(_) => Some("Memory"),
+            Payload::GlobalSection(_) => Some("Global"),
+            Payload::ExportSection(_) => Some("Export"),
+            Payload::StartSection { .. } => Some("Start"),
+            Payload::ElementSection(_) => Some("Element"),
+            Payload::CodeSectionStart { .. } => Some("Code"),
+            Payload::DataSection(_) => Some("Data"),
+            Payload::DataCountSection { .. } => Some("DataCount"),
+            _ => None,
+        } {
+            sections.insert(name.to_owned());
+        }
+    }
+    Ok(sections)
+}
+
+fn ensure_wasm_sections(
+    wasm_file: &Path,
+    section_names: &[String],
+    linker_name: &str,
+) -> Result<()> {
+    let sections = wasm_standard_sections(wasm_file)?;
+    for section_name in section_names {
+        ensure!(
+            sections.contains(section_name),
+            "Expected section `{section_name}` in {linker_name} output ({}), found: {}",
+            wasm_file.display(),
+            {
+                let mut names: Vec<_> = sections.iter().cloned().collect();
+                names.sort();
+                names.join(", ")
+            }
+        );
+    }
     Ok(())
 }
 
