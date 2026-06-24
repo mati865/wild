@@ -328,7 +328,10 @@ fn update_allocation_sizes<P: Platform>(layout: &mut Layout<P>) {
             }
         }
 
-        *layout.merged_strings.get_mut(section_id) = Default::default();
+        // Free only `buckets`; the offset maps are still needed to resolve relocations from other
+        // debug sections (e.g. `.debug_str_offsets`) that are written later.
+        // https://github.com/wild-linker/wild/issues/2113
+        layout.merged_strings.get_mut(section_id).buckets = Vec::new();
     }
 }
 
