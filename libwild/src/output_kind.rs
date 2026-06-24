@@ -64,6 +64,15 @@ impl OutputKind {
         )
     }
 
+    pub(crate) fn is_position_independent(self) -> bool {
+        matches!(
+            self,
+            OutputKind::SharedObject
+                | OutputKind::DynamicExecutable(RelocationModel::Relocatable)
+                | OutputKind::StaticExecutable(RelocationModel::Relocatable)
+        )
+    }
+
     pub(crate) fn needs_dynsym(self) -> bool {
         matches!(
             self,
