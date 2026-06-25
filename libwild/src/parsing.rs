@@ -103,6 +103,7 @@ pub(crate) enum SymbolLoc<'data> {
     SectionEnd(OutputSectionId),
     FirstSection,
     Expression(Expression<'data>, Option<OutputSectionId>),
+    RelativeExpression(Expression<'data>, OutputSectionId),
     None,
 }
 

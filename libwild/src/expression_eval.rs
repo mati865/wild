@@ -118,6 +118,9 @@ pub(crate) fn evaluate_expression<'data, P: Platform>(
             }
             SymbolLoc::FirstSection | SymbolLoc::None => Ok(0),
             SymbolLoc::Expression(expr, _) => eval!(expr),
+            SymbolLoc::RelativeExpression(expr, id) => {
+                eval!(expr).map(|x| x + section_layouts.get(*id).mem_offset)
+            }
         },
 
         Expression::Symbol(name) => symbol_resolution_callback(name),

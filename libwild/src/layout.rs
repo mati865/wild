@@ -410,7 +410,7 @@ pub fn compute<'data, P: Platform, A: Arch<Platform = P>>(
     // Evaluate ASSERT commands from all linker scripts now that layout is complete.
     crate::expression_eval::evaluate_assertions(
         &symbol_db,
-        &section_layouts,
+        &merged_section_layouts,
         &output_sections,
         &symbol_resolutions.resolutions,
         sizeof_headers,
@@ -1737,7 +1737,18 @@ pub(crate) fn merge_secondary_parts<P: Platform>(
     for (id, info) in output_sections.ids_with_info() {
         if let SectionKind::Secondary(primary_id) = info.kind {
             let secondary_layout = take(section_layouts.get_mut(id));
-            section_layouts.get_mut(primary_id).merge(&secondary_layout);
+            let primary = section_layouts.get_mut(primary_id);
+            if info.location.is_some() {
+                let mem_end = secondary_layout.mem_offset + secondary_layout.mem_size;
+                if mem_end > primary.mem_offset + primary.mem_size {
+                    primary.mem_size = mem_end - primary.mem_offset;
+                }
+                let file_end = secondary_layout.file_offset + secondary_layout.file_size;
+                if file_end > primary.file_offset + primary.file_size {
+                    primary.file_size = file_end - primary.file_offset;
+                }
+            }
+            primary.merge(&secondary_layout);
         }
     }
 }
@@ -5150,6 +5161,14 @@ fn layout_section<'data, P: Platform>(
                             output_sections.display_name(section_id),
                             String::from_utf8_lossy(section_info.region_name.unwrap()),
                         );
+                    }
+                    let merge_target = output_sections.primary_output_section(section_id);
+                    let section_flags = output_sections.section_flags(merge_target);
+                    if section_flags.is_alloc() && output_sections.has_data_in_file(merge_target) {
+                        let new_offset = offset
+                            .checked_sub(mem_offset)
+                            .with_context(|| format!("Cannot move location counter backwards (from 0x{mem_offset:x} to 0x{offset:x})"))?;
+                        file_offset += new_offset as usize;
                     }
                     mem_offset = offset;
                 }

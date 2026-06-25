@@ -43,7 +43,7 @@ end lists the features required to link the Linux kernel.
 | `PROVIDE(sym = expr)` inside sections | ✅ | |
 | `PROVIDE_HIDDEN(sym = expr)` inside sections | ✅ | |
 | Symbol assignment inside sections (`sym = .`) | ✅ | |
-| Location counter assignment (`. = expr`) | 🧪 | constant expressions (e.g. `. = 0x1000 * 2`) supported between output sections only; not inside section contents |
+| Location counter assignment (`. = expr`) | 🧪 | constant expressions (e.g. `. = 0x1000 * 2`) are supported |
 | `ALIGN(n)` on the location counter (`. = ALIGN(n)`) | ✅ | |
 | Per-section `ALIGN(n)` specifier | ✅ | |
 | `ASSERT(expr, "msg")` inside `SECTIONS` | ✅ | |

@@ -237,18 +237,22 @@ impl<'data> LayoutRulesBuilder<'data> {
                             loc = SymbolLoc::SectionEnd(primary_section_id);
 
                             let mut last_section_id = None;
-                            let mut last_loc = SymbolLoc::SectionStart(primary_section_id);
+                            let mut last_symbol_loc = SymbolLoc::SectionStart(primary_section_id);
+                            let mut last_location = None;
 
                             for contents_cmd in &sec.commands {
                                 match contents_cmd {
                                     ContentsCommand::Matcher(matcher) => {
-                                        let section_id = if last_section_id.is_none() {
+                                        let section_id = if last_section_id.is_none()
+                                            && last_location.is_none()
+                                        {
                                             primary_section_id
                                         } else {
                                             output_sections.add_secondary_section(
                                                 primary_section_id,
                                                 replace(&mut extra_min_alignment, alignment::MIN),
                                                 None,
+                                                last_location.take(),
                                             )
                                         };
 
@@ -266,13 +270,13 @@ impl<'data> LayoutRulesBuilder<'data> {
                                         }
 
                                         last_section_id = Some(section_id);
-                                        last_loc = SymbolLoc::SectionEnd(section_id);
+                                        last_symbol_loc = SymbolLoc::SectionEnd(section_id);
                                     }
                                     ContentsCommand::SymbolAssignment(assignment) => {
                                         let placement = SymbolPlacement::Redirect(Redirect {
                                             kind: RedirectKind::Script,
                                             expression: assignment.expr.clone(),
-                                            loc: last_loc.clone(),
+                                            loc: last_symbol_loc.clone(),
                                         });
                                         symbol_defs.push(InternalSymDefInfo::new(
                                             placement,
@@ -284,21 +288,42 @@ impl<'data> LayoutRulesBuilder<'data> {
                                         let placement = SymbolPlacement::Redirect(Redirect {
                                             kind: RedirectKind::Script,
                                             expression: provide.value.clone(),
-                                            loc: last_loc.clone(),
+                                            loc: last_symbol_loc.clone(),
                                         });
                                         symbol_defs.push(
                                             InternalSymDefInfo::new(placement, provide.name)
                                                 .with_hidden(provide.hidden),
                                         );
                                     }
+                                    ContentsCommand::SetLocation(location) => {
+                                        last_location = Some(linker_script::Expression::Add(
+                                            Box::new(linker_script::Expression::Addr(
+                                                sec.output_section_name,
+                                            )),
+                                            Box::new(location.address.clone()),
+                                        ));
+                                        last_symbol_loc = SymbolLoc::RelativeExpression(
+                                            location.address.clone(),
+                                            primary_section_id,
+                                        );
+                                    }
                                 }
+                            }
+                            if let Some(location) = last_location.take() {
+                                output_sections.add_secondary_section(
+                                    primary_section_id,
+                                    alignment::MIN,
+                                    None,
+                                    Some(location),
+                                );
                             }
                         }
                         SectionCommand::SetLocation(new_location) => {
                             let section_id = match loc {
                                 SymbolLoc::Expression(_, section_id) => section_id,
                                 SymbolLoc::SectionStart(section_id)
-                                | SymbolLoc::SectionEnd(section_id) => Some(section_id),
+                                | SymbolLoc::SectionEnd(section_id)
+                                | SymbolLoc::RelativeExpression(_, section_id) => Some(section_id),
                                 _ => None,
                             };
                             loc = SymbolLoc::Expression(new_location.address.clone(), section_id);

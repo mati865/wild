@@ -711,6 +711,7 @@ impl<'data, P: Platform> OutputSections<'data, P> {
         primary_id: OutputSectionId,
         min_alignment: Alignment,
         secondary_order: Option<SecondaryOrder>,
+        location: Option<linker_script::Expression<'data>>,
     ) -> OutputSectionId {
         let primary_info = self.section_infos.get(primary_id);
         let section_attributes = primary_info.section_attributes;
@@ -719,7 +720,7 @@ impl<'data, P: Platform> OutputSections<'data, P> {
             kind: SectionKind::Secondary(primary_id),
             section_attributes,
             min_alignment,
-            location: None,
+            location,
             load_location,
             secondary_order,
             phdr_name: None,
@@ -766,6 +767,7 @@ impl<'data, P: Platform> OutputSections<'data, P> {
             primary,
             min_alignment,
             Some(SecondaryOrder::InitFini { priority }),
+            None,
         );
 
         self.init_fini_by_priority.insert(key, sid);

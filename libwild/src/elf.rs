@@ -3904,6 +3904,12 @@ impl platform::SectionAttributes for SectionAttributes {
         info.section_attributes.entsize = self.entsize;
 
         info.section_attributes.ty = info.section_attributes.ty.max(self.ty);
+
+        if let SectionKind::Secondary(primary_id) = info.kind
+            && info.location.is_some()
+        {
+            self.apply(output_sections, primary_id);
+        }
     }
 
     fn is_null(&self) -> bool {

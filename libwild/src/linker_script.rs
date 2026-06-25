@@ -122,6 +122,7 @@ pub(crate) enum ContentsCommand<'a> {
     SymbolAssignment(SymbolAssignment<'a>),
     Align(Alignment),
     Provide(ProvideSymbolDefinition<'a>),
+    SetLocation(Location<'a>),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1172,7 +1173,7 @@ fn parse_assignment<'input>(input: &mut &'input BStr) -> winnow::Result<Contents
                 return Err(ContextError::default());
             }
         } else {
-            return Err(ContextError::default());
+            ContentsCommand::SetLocation(Location { address: (expr) })
         }
     } else {
         ContentsCommand::SymbolAssignment(SymbolAssignment { name, expr })
