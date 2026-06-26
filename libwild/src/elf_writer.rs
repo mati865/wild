@@ -484,7 +484,7 @@ fn write_file<'data, A: Arch<Platform = Elf>>(
             write_object::<A>(s, buffers, table_writer, layout, trace, sym_index_map)?;
         }
         FileLayout::Prelude(s) => write_prelude::<A>(s, buffers, table_writer, layout)?,
-        FileLayout::Epilogue(s) => write_epilogue::<A>(s, buffers, table_writer, layout)?,
+        FileLayout::Epilogue(s) => write_epilogue::<A>(s, buffers, table_writer, layout, trace)?,
         FileLayout::SyntheticSymbols(s) => write_synthetic_symbols::<A>(s, table_writer, layout)?,
         FileLayout::LinkerScript(s) => write_linker_script_state::<A>(s, table_writer, layout)?,
         FileLayout::NotLoaded | FileLayout::StubLibrary(_) => {}
@@ -1466,11 +1466,29 @@ fn write_object<'data, A: Arch<Platform = Elf>>(
 
     let _span = debug_span!("write_file", filename = %object.input).entered();
     let _file_span = layout.args().common().trace_span_for_file(object.file_id);
+
+    let Some(crate::layout::FileLayout::Epilogue(epilogue)) =
+        layout.group_layouts.last().and_then(|g| g.files.last())
+    else {
+        unreachable!("Epilogue is broken and must be the last file in the final layout group");
+    };
+
     for (i, sec) in object.sections.iter().enumerate() {
         let section_index = object::SectionIndex(i);
 
         match sec {
             SectionSlot::Loaded(sec) => {
+                let is_harvested = epilogue
+                    .script_sorted_sections
+                    .binary_search_by_key(&(object.file_id, section_index.0), |h| {
+                        (h.file_id, h.section_index.0)
+                    })
+                    .is_ok();
+
+                if is_harvested {
+                    continue;
+                }
+
                 write_object_section::<A>(
                     object,
                     layout,
@@ -4007,6 +4025,7 @@ fn write_epilogue<A: Arch<Platform = Elf>>(
     buffers: &mut OutputSectionPartMap<&mut [u8]>,
     table_writer: &mut TableWriter,
     layout: &ElfLayout,
+    trace: &TraceOutput,
 ) -> Result {
     verbose_timing_phase!("Write epilogue");
 
@@ -4042,8 +4061,26 @@ fn write_epilogue<A: Arch<Platform = Elf>>(
     let build_id_buffer = buffers.get_mut(part_id::NOTE_GNU_BUILD_ID);
     build_id_buffer.fill(0);
 
-    write_compressed_debug_sections(layout, buffers);
+    for harvested in &epilogue.script_sorted_sections {
+        let crate::layout::FileLayout::Object(object) = layout.file_layout(harvested.file_id)
+        else {
+            continue;
+        };
 
+        if let SectionSlot::Loaded(sec) = &object.sections[harvested.section_index.0] {
+            write_object_section::<A>(
+                object,
+                layout,
+                sec,
+                harvested.section_index,
+                buffers,
+                table_writer,
+                trace,
+            )?;
+        }
+    }
+
+    write_compressed_debug_sections(layout, buffers);
     Ok(())
 }
 
