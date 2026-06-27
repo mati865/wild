@@ -434,23 +434,16 @@ pub(crate) struct WasmObjectDataLayout<'data> {
     pub(crate) segments: Vec<WasmDataSegmentLayout<'data>>,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct ResolvedCodeReloc {
-    /// Byte offset within the body's bytes where the relocation should be applied.
-    pub(crate) offset: u32,
-    /// Wasm relocation type code.
-    pub(crate) ty: u8,
-    /// Resolved output value to write at the relocation site.
-    pub(crate) value: u32,
-}
-
 #[derive(Debug, Clone)]
 pub(crate) struct WasmFunctionBody<'data> {
     /// Raw body bytes (locals + operators) without the LEB128 size prefix.
     pub(crate) bytes: &'data [u8],
     /// Byte offset of this body (starting at its size prefix) within the code section payload.
     pub(crate) code_offset: u32,
-    pub(crate) relocations: Vec<ResolvedCodeReloc>,
+    /// Relocations targeting this body, with offsets relative to the body start.
+    pub(crate) relocations: Vec<WasmRelocation>,
+    /// Index of the object this body belongs to.
+    pub(crate) object_index: usize,
 }
 
 impl<'data> File<'data> {
@@ -614,6 +607,7 @@ impl<'data> File<'data> {
                         bytes: &self.data[range.clone()],
                         code_offset: range.start as u32 - code_payload_start,
                         relocations: Vec::new(),
+                        object_index: 0,
                     }
                 })
                 .map_err(Into::into)
@@ -628,7 +622,8 @@ impl<'data> File<'data> {
         };
 
         let mut segments = Vec::new();
-        let mut section_offset = 0u32;
+        let mut section_offset = u32::try_from(uleb128_size(u64::from(reader.count())))
+            .context("Wasm data count LEB")?;
         for res in reader {
             let d = res?;
             segments.push(WasmDataSegment {
@@ -1504,6 +1499,7 @@ pub(crate) struct WasmLayout<'data> {
     pub(crate) unsupported_output: Vec<&'static str>,
     pub(crate) object_index_maps: Vec<WasmObjectIndexMap>,
     pub(crate) object_data_layouts: Vec<WasmObjectDataLayout<'data>>,
+    pub(crate) per_object_symbols: Vec<Vec<WasmSymbol>>,
     pub(crate) encoded_sections: WasmEncodedSections,
     pub(crate) code_section_size: u64,
     pub(crate) data_section_size: u64,
@@ -1669,9 +1665,8 @@ fn output_data_segment_encoded_size(
 fn data_segment_payload_offset_in_section(kind: &DataKind<'_>, data_len: usize) -> Result<u32> {
     let encoded = wasm_data_segment_encoded_size(kind, data_len)?;
     let data_len = u32::try_from(data_len).context("Wasm data segment too large")?;
-    let payload_len = uleb128_size(u64::from(data_len)) as u32 + data_len;
     encoded
-        .checked_sub(payload_len)
+        .checked_sub(data_len)
         .ok_or_else(|| crate::error!("Wasm data segment payload offset underflow"))
 }
 
@@ -1803,6 +1798,7 @@ pub(crate) struct WasmObjectIndexMap {
     pub(crate) function_indices: Vec<u32>,
     pub(crate) global_indices: Vec<u32>,
     pub(crate) memory_indices: Vec<u32>,
+    pub(crate) data_addresses: Vec<u32>,
 }
 
 impl WasmObjectIndexMap {
@@ -1848,7 +1844,16 @@ impl WasmObjectIndexMap {
             reloc_type::MEMORY_ADDR_LEB
             | reloc_type::MEMORY_ADDR_SLEB
             | reloc_type::MEMORY_ADDR_I32 => {
-                bail!("memory address relocations are not supported yet");
+                ensure!(
+                    sym.kind == WasmSymbolKind::Data,
+                    "R_WASM_MEMORY_ADDR_* references non-data symbol"
+                );
+                self.data_addresses
+                    .get(reloc.index as usize)
+                    .copied()
+                    .ok_or_else(|| {
+                        crate::error!("data address for symbol index {} out of range", reloc.index)
+                    })
             }
             reloc_type::TABLE_INDEX_SLEB | reloc_type::TABLE_INDEX_I32 => {
                 bail!("table index relocations are not supported yet");
@@ -1990,7 +1995,7 @@ impl<'data> WasmObjectLayoutInput<'data> {
         if has_other_non_code_relocs {
             unsupported_output.push("non-code relocation");
         }
-        if !data_relocations.is_empty() {
+        if !data_relocations.is_empty() && !data_relocations_are_supported(&data_relocations) {
             unsupported_output.push("data relocation");
         }
         if file.standard_section_index[section_id::TABLE as usize].is_some() {
@@ -2090,6 +2095,7 @@ impl<'data> WasmObjectLayoutInput<'data> {
             ),
             global_indices: Vec::with_capacity(self.global_imports.len() + self.globals.len()),
             memory_indices: Vec::with_capacity(self.memories.len()),
+            data_addresses: Vec::new(),
         };
 
         let mut imports =
@@ -2223,12 +2229,7 @@ impl<'data> WasmObjectLayoutInput<'data> {
             .collect::<Result<Vec<_>>>()?;
 
         let mut function_bodies = self.function_bodies.clone();
-        resolve_code_relocations(
-            &mut function_bodies,
-            &self.code_relocations,
-            &self.symbols,
-            &index_map,
-        )?;
+        classify_code_relocations(&mut function_bodies, &self.code_relocations);
 
         Ok(WasmObjectOutputLayout {
             types: self.types.clone(),
@@ -2441,7 +2442,7 @@ where
     let mut layout = WasmLayout::default();
     let mut memory_cursor = 0u32;
     let mut section_cursor = 0u32;
-    for (input, object_layout) in layout_inputs.iter().zip(object_layouts) {
+    for (obj_idx, (input, object_layout)) in layout_inputs.iter().zip(object_layouts).enumerate() {
         layout.output_types.extend(object_layout.types);
         layout.imports.extend(object_layout.imports);
         layout
@@ -2449,12 +2450,17 @@ where
             .extend(object_layout.function_type_indices);
         layout.globals.extend(object_layout.globals);
         layout.exports.extend(object_layout.exports);
-        layout.function_bodies.extend(object_layout.function_bodies);
+        let mut bodies = object_layout.function_bodies;
+        for body in &mut bodies {
+            body.object_index = obj_idx;
+        }
+        layout.function_bodies.extend(bodies);
         layout.memories.extend(object_layout.memories);
         layout
             .unsupported_output
             .extend(object_layout.unsupported_output);
         layout.object_index_maps.push(object_layout.index_map);
+        layout.per_object_symbols.push(input.symbols.clone());
         layout.object_data_layouts.push(layout_object_data(
             input,
             layout.object_index_maps.last().expect("index map pushed"),
@@ -2462,8 +2468,107 @@ where
             &mut section_cursor,
         )?);
     }
+    compute_data_addresses(
+        &mut layout.object_index_maps,
+        &layout.per_object_symbols,
+        &layout.object_data_layouts,
+        &layout_inputs,
+        symbol_db,
+    )?;
     layout.encode_metadata_sections()?;
     Ok(layout)
+}
+
+fn is_supported_data_relocation(ty: u8) -> bool {
+    matches!(
+        ty,
+        reloc_type::MEMORY_ADDR_LEB
+            | reloc_type::MEMORY_ADDR_SLEB
+            | reloc_type::MEMORY_ADDR_I32
+            | reloc_type::FUNCTION_INDEX_I32
+    )
+}
+
+fn data_relocations_are_supported(relocs: &[WasmRelocation]) -> bool {
+    relocs
+        .iter()
+        .all(|reloc| is_supported_data_relocation(reloc.ty))
+}
+
+pub(crate) fn reloc_value_with_addend(base: u32, addend: i64) -> Result<u32> {
+    let value = i64::from(base)
+        .checked_add(addend)
+        .ok_or_else(|| crate::error!("Wasm relocation value overflow"))?;
+    u32::try_from(value).map_err(|_| crate::error!("Wasm relocation value out of range"))
+}
+
+fn data_symbol_memory_address(
+    object_data_layouts: &[WasmObjectDataLayout<'_>],
+    obj_idx: usize,
+    sym: &WasmSymbol,
+) -> Result<u32> {
+    ensure!(
+        sym.kind == WasmSymbolKind::Data,
+        "memory address relocation references non-data symbol"
+    );
+    let object_layout = &object_data_layouts[obj_idx];
+    let segment = object_layout
+        .segments
+        .iter()
+        .find(|segment| segment.segment_index == sym.index)
+        .ok_or_else(|| crate::error!("Wasm data symbol segment {} not found", sym.index))?;
+    segment
+        .output_memory_offset
+        .checked_add(sym.offset)
+        .ok_or_else(|| crate::error!("Wasm data symbol address overflow"))
+}
+
+fn compute_data_addresses(
+    object_index_maps: &mut [WasmObjectIndexMap],
+    per_object_symbols: &[Vec<WasmSymbol>],
+    object_data_layouts: &[WasmObjectDataLayout<'_>],
+    layout_inputs: &[WasmObjectLayoutInput<'_>],
+    symbol_db: &SymbolDb<'_, Wasm>,
+) -> Result<()> {
+    let file_id_to_index: HashMap<crate::input_data::FileId, usize> = layout_inputs
+        .iter()
+        .enumerate()
+        .map(|(i, input)| (input.file_id, i))
+        .collect();
+
+    for (obj_idx, (index_map, symbols)) in object_index_maps
+        .iter_mut()
+        .zip(per_object_symbols.iter())
+        .enumerate()
+    {
+        let mut data_addresses = vec![0u32; symbols.len()];
+        for (sym_idx, sym) in symbols.iter().enumerate() {
+            if sym.kind != WasmSymbolKind::Data {
+                continue;
+            }
+            let (def_obj_idx, def_sym) = if sym.is_undefined() {
+                let symbol_id = layout_inputs[obj_idx].symbol_id_range.offset_to_id(sym_idx);
+                let def_id = symbol_db.definition(symbol_id);
+                if def_id == symbol_id {
+                    continue;
+                }
+                let def_file_id = symbol_db.file_id_for_symbol(def_id);
+                let Some(&def_obj_idx) = file_id_to_index.get(&def_file_id) else {
+                    continue;
+                };
+                let def_input = &layout_inputs[def_obj_idx];
+                let def_sym_offset = def_id.to_offset(def_input.symbol_id_range);
+                (def_obj_idx, per_object_symbols[def_obj_idx][def_sym_offset])
+            } else {
+                (obj_idx, *sym)
+            };
+            data_addresses[sym_idx] =
+                data_symbol_memory_address(object_data_layouts, def_obj_idx, &def_sym)?;
+        }
+        index_map.data_addresses = data_addresses;
+    }
+
+    Ok(())
 }
 
 fn allocate_wasm_object_index_bases(
@@ -2517,14 +2622,13 @@ fn allocate_wasm_object_index_bases(
     Ok(index_bases)
 }
 
-fn resolve_code_relocations<'data>(
+/// Classify code relocations into per-body groups with body-local offsets.
+fn classify_code_relocations<'data>(
     bodies: &mut [WasmFunctionBody<'data>],
     relocs: &[WasmRelocation],
-    symbols: &[WasmSymbol],
-    index_map: &WasmObjectIndexMap,
-) -> Result {
+) {
     if relocs.is_empty() {
-        return Ok(());
+        return;
     }
 
     let mut reloc_iter = relocs.iter().peekable();
@@ -2538,17 +2642,13 @@ fn resolve_code_relocations<'data>(
             }
             reloc_iter.next();
             if reloc.offset >= body_start {
-                let value = index_map.resolve_reloc(reloc, symbols)?;
-                body.relocations.push(ResolvedCodeReloc {
+                body.relocations.push(WasmRelocation {
                     offset: reloc.offset - body_start,
-                    ty: reloc.ty,
-                    value,
+                    ..*reloc
                 });
             }
         }
     }
-
-    Ok(())
 }
 
 fn remap_wasm_index(indices: &[u32], index: u32, kind: &str) -> Result<u32> {
