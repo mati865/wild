@@ -1,25 +1,26 @@
 //#LinkArgs: -T tests/sources/elf/script-sort/script-sort.ld
 //#Object:runtime.c
+//#Object:ptr_black_box.c
 //#Object:script-sort-2.c
 //#Object:script-sort-3.c
 //#EnableLinker:lld
 //#DiffMatchAny:true
+//#ExpectSym:func_kept
+//#NoSym:func_drop
 
+#include "../common/ptr_black_box.h"
 #include "../common/runtime.h"
 
 extern int func_a();
 extern int func_b();
 extern int func_c();
 
-#if defined(__x86_64__)
-__attribute__((force_align_arg_pointer))
-#endif
 void _start(void) {
   runtime_init();
 
-  unsigned long a_addr = (unsigned long)&func_a;
-  unsigned long b_addr = (unsigned long)&func_b;
-  unsigned long c_addr = (unsigned long)&func_c;
+  size_t a_addr = ptr_to_int(&func_a);
+  size_t b_addr = ptr_to_int(&func_b);
+  size_t c_addr = ptr_to_int(&func_c);
 
   if (a_addr >= b_addr) {
     exit_syscall(101);
