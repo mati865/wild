@@ -20,7 +20,6 @@ use crate::platform::SectionFlags as _;
 use crate::resolution::SectionSlot;
 use crate::timing_phase;
 use crate::verbose_timing_phase;
-use itertools::Itertools;
 use object::LittleEndian;
 use object::bytes_of;
 use object::elf::CompressionHeader64;
@@ -29,7 +28,12 @@ use object::read::elf::Crel;
 use rayon::iter::IntoParallelIterator as _;
 use rayon::iter::IntoParallelRefIterator as _;
 use rayon::iter::ParallelIterator as _;
-use std::io::Write as _;
+use zlib_rs::Deflate;
+use zlib_rs::DeflateError;
+use zlib_rs::DeflateFlush;
+use zlib_rs::Status;
+use zlib_rs::adler32::adler32;
+use zlib_rs::adler32::adler32_combine;
 
 #[derive(Debug)]
 pub(crate) struct CompressedSection {
@@ -44,8 +48,32 @@ const MIN_CHUNK_SIZE: usize = 64 * 1024;
 /// threads because we want the output to not depend on the number of threads.
 const MAX_CHUNKS: usize = 128;
 
-const ZLIB_COMPRESSION_LEVEL: u32 = 1;
+const ZLIB_COMPRESSION_LEVEL: i32 = 1;
 const ZSTD_COMPRESSION_LEVEL: i32 = 3;
+
+/// zlib `windowBits`.
+const ZLIB_WINDOW_BITS: u8 = 15;
+
+/// Initial Adler-32 value (RFC 1950).
+const ADLER32_INITIAL: u32 = 1;
+
+/// zlib CMF+FLG header for deflate with a 32 KiB window and default FCHECK.
+const ZLIB_CMF_FLG: [u8; 2] = [0x78, 0x9c];
+
+/// Empty final deflate block (`BFINAL=1`, empty stored/fixed block) written after
+/// SyncFlush'd shards so the stream can be closed before the Adler-32 trailer.
+const ZLIB_EMPTY_FINAL_BLOCK: [u8; 2] = [0x03, 0x00];
+
+/// Size of multi-shard zlib trailer. Empty final block + Adler-32 (big-endian u32).
+const ZLIB_MULTI_SHARD_TRAILER_LEN: usize =
+    ZLIB_EMPTY_FINAL_BLOCK.len() + std::mem::size_of::<u32>();
+
+/// Extra bytes reserved beyond `compress_bound` so SyncFlush markers fit without an immediate
+/// realloc on the first flush attempt.
+const ZLIB_SYNC_FLUSH_SLACK: usize = 16;
+
+/// How much to grow the output buffer when a Finish/SyncFlush needs more space.
+const ZLIB_OUTPUT_GROW_BYTES: usize = 64;
 
 pub(crate) fn maybe_compress_debug_sections_elf<A: Arch<Platform = Elf>>(
     layout: &mut crate::layout::Layout<Elf>,
@@ -87,20 +115,50 @@ pub(crate) fn maybe_compress_debug_sections_elf<A: Arch<Platform = Elf>>(
     Ok(())
 }
 
-trait Compressor {
-    fn compress(chunk: &[u8]) -> Result<Vec<u8>>;
+trait SectionCompressor {
+    fn compress_section(uncompressed: &[u8]) -> Result<Vec<Vec<u8>>>;
 
     fn kind() -> CompressionType;
 }
 
 struct ZlibCompressor;
 
-impl Compressor for ZlibCompressor {
-    fn compress(chunk: &[u8]) -> Result<Vec<u8>> {
-        let compression = flate2::Compression::new(ZLIB_COMPRESSION_LEVEL);
-        let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), compression);
-        encoder.write_all(chunk)?;
-        Ok(encoder.finish()?)
+impl SectionCompressor for ZlibCompressor {
+    fn compress_section(uncompressed: &[u8]) -> Result<Vec<Vec<u8>>> {
+        verbose_timing_phase!("Compress zlib section");
+
+        let shard_size = shard_size(uncompressed.len());
+
+        if uncompressed.len() <= shard_size {
+            return Ok(vec![zlib_compress_whole(uncompressed)?]);
+        }
+
+        let shards: Vec<&[u8]> = uncompressed.chunks(shard_size).collect();
+
+        let shard_results: Vec<(Vec<u8>, u32)> = shards
+            .par_iter()
+            .map(|shard| -> Result<(Vec<u8>, u32)> {
+                verbose_timing_phase!("Compress zlib shard");
+                zlib_compress_shard(shard)
+            })
+            .collect::<Result<_>>()?;
+
+        let mut checksum = shard_results[0].1;
+        for ((_, shard_adler), shard) in shard_results.iter().skip(1).zip(shards.iter().skip(1)) {
+            checksum = adler32_combine(checksum, *shard_adler, shard.len() as u64);
+        }
+
+        // Header chunk + one chunk per shard + trailer chunk.
+        let mut chunks = Vec::with_capacity(shard_results.len() + 2);
+        chunks.push(ZLIB_CMF_FLG.to_vec());
+        for (compressed, _) in shard_results {
+            chunks.push(compressed);
+        }
+        let mut trailer = Vec::with_capacity(ZLIB_MULTI_SHARD_TRAILER_LEN);
+        trailer.extend_from_slice(&ZLIB_EMPTY_FINAL_BLOCK);
+        trailer.extend_from_slice(&checksum.to_be_bytes());
+        chunks.push(trailer);
+        Ok(chunks)
     }
 
     fn kind() -> CompressionType {
@@ -110,11 +168,18 @@ impl Compressor for ZlibCompressor {
 
 struct ZstdCompressor;
 
-impl Compressor for ZstdCompressor {
-    fn compress(chunk: &[u8]) -> Result<Vec<u8>> {
-        let mut output = Vec::new();
-        zstd::stream::copy_encode(chunk, &mut output, ZSTD_COMPRESSION_LEVEL)?;
-        Ok(output)
+impl SectionCompressor for ZstdCompressor {
+    fn compress_section(uncompressed: &[u8]) -> Result<Vec<Vec<u8>>> {
+        let shard_size = shard_size(uncompressed.len());
+        let shards: Vec<&[u8]> = uncompressed.chunks(shard_size).collect();
+
+        shards
+            .par_iter()
+            .map(|shard| -> Result<Vec<u8>> {
+                verbose_timing_phase!("Compress zstd shard");
+                zstd::encode_all(*shard, ZSTD_COMPRESSION_LEVEL).map_err(Into::into)
+            })
+            .collect()
     }
 
     fn kind() -> CompressionType {
@@ -122,7 +187,82 @@ impl Compressor for ZstdCompressor {
     }
 }
 
-fn compress_sections<A: Arch<Platform = Elf>, C: Compressor>(
+fn zlib_deflate_error(error: DeflateError) -> crate::error::Error {
+    crate::error::Error::with_message(format!("zlib compression failed: {error:?}"))
+}
+
+fn shard_size(uncompressed_len: usize) -> usize {
+    std::cmp::max(MIN_CHUNK_SIZE, uncompressed_len / MAX_CHUNKS)
+}
+
+/// Full zlib stream for a single input that doesn't need sharding.
+fn zlib_compress_whole(input: &[u8]) -> Result<Vec<u8>> {
+    let mut encoder = Deflate::new(ZLIB_COMPRESSION_LEVEL, true, ZLIB_WINDOW_BITS);
+    let mut output = vec![0u8; zlib_rs::compress_bound(input.len())];
+
+    match encoder
+        .compress(input, &mut output, DeflateFlush::Finish)
+        .map_err(zlib_deflate_error)?
+    {
+        Status::StreamEnd => {
+            output.truncate(encoder.total_out() as usize);
+            return Ok(output);
+        }
+        Status::Ok | Status::BufError => {}
+    }
+
+    loop {
+        let bytes_written = encoder.total_out() as usize;
+        if bytes_written + ZLIB_SYNC_FLUSH_SLACK > output.len() {
+            output.resize(output.len() + ZLIB_OUTPUT_GROW_BYTES, 0);
+        }
+        match encoder
+            .compress(&[], &mut output[bytes_written..], DeflateFlush::Finish)
+            .map_err(zlib_deflate_error)?
+        {
+            Status::StreamEnd => {
+                output.truncate(encoder.total_out() as usize);
+                return Ok(output);
+            }
+            Status::Ok | Status::BufError => {}
+        }
+    }
+}
+
+/// Compresses one shard as raw deflate terminated with `SyncFlush`. Also returns Adler-32 of the
+/// uncompressed shard.
+fn zlib_compress_shard(input: &[u8]) -> Result<(Vec<u8>, u32)> {
+    // Compute while `input` is hot for the following deflate pass.
+    let checksum = adler32(ADLER32_INITIAL, input);
+
+    let mut encoder = Deflate::new(ZLIB_COMPRESSION_LEVEL, false, ZLIB_WINDOW_BITS);
+    let mut output = vec![0u8; zlib_rs::compress_bound(input.len()) + ZLIB_SYNC_FLUSH_SLACK];
+
+    match encoder
+        .compress(input, &mut output, DeflateFlush::Block)
+        .map_err(zlib_deflate_error)?
+    {
+        Status::Ok | Status::BufError => {}
+        Status::StreamEnd => bail!("zlib block compression failed"),
+    }
+
+    loop {
+        let bytes_written = encoder.total_out() as usize;
+        encoder
+            .compress(&[], &mut output[bytes_written..], DeflateFlush::SyncFlush)
+            .map_err(zlib_deflate_error)?;
+        let new_bytes_written = encoder.total_out() as usize;
+        if new_bytes_written == bytes_written {
+            output.truncate(new_bytes_written);
+            return Ok((output, checksum));
+        }
+        if new_bytes_written + ZLIB_SYNC_FLUSH_SLACK > output.len() {
+            output.resize(output.len() + ZLIB_OUTPUT_GROW_BYTES, 0);
+        }
+    }
+}
+
+fn compress_sections<A: Arch<Platform = Elf>, C: SectionCompressor>(
     layout: &mut Layout<Elf>,
     debug_sections: &[OutputSectionId],
 ) -> Result {
@@ -133,7 +273,7 @@ fn compress_sections<A: Arch<Platform = Elf>, C: Compressor>(
                 crate::output_section_id::OutputSectionId,
                 Option<CompressedSection>,
             )> {
-                timing_phase!("Process debug section");
+                verbose_timing_phase!("Process debug section");
 
                 let section_layout = layout.section_layouts.get(section_id);
                 let mut buffer = vec![0u8; section_layout.file_size];
@@ -154,22 +294,13 @@ fn compress_sections<A: Arch<Platform = Elf>, C: Compressor>(
     Ok(())
 }
 
-fn compress_section<C: Compressor>(
+fn compress_section<C: SectionCompressor>(
     uncompressed: &[u8],
     alignment: Alignment,
 ) -> Result<Option<CompressedSection>> {
     verbose_timing_phase!("Compress section");
 
-    let chunk_size = std::cmp::max(MIN_CHUNK_SIZE, uncompressed.len() / MAX_CHUNKS);
-    let chunks = uncompressed.chunks(chunk_size).collect_vec();
-
-    let mut compressed_chunks = chunks
-        .par_iter()
-        .map(|chunk| -> Result<Vec<u8>> {
-            verbose_timing_phase!("Compress chunk");
-            C::compress(chunk)
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let mut compressed_chunks = C::compress_section(uncompressed)?;
 
     let mut header: CompressionHeader64<LittleEndian> = Default::default();
     header.ch_type.set(LittleEndian, C::kind());
@@ -177,9 +308,8 @@ fn compress_section<C: Compressor>(
     header.ch_addralign.set(LittleEndian, alignment.value());
 
     let header_bytes = bytes_of(&header).to_vec();
-
-    let total_compressed_size: usize =
-        header_bytes.len() + compressed_chunks.iter().map(|v| v.len()).sum::<usize>();
+    let body_size: usize = compressed_chunks.iter().map(Vec::len).sum();
+    let total_compressed_size = header_bytes.len() + body_size;
 
     // Return None if compression made things larger.
     if total_compressed_size >= uncompressed.len() {
@@ -385,4 +515,69 @@ fn update_file_offset<P: Platform>(layout: &mut Layout<P>) -> Result {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flate2::read::ZlibDecoder;
+    use std::io::Read as _;
+
+    fn pattern_bytes(len: usize) -> Vec<u8> {
+        (0..len).map(|i| (i % 251) as u8).collect()
+    }
+
+    fn decompress_zlib(stream: &[u8]) -> Vec<u8> {
+        let mut decoder = ZlibDecoder::new(stream);
+        let mut out = Vec::new();
+        decoder
+            .read_to_end(&mut out)
+            .expect("zlib decompression failed");
+        out
+    }
+
+    #[test]
+    fn zlib_multi_shard_round_trip() {
+        let input = pattern_bytes(MIN_CHUNK_SIZE * 3 + 123);
+        assert!(
+            input.len() > shard_size(input.len()),
+            "test data must span multiple shards"
+        );
+
+        let chunks = ZlibCompressor::compress_section(&input).unwrap();
+        // Header + at least two raw-deflate shards + trailer.
+        assert!(
+            chunks.len() >= 4,
+            "expected multi-shard layout, got {} chunks",
+            chunks.len()
+        );
+
+        let stream: Vec<u8> = chunks.into_iter().flatten().collect();
+        let recovered = decompress_zlib(&stream);
+        assert_eq!(recovered, input);
+    }
+
+    #[test]
+    fn zlib_single_shard_round_trip() {
+        let input = pattern_bytes(1024);
+        assert!(input.len() <= shard_size(input.len()));
+
+        let chunks = ZlibCompressor::compress_section(&input).unwrap();
+        assert_eq!(chunks.len(), 1, "single-shard path emits one zlib stream");
+
+        let recovered = decompress_zlib(&chunks[0]);
+        assert_eq!(recovered, input);
+    }
+
+    #[test]
+    fn zstd_multi_shard_round_trip() {
+        let input = pattern_bytes(MIN_CHUNK_SIZE * 3 + 123);
+        let chunks = ZstdCompressor::compress_section(&input).unwrap();
+        assert!(chunks.len() > 1);
+
+        // Multi-frame zstd. Frames written sequentially form one valid stream.
+        let stream: Vec<u8> = chunks.into_iter().flatten().collect();
+        let recovered = zstd::decode_all(stream.as_slice()).unwrap();
+        assert_eq!(recovered, input);
+    }
 }
