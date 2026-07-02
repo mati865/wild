@@ -25,3 +25,5 @@ ASSERT(symbol1 == 0x1000, "symbol1 must be 0x1000");
 ASSERT(symbol1 + symbol2 == 0x3000, "symbol1 + symbol2 must be 0x3000");
 ASSERT(symbol1 + symbol2 != symbol1 - symbol2, "symbol1 + symbol2 must not be symbol1 - symbol2");
 ASSERT(0xffffffff81000000 == (0xffffffff80000000 + (((symbol1 * 0x1000) + (symbol2 * 0x100 - 1)) & ~(0x200000 - 1))), "Incorrect Value");
+ASSERT((5 > 4 ? !1 ? 3 : 5 : 4) == 5, "5 > 4 ? !1 ? 3 : 5 : 4 must be 5");
+ASSERT((symbol1 > symbol2 ? symbol1 : symbol2) == MAX(symbol1, symbol2), "Expected MAX(symbol1, symbol2)");

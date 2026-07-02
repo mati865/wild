@@ -173,8 +173,6 @@ pub(crate) struct Phdr<'a> {
 /// - Functions: SIZEOF, ALIGNOF, LENGTH, ORIGIN, ADDR, LOADADDR, ALIGN, MIN, MAX, SEGMENT_START
 /// - Numbers (hex/decimal), symbols, location counter (.)
 /// - Parentheses for grouping
-///
-/// Not yet supported (can be added when needed):
 /// - Ternary operator (? :)
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) enum Expression<'a> {
@@ -226,6 +224,11 @@ pub(crate) enum Expression<'a> {
     BitwiseNot(Box<Expression<'a>>),
     Negate(Box<Expression<'a>>),
     SizeofHeaders,
+    Ternary(
+        Box<Expression<'a>>,
+        Box<Expression<'a>>,
+        Box<Expression<'a>>,
+    ),
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -286,6 +289,11 @@ impl<'a> Expression<'a> {
             | Expression::BitwiseNot(e)
             | Expression::Negate(e) => e.visit_expressions(cb),
             Expression::SegmentStart(_, default_expr) => default_expr.visit_expressions(cb),
+            Expression::Ternary(expression, expression1, expression2) => {
+                expression.visit_expressions(cb);
+                expression1.visit_expressions(cb);
+                expression2.visit_expressions(cb);
+            }
         }
     }
 }
@@ -554,7 +562,25 @@ fn parse_phdrs<'input>(input: &mut &'input BStr) -> winnow::Result<Vec<Phdr<'inp
 
 /// Parse an expression - entry point for expression parsing
 pub(crate) fn parse_expression<'a>(input: &mut &'a BStr) -> winnow::Result<Expression<'a>> {
-    parse_logical_or.parse_next(input)
+    parse_ternary.parse_next(input)
+}
+
+pub(crate) fn parse_ternary<'a>(input: &mut &'a BStr) -> winnow::Result<Expression<'a>> {
+    let mut left = parse_logical_or.parse_next(input)?;
+
+    multispace0.parse_next(input)?;
+
+    if opt('?').parse_next(input)?.is_some() {
+        multispace0.parse_next(input)?;
+        let true_expr = parse_ternary.parse_next(input)?;
+        multispace0.parse_next(input)?;
+        ':'.parse_next(input)?;
+        multispace0.parse_next(input)?;
+        let false_expr = parse_ternary.parse_next(input)?;
+        left = Expression::Ternary(Box::new(left), Box::new(true_expr), Box::new(false_expr));
+        multispace0.parse_next(input)?;
+    }
+    Ok(left)
 }
 
 /// Parse logical OR: expression || expression

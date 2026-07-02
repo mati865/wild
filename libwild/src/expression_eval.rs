@@ -205,6 +205,14 @@ pub(crate) fn evaluate_expression<'data, P: Platform>(
             }
         }
         Expression::SizeofHeaders => Ok(sizeof_headers),
+        Expression::Ternary(cond, if_true, if_false) => {
+            let cond = eval!(cond)?;
+            if cond != 0 {
+                eval!(if_true)
+            } else {
+                eval!(if_false)
+            }
+        }
     }
 }
 
@@ -247,6 +255,14 @@ pub(crate) fn evaluate_const<'data>(expr: &Expression<'data>) -> Result<u64> {
         Expression::LogicalNot(expression) => Ok(u64::from(evaluate_const(expression)? == 0)),
         Expression::BitwiseNot(expression) => Ok(!evaluate_const(expression)?),
         Expression::Negate(expression) => Ok(evaluate_const(expression)?.wrapping_neg()),
+        Expression::Ternary(cond, if_true, if_false) => {
+            let cond = evaluate_const(cond)?;
+            if cond != 0 {
+                evaluate_const(if_true)
+            } else {
+                evaluate_const(if_false)
+            }
+        }
 
         _ => bail!("Expected constant expression"),
     }
