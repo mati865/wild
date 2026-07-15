@@ -25,6 +25,7 @@ use jobserver::Acquired;
 use jobserver::Client;
 use rayon::ThreadPoolBuilder;
 use std::fmt::Display;
+use std::io::Write;
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::path::PathBuf;
@@ -201,6 +202,20 @@ impl Args {
             Args::Wasm(wasm_args) => &mut wasm_args.common,
         }
     }
+
+    pub(crate) fn print_emulation_info(&self, stdout: &mut dyn Write) -> Result<()> {
+        match self {
+            Args::Elf(_) => {
+                writeln!(
+                    stdout,
+                    "supported emulations: {}",
+                    crate::arch::SUPPORTED_EMULATIONS
+                )?;
+            }
+            Args::MachO(_) | Args::Wasm(_) => (),
+        }
+        Ok(())
+    }
 }
 
 enum PlatformKind {
@@ -247,8 +262,11 @@ impl PlatformKind {
 pub(crate) enum VersionMode {
     /// Don't print version
     None,
-    /// Print version and continue linking (-v)
+    /// Print version and continue linking if object files are specified (-v).
     Verbose,
+    /// Print version along with supported emulations and continue linking if object files are
+    /// specified (-V).
+    VerboseWithEmulations,
     /// Print version and exit immediately (--version)
     ExitAfterPrint,
 }

@@ -7,6 +7,8 @@ use super::Input;
 use super::InputSpec;
 use crate::alignment::Alignment;
 use crate::arch::Architecture;
+use crate::arch::SUPPORTED_EMULATIONS;
+use crate::arch::SUPPORTED_TARGETS;
 use crate::args::CommonArgs;
 use crate::args::CopyRelocations;
 use crate::args::CopyRelocationsDisabledReason;
@@ -878,8 +880,8 @@ fn setup_argument_parser() -> ArgumentParser<ElfArgs> {
             writeln!(stdout, "{}", parser.generate_help())?;
 
             // The following listing is something autoconf detection relies on.
-            writeln!(stdout, "wild: supported targets: elf64-x86-64 elf64-littleaarch64 elf64-littleriscv elf64-loongarch")?;
-            writeln!(stdout, "wild: supported emulations: elf_x86_64 aarch64elf elf64lriscv elf64loongarch")?;
+            writeln!(stdout, "wild: supported targets: {SUPPORTED_TARGETS}")?;
+            writeln!(stdout, "wild: supported emulations: {SUPPORTED_EMULATIONS}")?;
 
             std::process::exit(0);
         });
@@ -896,9 +898,18 @@ fn setup_argument_parser() -> ArgumentParser<ElfArgs> {
     parser
         .declare()
         .short("v")
-        .help("Print version and continue linking")
+        .help("Print version and continue linking if object files are specified")
         .execute(|args, _modifier_stack| {
             args.common.version_mode = VersionMode::Verbose;
+            Ok(())
+        });
+
+    parser
+        .declare()
+        .short("V")
+        .help("Print version along with supported emulations and continue linking if object files are specified")
+        .execute(|args, _modifier_stack| {
+            args.common.version_mode = VersionMode::VerboseWithEmulations;
             Ok(())
         });
 
