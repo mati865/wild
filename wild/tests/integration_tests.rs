@@ -81,8 +81,8 @@
 //!
 //! NoSection:{section_name} Checks that the specified section does not exist in the output binary.
 //!
-//! ExpectSectionBytes:{section_name}=0x{hex_bytes} Checks that the specified section contains
-//! exactly the given bytes.
+//! ExpectSectionBytes:{section_name}=0x{hex_bytes} [start_range..end_range] Checks that the
+//! specified section contains exactly the given bytes.
 //!
 //! ExpectGdbIndexCuCount:{count} Checks that the `.gdb_index` section contains exactly the
 //! specified number of CU entries.
@@ -343,6 +343,7 @@ use std::io::BufReader;
 use std::io::ErrorKind;
 use std::io::IsTerminal;
 use std::io::Read;
+use std::ops::Range;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
@@ -1571,6 +1572,7 @@ struct Assertions {
 struct ExpectedSectionBytes {
     section_name: String,
     expected_bytes: Vec<u8>,
+    match_range: Option<Range<usize>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2009,6 +2011,21 @@ fn process_directive(
             let (section_name, hex_str) = arg.split_once('=').with_context(|| {
                 format!("ExpectSectionBytes requires section_name=0xhex_bytes, got `{arg}`")
             })?;
+            let (hex_str, match_range) = hex_str
+                .split_once(' ')
+                .map_or((hex_str, None), |(hex_str, match_range)| {
+                    (hex_str, Some(match_range.trim()))
+                });
+            let match_range = if let Some(match_range) = match_range {
+                let (start_range, end_range) = match_range.split_once("..").with_context(|| {
+                    format!(
+                        "ExpectSectionBytes requires section_name=0xhex_bytes start_range..end_range, got `{match_range}`"
+                    )
+                })?;
+                Some(start_range.parse::<usize>()?..end_range.parse::<usize>()?)
+            } else {
+                None
+            };
             let hex_str = hex_str.trim().strip_prefix("0x").with_context(|| {
                 format!("ExpectSectionBytes value must start with 0x, got `{hex_str}`")
             })?;
@@ -2021,6 +2038,7 @@ fn process_directive(
                 .push(ExpectedSectionBytes {
                     section_name: section_name.to_owned(),
                     expected_bytes,
+                    match_range,
                 });
         }
         "ExpectDynamic" => config
@@ -4484,7 +4502,11 @@ impl Assertions {
             let section = obj
                 .section_by_name(&expected.section_name)
                 .with_context(|| format!("Section `{}` not found", expected.section_name))?;
-            let data = section.data()?;
+            let data = if let Some(range) = &expected.match_range {
+                &section.data()?[range.clone()]
+            } else {
+                section.data()?
+            };
             ensure!(
                 data == expected.expected_bytes.as_slice(),
                 "Section `{}` bytes mismatch: expected {:02x?}, got {:02x?}",
