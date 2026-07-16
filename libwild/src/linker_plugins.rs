@@ -15,6 +15,7 @@ use crate::args::elf::ElfArgs;
 use crate::bail;
 use crate::elf::Elf;
 use crate::elf::RawSymbolName;
+use crate::env;
 use crate::error;
 use crate::error::Context as _;
 use crate::error::Error;
@@ -230,7 +231,7 @@ impl<'data> LinkerPlugin<'data> {
             Ok(PLUGIN_OUTPUTS.take())
         })?;
 
-        if let Ok(dir_name) = std::env::var(SAVE_VAR_NAME) {
+        if let Ok(dir_name) = env::var(SAVE_VAR_NAME) {
             plugin_outputs.save_to(Path::new(&dir_name))?;
         }
 

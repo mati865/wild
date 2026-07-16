@@ -14,6 +14,7 @@
 
 use crate::bail;
 use crate::ensure;
+use crate::env;
 use crate::error::Context;
 use crate::error::Result;
 use crate::input_data::FileId;
@@ -309,12 +310,12 @@ impl Default for CommonArgs {
             should_fork: true,
             demangle: true,
             version_mode: VersionMode::None,
-            validate_output: std::env::var(VALIDATE_ENV).is_ok_and(|v| v == "1"),
-            verify_allocation_consistency: std::env::var(WRITE_VERIFY_ALLOCATIONS_ENV)
+            validate_output: env::var(VALIDATE_ENV).is_ok_and(|v| v == "1"),
+            verify_allocation_consistency: env::var(WRITE_VERIFY_ALLOCATIONS_ENV)
                 .is_ok_and(|v| v == "1"),
-            write_layout: std::env::var(WRITE_LAYOUT_ENV).is_ok_and(|v| v == "1"),
-            write_trace: std::env::var(WRITE_TRACE_ENV).is_ok_and(|v| v == "1"),
-            print_allocations: std::env::var("WILD_PRINT_ALLOCATIONS")
+            write_layout: env::var(WRITE_LAYOUT_ENV).is_ok_and(|v| v == "1"),
+            write_trace: env::var(WRITE_TRACE_ENV).is_ok_and(|v| v == "1"),
+            print_allocations: env::var("WILD_PRINT_ALLOCATIONS")
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .map(FileId::from_encoded),
@@ -441,7 +442,7 @@ impl CommonArgs {
         // so we open it before the arguments are parsed (can open a file).
         let jobserver_client = unsafe { Client::from_env() };
 
-        let files_per_group = std::env::var(FILES_PER_GROUP_ENV)
+        let files_per_group = env::var(FILES_PER_GROUP_ENV)
             .ok()
             .map(|s| s.parse())
             .transpose()?;
@@ -459,7 +460,7 @@ impl CommonArgs {
             ..Default::default()
         };
 
-        if std::env::var(REFERENCE_LINKER_ENV).is_ok() {
+        if env::var(REFERENCE_LINKER_ENV).is_ok() {
             common.write_layout = true;
             common.write_trace = true;
         }

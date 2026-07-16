@@ -1,9 +1,9 @@
 //! Tests that assert properties of our source files, such as formatting.
 
 use crate::bail;
+use crate::env;
 use crate::error::Context as _;
 use crate::error::Result;
-use std::env;
 use std::fs::read_dir;
 use std::path::Path;
 
@@ -12,7 +12,7 @@ fn check_sources_format() -> Result {
     use std::process::Command;
     use std::process::Stdio;
 
-    if std::env::var_os("WILD_TEST_IGNORE_FORMAT").is_some() {
+    if env::var("WILD_TEST_IGNORE_FORMAT").is_ok() {
         return Ok(());
     }
 
@@ -97,7 +97,7 @@ fn check_toml_format() -> Result {
     use std::process::Command;
     use std::process::Stdio;
 
-    if std::env::var_os("WILD_TEST_IGNORE_FORMAT").is_some() {
+    if env::var("WILD_TEST_IGNORE_FORMAT").is_ok() {
         return Ok(());
     }
 

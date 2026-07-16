@@ -1,6 +1,7 @@
 //! Code for reporting how long each phase of linking takes when the --time argument is supplied.
 
 use crate::args::CounterKind;
+use crate::env;
 use crate::error::AlreadyInitialised;
 use crate::error::Result;
 use crate::perf::CounterList;
@@ -277,7 +278,7 @@ impl Display for Reading {
 }
 
 fn perfetto_output_file() -> Option<PathBuf> {
-    std::env::var(PERFETTO_ENV_VAR).ok().map(PathBuf::from)
+    env::var(PERFETTO_ENV_VAR).ok().map(PathBuf::from)
 }
 
 pub(crate) fn finalise_perfetto_trace() -> Result {
