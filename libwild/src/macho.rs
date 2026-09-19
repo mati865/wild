@@ -2402,12 +2402,19 @@ fn process_relocation<'data, 'scope, A: platform::Arch<Platform = MachO>>(
             A::relocation_from_raw(rel_info)?
         };
         let mut flags_to_add = layout::resolution_flags(relocation.kind);
-        if is_dynamic_library(&symbol_db.file(symbol_db.file_id_for_symbol(symbol_id)))
-            && rel_info.r_type == object::macho::ARM64_RELOC_BRANCH26
-        {
-            // TODO: classify symbols more reliably, likely by checking whether their section is
-            // __text.
-            flags_to_add |= ValueFlags::GOT | ValueFlags::DYNAMIC_FUNCTION | ValueFlags::PLT;
+
+        if is_dynamic_library(&symbol_db.file(symbol_db.file_id_for_symbol(symbol_id))) {
+            match rel_info.r_type {
+                object::macho::ARM64_RELOC_BRANCH26 => {
+                    // TODO: classify symbols more reliably, likely by checking whether their
+                    // section is __text.
+                    flags_to_add |=
+                        ValueFlags::GOT | ValueFlags::DYNAMIC_FUNCTION | ValueFlags::PLT;
+                }
+                object::macho::ARM64_RELOC_TLVP_LOAD_PAGE21
+                | object::macho::ARM64_RELOC_TLVP_LOAD_PAGEOFF12 => flags_to_add |= ValueFlags::GOT,
+                _ => (),
+            }
         }
 
         let atomic_flags = &resources.per_symbol_flags.get_atomic(symbol_id);
