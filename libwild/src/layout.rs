@@ -2946,7 +2946,7 @@ impl<'data, P: Platform> FileLayoutState<'data, P> {
                 s.finalise_symbol_sizes::<A>(common, per_symbol_flags, resources)?;
             }
             FileLayoutState::Epilogue(s) => {
-                s.finalise_sizes(common, resources);
+                s.finalise_sizes(common, resources)?;
             }
             FileLayoutState::LinkerScript(s) => {
                 s.finalise_sizes(common, per_symbol_flags, resources)?;
@@ -4230,7 +4230,7 @@ impl<'data, P: Platform> EpilogueLayoutState<P> {
         &mut self,
         common: &mut CommonGroupState<'data, P>,
         resources: &FinaliseSizesResources<'data, '_, P>,
-    ) {
+    ) -> Result<()> {
         let symbol_db = resources.symbol_db;
 
         P::finalise_sizes_epilogue(
@@ -4239,7 +4239,7 @@ impl<'data, P: Platform> EpilogueLayoutState<P> {
             resources.dynamic_symbol_definitions,
             resources.format_specific,
             symbol_db,
-        );
+        )
     }
 
     fn finalise_layout(
@@ -4390,6 +4390,7 @@ impl<'data, P: Platform<GcUnit = SectionGcUnit>> ObjectLayoutState<'data, P> {
         let mut note_gnu_property_section = None;
         let mut riscv_attributes_section = None;
         let mut init_func_section_indices = SmallVec::<[SectionIndex; 1]>::new();
+        let mut compact_unwind_section_indices = SmallVec::<[SectionIndex; 1]>::new();
 
         let no_gc = !resources.symbol_db.args.should_gc_sections();
 
@@ -4427,6 +4428,9 @@ impl<'data, P: Platform<GcUnit = SectionGcUnit>> ObjectLayoutState<'data, P> {
                 SectionSlot::InitFunc(index) => {
                     init_func_section_indices.push(*index);
                 }
+                SectionSlot::CompactUnwind(index) => {
+                    compact_unwind_section_indices.push(*index);
+                }
                 _ => (),
             }
         }
@@ -4461,6 +4465,16 @@ impl<'data, P: Platform<GcUnit = SectionGcUnit>> ObjectLayoutState<'data, P> {
                 self,
                 common,
                 init_function_section_index,
+                resources,
+                queue,
+                scope,
+            )?;
+        }
+        for compact_unwind_section_index in compact_unwind_section_indices {
+            <A::Platform as Platform>::process_compact_unwind_section::<A>(
+                self,
+                common,
+                compact_unwind_section_index,
                 resources,
                 queue,
                 scope,
@@ -4502,7 +4516,8 @@ impl<'data, P: Platform> ObjectLayoutState<'data, P> {
             | SectionSlot::LoadedDebugInfo(..)
             | SectionSlot::NoteGnuProperty(..)
             | SectionSlot::RiscvVAttributes(..)
-            | SectionSlot::InitFunc(..) => {}
+            | SectionSlot::InitFunc(..)
+            | SectionSlot::CompactUnwind(..) => {}
             SectionSlot::MergeStrings(_) => {
                 // We currently always load everything in merge-string sections. i.e. we don't GC
                 // unreferenced data. So the only thing we need to do here is propagate section
@@ -4711,6 +4726,7 @@ impl<'data, P: Platform> ObjectLayoutState<'data, P> {
                     SectionResolution { address }
                 }
                 SectionSlot::InitFunc(..) => SectionResolution::none(),
+                SectionSlot::CompactUnwind(..) => SectionResolution::none(),
                 _ => SectionResolution::none(),
             };
             section_resolutions.push(resolution);
