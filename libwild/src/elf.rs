@@ -6293,6 +6293,19 @@ fn materialize_relocation_requirements<
                 .uses_tlsld
                 .store(true, atomic::Ordering::Relaxed);
         }
+    } else if rel_kind == RelocationKind::SymbolSize
+        && flags.is_interposable()
+        && (flags.is_dynamic() || symbol_db.output_kind.is_shared_object())
+    {
+        if !section_is_writable {
+            bail!(
+                "Cannot apply dynamic relocation {} to read-only section for symbol `{}`",
+                A::rel_type_to_string(r_type),
+                resources.symbol_db.symbol_name_for_display(symbol_id),
+            );
+        }
+
+        common.allocate(part_id::RELA_DYN_GENERAL, C::RELA_ENTRY_SIZE);
     } else if flags_to_add.needs_direct() && flags.is_interposable() {
         if symbol_db.output_kind.is_shared_object()
             && A::is_disallowed_for_interposable_symbols(r_type)
