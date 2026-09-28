@@ -758,6 +758,10 @@ impl platform::SectionHeader for SectionHeader {
             S_ZEROFILL | S_GB_ZEROFILL | S_THREAD_LOCAL_ZEROFILL
         )
     }
+
+    fn is_null(&self) -> bool {
+        false
+    }
 }
 
 impl platform::SectionType for macho::SectionType {

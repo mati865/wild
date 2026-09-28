@@ -3934,6 +3934,10 @@ impl platform::SectionHeader for object::elf::SectionHeader64<LittleEndian> {
     fn is_no_bits(&self) -> bool {
         self.sh_type(LittleEndian) == sht::NOBITS
     }
+
+    fn is_null(&self) -> bool {
+        self.sh_type(LittleEndian) == sht::NULL
+    }
 }
 
 impl platform::SectionType for SectionType {

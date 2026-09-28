@@ -1159,6 +1159,10 @@ impl platform::SectionHeader for SectionHeader {
     fn is_no_bits(&self) -> bool {
         false
     }
+
+    fn is_null(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Debug, Copy, Clone, Default)]
