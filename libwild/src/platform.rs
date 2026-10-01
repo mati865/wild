@@ -425,6 +425,12 @@ pub(crate) trait Platform:
         Ok(())
     }
 
+    fn maybe_only_keep_debug<'data, A: Arch<Platform = Self>>(
+        _layout: &mut Layout<'data, Self>,
+    ) -> Result {
+        Ok(())
+    }
+
     /// Possibly initialise a linker plugin if the platform supports it and the arguments specifies
     /// that one should be used.
     fn maybe_init_linker_plugin<'data>(
