@@ -136,6 +136,7 @@ pub(crate) enum SectionRuleOutcome {
     Debug,
     DebugIndex,
     RiscVAttribute,
+    AArch64Attribute,
     SortedSection(SectionOutputInfo),
     InitFunc,
     CompactUnwind,

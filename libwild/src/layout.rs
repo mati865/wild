@@ -4449,6 +4449,7 @@ impl<'data, P: Platform<GcUnit = SectionGcUnit>> ObjectLayoutState<'data, P> {
         let mut frame_section_indices = SmallVec::<[SectionIndex; 2]>::new();
         let mut note_gnu_property_section = None;
         let mut riscv_attributes_section = None;
+        let mut aarch64_attributes_section = None;
         let mut init_func_section_indices = SmallVec::<[SectionIndex; 1]>::new();
         let mut compact_unwind_section_indices = SmallVec::<[SectionIndex; 1]>::new();
 
@@ -4485,6 +4486,9 @@ impl<'data, P: Platform<GcUnit = SectionGcUnit>> ObjectLayoutState<'data, P> {
                 SectionSlot::RiscvVAttributes(index) => {
                     riscv_attributes_section = Some(*index);
                 }
+                SectionSlot::AArch64Attributes(index) => {
+                    aarch64_attributes_section = Some(*index);
+                }
                 SectionSlot::InitFunc(index) => {
                     init_func_section_indices.push(*index);
                 }
@@ -4518,6 +4522,15 @@ impl<'data, P: Platform<GcUnit = SectionGcUnit>> ObjectLayoutState<'data, P> {
                 riscv_attributes_index,
             )
             .context("Cannot parse .riscv.attributes section")?;
+        }
+
+        if let Some(aarch64_attributes_index) = aarch64_attributes_section {
+            A::process_aarch64_build_attributes(
+                self.object,
+                &mut self.format_specific,
+                aarch64_attributes_index,
+            )
+            .context("Cannot parse .ARM.attributes section")?;
         }
 
         for init_function_section_index in init_func_section_indices {
@@ -4576,6 +4589,7 @@ impl<'data, P: Platform> ObjectLayoutState<'data, P> {
             | SectionSlot::LoadedDebugInfo(..)
             | SectionSlot::NoteGnuProperty(..)
             | SectionSlot::RiscvVAttributes(..)
+            | SectionSlot::AArch64Attributes(..)
             | SectionSlot::InitFunc(..)
             | SectionSlot::CompactUnwind(..) => {}
             SectionSlot::MergeStrings(_) => {
