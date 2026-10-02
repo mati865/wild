@@ -2,6 +2,7 @@ use crate::FileSystem;
 use crate::OutputKind;
 use crate::alignment;
 use crate::alignment::Alignment;
+use crate::alignment::MACHO_PAGE_ALIGNMENT_VALUE;
 use crate::args::macho::MachOArgs;
 use crate::bail;
 use crate::ensure;
@@ -366,6 +367,7 @@ pub(crate) struct ImportedSymbolWithResolution {
 struct PendingFixup {
     file_id: FileId,
     section_index: SectionIndex,
+    output_section_id: OutputSectionId,
     offset_in_section: u64,
     kind: PendingFixupKind,
 }
@@ -1897,11 +1899,6 @@ impl platform::Platform for MachO {
             })
             .sum::<u64>();
 
-        // TODO: Since we currently only support one page per segment, this is fine as a cap. But
-        // once we support multiple pages, we should figure out how to find exactly how many
-        // `page_start`s were emitted.
-        fixup_table_size += CHAINED_FIXUP_PAGE_START_SIZE * MAX_SEGMENT_COUNT as u64;
-
         mem_sizes.increment(
             part_id::CHAINED_FIXUP_TABLE,
             alignment::USIZE.align_up(fixup_table_size),
@@ -1944,6 +1941,64 @@ impl platform::Platform for MachO {
         _mem_sizes: &mut crate::output_section_part_map::OutputSectionPartMap<u64>,
         _symbol_db: &crate::symbol_db::SymbolDb<'data, Self>,
     ) {
+    }
+
+    fn apply_late_size_adjustments_epilogue(
+        _state: &mut Self::EpilogueLayoutExt,
+        current_sizes: &OutputSectionPartMap<u64>,
+        extra_sizes: &mut OutputSectionPartMap<u64>,
+        output_sections: &crate::output_section_id::OutputSections<Self>,
+        _dynamic_symbol_defs: &[crate::layout::DynamicSymbolDefinition<Self>],
+        format_specific: &Self::FinaliseSizesExt<'_>,
+        _args: &Self::Args,
+    ) -> Result {
+        // Addresses aren't available yet, so estimate the number of pages that can contain fixups
+        // from all sections in the __DATA and __DATA_CONST segments.
+        let data_like_sections = output_sections
+            .ids_with_info()
+            .filter_map(|(section_id, info)| {
+                if let SectionKind::Primary(identity) = info.kind
+                    && matches!(
+                        identity.format_specific(),
+                        Some(SegmentName::DATA | SegmentName::DATA_CONST)
+                    )
+                {
+                    Some(section_id)
+                } else {
+                    None
+                }
+            })
+            .collect_vec();
+
+        // Verify all the fixups are actually present in some of the data-like sections.
+        // TODO: iterate segments based on listed sections connected to the pending fixups
+        ensure!(
+            format_specific
+                .pending_fixups
+                .iter()
+                .all(|fixup| data_like_sections.contains(&fixup.output_section_id)),
+            "Fixup out of __DATA or __DATA_CONST segment"
+        );
+
+        let estimated_page_count = data_like_sections
+            .iter()
+            .map(|section_id| {
+                let part_range = section_id.part_id_range::<MachO>();
+                current_sizes
+                    .in_range(part_range)
+                    .map(|(part_id, _)| {
+                        (current_sizes.get(part_id) + extra_sizes.get(part_id))
+                            .div_ceil(MACHO_PAGE_ALIGNMENT_VALUE)
+                    })
+                    .sum::<u64>()
+            })
+            .sum::<u64>();
+
+        extra_sizes.increment(
+            part_id::CHAINED_FIXUP_TABLE,
+            alignment::USIZE.align_up(CHAINED_FIXUP_PAGE_START_SIZE * estimated_page_count),
+        );
+        Ok(())
     }
 
     fn finalise_layout_epilogue<'data>(
@@ -2746,6 +2801,9 @@ fn process_relocation<'data, 'scope, A: platform::Arch<Platform = MachO>>(
                 common.format_specific.pending_fixups.push(PendingFixup {
                     file_id: object.file_id,
                     section_index,
+                    output_section_id: object
+                        .section_part_id(section_index, &resources.symbol_db.section_part_ids)
+                        .output_section_id::<MachO>(),
                     offset_in_section: u64::from(rel_info.r_address),
                     kind,
                 });
