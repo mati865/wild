@@ -1576,9 +1576,19 @@ fn setup_argument_parser() -> ArgumentParser<ElfArgs> {
     parser
         .declare()
         .long("no-identity-comment")
+        .long("disable-linker-version")
         .help("Don't write the linker name and version in .comment")
         .execute(|args, _modifier_stack| {
             args.should_write_linker_identity = false;
+            Ok(())
+        });
+
+    parser
+        .declare()
+        .long("enable-linker-version")
+        .help("Write the linker name and version in .comment (the default)")
+        .execute(|args, _modifier_stack| {
+            args.should_write_linker_identity = true;
             Ok(())
         });
 
@@ -2815,5 +2825,19 @@ mod tests {
 
         let args = parse_args(["--only-keep-debug", "--build-id=0x1234abcd"]);
         assert!(args.only_keep_debug());
+    }
+
+    #[test]
+    fn test_linker_version_flags() {
+        assert!(parse_args([]).should_write_linker_identity);
+        assert!(!parse_args(["--disable-linker-version"]).should_write_linker_identity);
+        assert!(
+            parse_args(["--disable-linker-version", "--enable-linker-version"])
+                .should_write_linker_identity
+        );
+        assert!(
+            !parse_args(["--enable-linker-version", "--disable-linker-version"])
+                .should_write_linker_identity
+        );
     }
 }
