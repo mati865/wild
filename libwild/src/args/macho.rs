@@ -249,6 +249,11 @@ fn setup_argument_parser() -> ArgumentParser<MachOArgs> {
         );
     parser
         .declare_with_param()
+        .short("rpath")
+        .help("Include a path to runpath search paths (not yet emitted)")
+        .execute(|args, _modifier_stack, value| args.warn_unsupported(&format!("-rpath {value}")));
+    parser
+        .declare_with_param()
         .long("syslibroot")
         .help("Set system root")
         .execute(|args, _modifier_stack, value| {
