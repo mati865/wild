@@ -248,6 +248,13 @@ fn setup_argument_parser() -> ArgumentParser<MachOArgs> {
             },
         );
     parser
+        .declare_with_three_params()
+        .short("sectcreate")
+        .help("Create a section from a file (not yet supported)")
+        .execute(|args, _modifier_stack, _segment, _section, _file| {
+            args.warn_unsupported("-sectcreate")
+        });
+    parser
         .declare_with_param()
         .short("rpath")
         .help("Include a path to runpath search paths (not yet emitted)")
