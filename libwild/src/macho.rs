@@ -29,6 +29,7 @@ use crate::macho::output_section_id::CHAINED_FIXUP_TABLE;
 use crate::macho::output_section_id::CODE_SIGNATURE;
 use crate::macho::output_section_id::EXPORTS_TRIE;
 use crate::macho::output_section_id::LOAD_COMMANDS;
+use crate::macho::output_section_id::LOAD_COMMANDS_PADDING;
 use crate::macho::output_section_id::STRTAB;
 use crate::macho::output_section_id::SYMTAB_GLOBAL;
 use crate::macho_writer;
@@ -117,6 +118,7 @@ enum SinglePartSectionId {
     SymtabGlobal,
     LinkEditSegment,
     LoadCommands,
+    LoadCommandsPadding,
     CodeSignature,
     ChainedFixupTable,
     ExportsTrie,
@@ -136,6 +138,8 @@ pub(crate) mod part_id {
     pub(crate) const PLT_GOT: PartId = SinglePartSectionId::PltGot.part_id();
     pub(crate) const SYMTAB_GLOBAL: PartId = SinglePartSectionId::SymtabGlobal.part_id();
     pub(crate) const LOAD_COMMANDS: PartId = SinglePartSectionId::LoadCommands.part_id();
+    pub(crate) const LOAD_COMMANDS_PADDING: PartId =
+        SinglePartSectionId::LoadCommandsPadding.part_id();
     pub(crate) const CODE_SIGNATURE: PartId = SinglePartSectionId::CodeSignature.part_id();
     pub(crate) const CHAINED_FIXUP_TABLE: PartId = SinglePartSectionId::ChainedFixupTable.part_id();
     pub(crate) const EXPORTS_TRIE: PartId = SinglePartSectionId::ExportsTrie.part_id();
@@ -156,6 +160,8 @@ pub(crate) mod output_section_id {
         SinglePartSectionId::LinkEditSegment.output_section_id();
     pub(crate) const LOAD_COMMANDS: OutputSectionId =
         SinglePartSectionId::LoadCommands.output_section_id();
+    pub(crate) const LOAD_COMMANDS_PADDING: OutputSectionId =
+        SinglePartSectionId::LoadCommandsPadding.output_section_id();
     pub(crate) const CODE_SIGNATURE: OutputSectionId =
         SinglePartSectionId::CodeSignature.output_section_id();
     pub(crate) const CHAINED_FIXUP_TABLE: OutputSectionId =
@@ -244,6 +250,9 @@ pub(crate) fn code_signature_identifier(args: &MachOArgs) -> &[u8] {
 pub(crate) fn code_signature_padded_identifier_size(args: &MachOArgs) -> u64 {
     (code_signature_identifier(args).len() as u64 + 1).next_multiple_of(CS_SECTION_ALIGNMENT)
 }
+
+// Includes the terminating NUL. Use the target's value rather than a host libc constant.
+const MAXPATHLEN: usize = 1024;
 
 pub(crate) fn load_dylib_command_size(path: &[u8]) -> usize {
     (size_of::<DylibCommand>() + path.len() + 1).next_multiple_of(MACHO_COMMAND_ALIGNMENT)
@@ -1156,6 +1165,7 @@ impl platform::Platform for MachO {
         crate::output_section_id::FILE_HEADER,
         output_section_id::LINK_EDIT_SEGMENT,
         output_section_id::LOAD_COMMANDS,
+        output_section_id::LOAD_COMMANDS_PADDING,
         output_section_id::CHAINED_FIXUP_TABLE,
         output_section_id::EXPORTS_TRIE,
         output_section_id::CODE_SIGNATURE,
@@ -1445,7 +1455,9 @@ impl platform::Platform for MachO {
         _rosegment: bool,
     ) -> bool {
         match (section_id, section_info.kind) {
-            (FILE_HEADER | LOAD_COMMANDS, _) => segment_def.name == SegmentName::TEXT,
+            (FILE_HEADER | LOAD_COMMANDS | LOAD_COMMANDS_PADDING, _) => {
+                segment_def.name == SegmentName::TEXT
+            }
             (STRTAB | CHAINED_FIXUP_TABLE | SYMTAB_GLOBAL | EXPORTS_TRIE | CODE_SIGNATURE, _) => {
                 segment_def.name == SegmentName::LINKEDIT
             }
@@ -2090,6 +2102,12 @@ impl platform::Platform for MachO {
         if args.platform_version.is_some() {
             allocate_load_cmd(size_of::<BuildVersionCommand>() + size_of::<BuildToolVersion>());
         }
+
+        if args.headerpad_max_install_names {
+            let extra_string_space =
+                prelude.format_specific.imported_library_file_ids.len() * MAXPATHLEN;
+            sizes.increment(part_id::LOAD_COMMANDS_PADDING, extra_string_space as u64);
+        }
     }
 
     fn new_stub_library_layout_state_ext<'data>(
@@ -2303,6 +2321,7 @@ impl platform::Platform for MachO {
         // File header and all load commands.
         builder.add_section(crate::output_section_id::FILE_HEADER);
         builder.add_section(output_section_id::LOAD_COMMANDS);
+        builder.add_section(output_section_id::LOAD_COMMANDS_PADDING);
 
         // Content of the sections (e.g. __text, __data).
         add_sections_in_segment(
@@ -2340,10 +2359,10 @@ impl platform::Platform for MachO {
         }
 
         // The rest (e.g. symbol table, string table).
-        builder.add_section(output_section_id::STRTAB);
         builder.add_section(output_section_id::CHAINED_FIXUP_TABLE);
         builder.add_section(output_section_id::EXPORTS_TRIE);
         builder.add_section(output_section_id::SYMTAB_GLOBAL);
+        builder.add_section(output_section_id::STRTAB);
         builder.add_section(output_section_id::CODE_SIGNATURE);
 
         builder.build()
@@ -2482,6 +2501,13 @@ const SECTION_DEFINITIONS: [BuiltInSectionDetails; NUM_BUILT_IN_SECTIONS] = {
     };
     defs[output_section_id::LOAD_COMMANDS.as_usize()] = BuiltInSectionDetails {
         kind: SectionKind::Primary(SectionIdentity::new(SectionName(b"LOAD_COMMANDS"), None)),
+        ..DEFAULT_DEFS
+    };
+    defs[output_section_id::LOAD_COMMANDS_PADDING.as_usize()] = BuiltInSectionDetails {
+        kind: SectionKind::Primary(SectionIdentity::new(
+            SectionName(b"LOAD_COMMANDS_PADDING"),
+            None,
+        )),
         ..DEFAULT_DEFS
     };
     defs[output_section_id::LINK_EDIT_SEGMENT.as_usize()] = BuiltInSectionDetails {
