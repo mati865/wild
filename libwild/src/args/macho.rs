@@ -29,6 +29,7 @@ pub struct MachOArgs {
     pub(crate) dead_strip_dylibs: bool,
     pub(crate) headerpad_max_install_names: bool,
     pub(crate) entry: String,
+    pub(crate) rpaths: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,6 +98,7 @@ impl Default for MachOArgs {
             dead_strip_dylibs: false,
             headerpad_max_install_names: false,
             entry: "_main".to_owned(),
+            rpaths: Vec::new(),
         }
     }
 }
@@ -259,8 +261,14 @@ fn setup_argument_parser() -> ArgumentParser<MachOArgs> {
     parser
         .declare_with_param()
         .short("rpath")
-        .help("Include a path to runpath search paths (not yet emitted)")
-        .execute(|args, _modifier_stack, value| args.warn_unsupported(&format!("-rpath {value}")));
+        .help("Add a path to the runpath search paths")
+        .execute(|args, _modifier_stack, value| {
+            // Like ld64, ignore repeated paths.
+            if !args.rpaths.iter().any(|rpath| rpath == value) {
+                args.rpaths.push(value.to_owned());
+            }
+            Ok(())
+        });
     parser
         .declare_with_param()
         .long("syslibroot")

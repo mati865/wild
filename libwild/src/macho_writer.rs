@@ -45,6 +45,7 @@ use crate::macho::MAX_SEGMENT_COUNT;
 use crate::macho::MachO;
 use crate::macho::PLT_ENTRY_SIZE;
 use crate::macho::ResolvedUnwindInfo;
+use crate::macho::RpathCommand;
 use crate::macho::SectionEntry;
 use crate::macho::SectionFlags;
 use crate::macho::SegmentCommand;
@@ -57,6 +58,7 @@ use crate::macho::get_segment_sections;
 use crate::macho::output_section_id;
 use crate::macho::output_section_id::LOAD_COMMANDS;
 use crate::macho::part_id;
+use crate::macho::rpath_command_size;
 use crate::output_section_id::OrderEvent;
 use crate::output_section_id::OutputSectionId;
 use crate::output_section_id::SectionName;
@@ -105,6 +107,7 @@ use object::macho::LC_DYLD_EXPORTS_TRIE;
 use object::macho::LC_LOAD_DYLIB;
 use object::macho::LC_LOAD_DYLINKER;
 use object::macho::LC_MAIN;
+use object::macho::LC_RPATH;
 use object::macho::LC_SEGMENT_64;
 use object::macho::LC_SYMTAB;
 use object::macho::LC_UUID;
@@ -265,6 +268,15 @@ fn write_prelude<'data>(
         let path = crate::macho::install_name(file_id, &layout.symbol_db);
 
         write_dylib_command(dylib_command, command_buffer, path);
+    }
+
+    for rpath in &layout.args().rpaths {
+        let path = rpath.as_bytes();
+        let mut command_buffer = load_command_buffer
+            .split_off_mut(..rpath_command_size(path))
+            .context("Insufficient LOAD_COMMANDS allocation")?;
+        let rpath_command = take_mut(&mut command_buffer)?;
+        write_rpath_command(rpath_command, command_buffer, path);
     }
 
     write_dyld_chained_fixups_command(layout, take_mut(&mut load_command_buffer)?);
@@ -1139,6 +1151,18 @@ fn write_dylinker_command(command: &mut DylinkerCommand, path_buffer: &mut [u8])
 
     path_buffer[0..DYLINKER_PATH.len()].copy_from_slice(DYLINKER_PATH);
     path_buffer[DYLINKER_PATH.len()..].zero();
+}
+
+fn write_rpath_command(command: &mut RpathCommand, path_buffer: &mut [u8], path: &[u8]) {
+    command.cmd.set(LE, LC_RPATH);
+    command.cmdsize.set(LE, rpath_command_size(path) as u32);
+    command
+        .path
+        .offset
+        .set(LE, size_of::<RpathCommand>() as u32);
+
+    path_buffer[..path.len()].copy_from_slice(path);
+    path_buffer[path.len()..].zero();
 }
 
 fn write_dylib_command(command: &mut DylibCommand, path_buffer: &mut [u8], path: &[u8]) {
