@@ -5186,6 +5186,7 @@ pub(crate) fn process_aarch64_build_attributes(
 ) -> Result<AArch64BuildAttributes> {
     let section = object.section(section_index)?;
     let mut content = section.data(LittleEndian, object.data)?;
+    let section_size = content.len();
 
     ensure!(content.starts_with(b"A"), "Header must start with 'A'");
     content = &content[1..];
@@ -5193,6 +5194,16 @@ pub(crate) fn process_aarch64_build_attributes(
     let mut attributes = AArch64BuildAttributes::default();
 
     while !content.is_empty() {
+        let read_offset = section_size - content.len();
+        if content.len() < size_of::<u32>() {
+            bail!(
+                "({}): unexpected end of data at offset {:#x} while reading [{:#x}, {:#x})",
+                secnames::ARM_ATTRIBUTES_SECTION_NAME_STR,
+                section_size,
+                read_offset,
+                read_offset + size_of::<u32>()
+            );
+        }
         let subsection_size =
             read_u32(&mut content).context("Cannot read AArch64 subsection size")? as usize;
 
