@@ -2077,6 +2077,16 @@ struct DataIndexImm {
 
 /// `memory.init` and `data.drop` carry a data-segment index immediate. No relocation type names it.
 fn data_index_immediates(body: &[u8]) -> Result<Vec<DataIndexImm>> {
+    // `memory.init` is `0xfc 0x08` and `data.drop` is `0xfc 0x09`, with a minimal ULEB opcode.
+    // Skip the decode when neither sequence is present.
+    static MEMORY_INIT: std::sync::LazyLock<memchr::memmem::Finder<'static>> =
+        std::sync::LazyLock::new(|| memchr::memmem::Finder::new(b"\xfc\x08"));
+    static DATA_DROP: std::sync::LazyLock<memchr::memmem::Finder<'static>> =
+        std::sync::LazyLock::new(|| memchr::memmem::Finder::new(b"\xfc\x09"));
+    if MEMORY_INIT.find(body).is_none() && DATA_DROP.find(body).is_none() {
+        return Ok(Vec::new());
+    }
+
     let reader = BinaryReader::new(body, 0);
     let mut ops = wasmparser::FunctionBody::new(reader)
         .get_operators_reader()
