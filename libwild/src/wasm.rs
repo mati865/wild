@@ -581,6 +581,18 @@ pub(crate) struct DebugSectionInput<'data> {
     pub(crate) data: &'data [u8],
 }
 
+macro_rules! wasm_section_reader {
+    ($($fn_name:ident, $section:ident, $reader:ident;)*) => {
+        $(
+            pub(crate) fn $fn_name(&self) -> Result<Option<$reader<'data>>> {
+                self.standard_section_reader(section_id::$section)
+                    .map(|reader| $reader::new(reader).map_err(Into::into))
+                    .transpose()
+            }
+        )*
+    };
+}
+
 impl<'data> File<'data> {
     fn debug_sections(&self) -> impl Iterator<Item = DebugSectionInput<'data>> + '_ {
         self.sections
@@ -632,52 +644,15 @@ impl<'data> File<'data> {
         ))
     }
 
-    pub(crate) fn import_section_reader(&self) -> Result<Option<ImportSectionReader<'data>>> {
-        self.standard_section_reader(section_id::IMPORT)
-            .map(|r| ImportSectionReader::new(r).map_err(Into::into))
-            .transpose()
-    }
-
-    pub(crate) fn function_section_reader(&self) -> Result<Option<FunctionSectionReader<'data>>> {
-        self.standard_section_reader(section_id::FUNCTION)
-            .map(|r| FunctionSectionReader::new(r).map_err(Into::into))
-            .transpose()
-    }
-
-    pub(crate) fn global_section_reader(&self) -> Result<Option<GlobalSectionReader<'data>>> {
-        self.standard_section_reader(section_id::GLOBAL)
-            .map(|r| GlobalSectionReader::new(r).map_err(Into::into))
-            .transpose()
-    }
-
-    pub(crate) fn data_section_reader(&self) -> Result<Option<DataSectionReader<'data>>> {
-        self.standard_section_reader(section_id::DATA)
-            .map(|r| DataSectionReader::new(r).map_err(Into::into))
-            .transpose()
-    }
-
-    pub(crate) fn code_section_reader(&self) -> Result<Option<CodeSectionReader<'data>>> {
-        self.standard_section_reader(section_id::CODE)
-            .map(|r| CodeSectionReader::new(r).map_err(Into::into))
-            .transpose()
-    }
-
-    pub(crate) fn memory_section_reader(&self) -> Result<Option<MemorySectionReader<'data>>> {
-        self.standard_section_reader(section_id::MEMORY)
-            .map(|r| MemorySectionReader::new(r).map_err(Into::into))
-            .transpose()
-    }
-
-    pub(crate) fn export_section_reader(&self) -> Result<Option<ExportSectionReader<'data>>> {
-        self.standard_section_reader(section_id::EXPORT)
-            .map(|r| ExportSectionReader::new(r).map_err(Into::into))
-            .transpose()
-    }
-
-    pub(crate) fn type_section_reader(&self) -> Result<Option<TypeSectionReader<'data>>> {
-        self.standard_section_reader(section_id::TYPE)
-            .map(|r| TypeSectionReader::new(r).map_err(Into::into))
-            .transpose()
+    wasm_section_reader! {
+        import_section_reader, IMPORT, ImportSectionReader;
+        function_section_reader, FUNCTION, FunctionSectionReader;
+        global_section_reader, GLOBAL, GlobalSectionReader;
+        data_section_reader, DATA, DataSectionReader;
+        code_section_reader, CODE, CodeSectionReader;
+        memory_section_reader, MEMORY, MemorySectionReader;
+        export_section_reader, EXPORT, ExportSectionReader;
+        type_section_reader, TYPE, TypeSectionReader;
     }
 
     /// Type indices of functions defined in this module (excluding imports), in `function`
@@ -1822,13 +1797,6 @@ fn classify_data_reloc_ranges(
             .saturating_add(segment.encoded_size.saturating_sub(data_len))
     };
 
-    if relocs.is_empty() {
-        return segments
-            .iter()
-            .map(|segment| (0..0, payload_start_of(segment)))
-            .collect();
-    }
-
     let mut out = Vec::with_capacity(segments.len());
     let mut i = 0usize;
     for segment in segments {
@@ -2616,9 +2584,15 @@ impl<'data> WasmObjectLayout<'data> {
             decode_sorted_relocs_for(file, file.standard_section_index[section_id::DATA as usize])?;
 
         let function_bodies = file.function_bodies()?;
-        let function_body_spans = function_body_spans_from_bodies(&function_bodies)?;
+        let function_body_spans = function_bodies
+            .iter()
+            .map(function_body_span)
+            .collect::<Result<Vec<_>>>()?;
         let data_segments = file.data_segments()?;
-        let data_segment_spans = data_segment_spans_from_segments(&data_segments)?;
+        let data_segment_spans = data_segments
+            .iter()
+            .map(data_segment_span)
+            .collect::<Result<Vec<_>>>()?;
 
         self.function_bodies = function_bodies;
         self.data_segments = data_segments;
@@ -2781,10 +2755,6 @@ fn relocs_in_offset_range(relocs: &[WasmRelocation], start: u32, end: u32) -> &[
     &relocs[reloc_index_range(relocs, start, end)]
 }
 
-fn function_body_spans_from_bodies(bodies: &[WasmFunctionBody<'_>]) -> Result<Vec<(u32, u32)>> {
-    bodies.iter().map(function_body_span).collect()
-}
-
 fn function_body_span(body: &WasmFunctionBody<'_>) -> Result<(u32, u32)> {
     let start = body.code_offset;
     let len = u32::try_from(body.bytes.len()).context("Wasm function body too large")?;
@@ -2792,10 +2762,6 @@ fn function_body_span(body: &WasmFunctionBody<'_>) -> Result<(u32, u32)> {
         .checked_add(len)
         .context("Wasm function body span overflow")?;
     Ok((start, end))
-}
-
-fn data_segment_spans_from_segments(segments: &[WasmDataSegment<'_>]) -> Result<Vec<(u32, u32)>> {
-    segments.iter().map(data_segment_span).collect()
 }
 
 fn data_segment_span(segment: &WasmDataSegment<'_>) -> Result<(u32, u32)> {
@@ -3297,29 +3263,30 @@ impl<'data> WasmObjectLayoutInput<'data> {
         }
 
         // Full function index space: imports (above) + original defined ordinals.
-        for &dense_or_dead in &self.defined_function_live_ordinal {
-            if dense_or_dead == WASM_DEAD_INDEX {
-                index_map.function_indices.push(WASM_DEAD_INDEX);
-            } else {
-                let output_function_index = index_bases
-                    .defined_function_base
-                    .checked_add(dense_or_dead)
-                    .context("Wasm function index overflow")?;
-                index_map.function_indices.push(output_function_index);
-            }
-        }
-
-        for &dense_or_dead in &self.defined_global_live_ordinal {
-            if dense_or_dead == WASM_DEAD_INDEX {
-                index_map.global_indices.push(WASM_DEAD_INDEX);
-            } else {
-                let output_global_index = index_bases
-                    .defined_global_base
-                    .checked_add(dense_or_dead)
-                    .context("Wasm global index overflow")?;
-                index_map.global_indices.push(output_global_index);
-            }
-        }
+        let push_defined =
+            |ordinals: &[u32], base: u32, overflow: &'static str, dst: &mut Vec<u32>| -> Result {
+                for &dense_or_dead in ordinals {
+                    let output_index = if dense_or_dead == WASM_DEAD_INDEX {
+                        WASM_DEAD_INDEX
+                    } else {
+                        base.checked_add(dense_or_dead).context(overflow)?
+                    };
+                    dst.push(output_index);
+                }
+                Ok(())
+            };
+        push_defined(
+            &self.defined_function_live_ordinal,
+            index_bases.defined_function_base,
+            "Wasm function index overflow",
+            &mut index_map.function_indices,
+        )?;
+        push_defined(
+            &self.defined_global_live_ordinal,
+            index_bases.defined_global_base,
+            "Wasm global index overflow",
+            &mut index_map.global_indices,
+        )?;
 
         // Imported and defined memories are merged into a single output memory.
         let memory_slot_count = self.memory_imports.len() + self.memories.len();
@@ -3848,19 +3815,10 @@ fn linker_defined_import_resolution(
     linker_defined_from_prelude_def(def_id, expected_kind, symbol_db)
 }
 
-fn object_needs_linker_memory(input: &WasmObjectLayoutInput<'_>) -> bool {
-    !input.memory_imports.is_empty() || !input.memories.is_empty()
-}
-
-fn any_object_needs_linker_memory(inputs: &[WasmObjectLayoutInput<'_>]) -> bool {
-    inputs.iter().any(object_needs_linker_memory)
-}
-
 #[derive(Debug, Clone, Copy, Default)]
 struct LinkerImportAbsorption {
     needs_memory_base: bool,
     needs_table_base: bool,
-    needs_stack_pointer: bool,
     needs_tls_base: bool,
     needs_tls_size: bool,
     needs_tls_align: bool,
@@ -3874,7 +3832,6 @@ impl LinkerImportAbsorption {
             WasmLinkerSymbol::CallCtors => self.needs_ctors = true,
             WasmLinkerSymbol::MemoryBase => self.needs_memory_base = true,
             WasmLinkerSymbol::TableBase => self.needs_table_base = true,
-            WasmLinkerSymbol::StackPointer => self.needs_stack_pointer = true,
             // Single-thread `__tls_base` is immutable. Shared-memory TLS forces the mutable base
             // plus `__tls_size`, `__tls_align`, and `__wasm_init_tls`.
             WasmLinkerSymbol::TlsBase => self.needs_tls_base = true,
@@ -4887,8 +4844,6 @@ impl LinkerDefinedIndices {
     ) -> Result<Self> {
         let mut needs_memory_base = request.needs_memory_base;
         let mut needs_table_base = request.needs_table_base;
-        // wasm-ld always defines `__stack_pointer` for non-PIC executables.
-        let mut needs_stack_pointer = true;
         let mut needs_tls_base = false;
         let mut needs_tls_size = false;
         let mut needs_tls_align = false;
@@ -4910,7 +4865,6 @@ impl LinkerDefinedIndices {
         }
         needs_ctors |= export_needs.needs_ctors;
         needs_table_base |= export_needs.needs_table_base;
-        needs_stack_pointer |= export_needs.needs_stack_pointer;
         let export_memory_base = export_needs.needs_memory_base;
 
         for (input, resolutions) in layout_inputs.iter().zip(import_resolutions.iter()) {
@@ -4922,7 +4876,6 @@ impl LinkerDefinedIndices {
             needs_ctors |= absorption.needs_ctors;
             needs_memory_base |= absorption.needs_memory_base;
             needs_table_base |= absorption.needs_table_base;
-            needs_stack_pointer |= absorption.needs_stack_pointer;
             needs_tls_base |= absorption.needs_tls_base;
             needs_tls_size |= absorption.needs_tls_size;
             needs_tls_align |= absorption.needs_tls_align;
@@ -4945,40 +4898,34 @@ impl LinkerDefinedIndices {
         };
         needs_memory_base |= export_memory_base;
 
+        fn take_index(next: &mut u32, needed: bool) -> Option<u32> {
+            needed.then(|| {
+                let idx = *next;
+                *next += 1;
+                idx
+            })
+        }
+        fn take_index_count(next: &mut u32, count: u32) -> Result<Option<u32>> {
+            if count == 0 {
+                return Ok(None);
+            }
+            let base = *next;
+            *next = next
+                .checked_add(count)
+                .context("Wasm global index overflow")?;
+            Ok(Some(base))
+        }
+
         let mut next_global = global_import_count;
         // Defined-global slot before `__stack_pointer` (used for its init expression).
-        let stack_pointer_defined_slot = needs_stack_pointer
-            .then_some(u32::from(needs_memory_base) + u32::from(needs_table_base));
-        let memory_base_global = needs_memory_base.then(|| {
-            let idx = next_global;
-            next_global += 1;
-            idx
-        });
-        let table_base_global = needs_table_base.then(|| {
-            let idx = next_global;
-            next_global += 1;
-            idx
-        });
-        let stack_pointer_global = needs_stack_pointer.then(|| {
-            let idx = next_global;
-            next_global += 1;
-            idx
-        });
-        let tls_base_global = needs_tls_base.then(|| {
-            let idx = next_global;
-            next_global += 1;
-            idx
-        });
-        let tls_size_global = needs_tls_size.then(|| {
-            let idx = next_global;
-            next_global += 1;
-            idx
-        });
-        let tls_align_global = needs_tls_align.then(|| {
-            let idx = next_global;
-            next_global += 1;
-            idx
-        });
+        let stack_pointer_defined_slot =
+            Some(u32::from(needs_memory_base) + u32::from(needs_table_base));
+        let memory_base_global = take_index(&mut next_global, needs_memory_base);
+        let table_base_global = take_index(&mut next_global, needs_table_base);
+        let stack_pointer_global = take_index(&mut next_global, true);
+        let tls_base_global = take_index(&mut next_global, needs_tls_base);
+        let tls_size_global = take_index(&mut next_global, needs_tls_size);
+        let tls_align_global = take_index(&mut next_global, needs_tls_align);
         let mut data_address_globals = Vec::with_capacity(export_data.len());
         for known in export_data {
             data_address_globals.push((known, next_global));
@@ -4986,51 +4933,16 @@ impl LinkerDefinedIndices {
                 .checked_add(1)
                 .context("Wasm global index overflow")?;
         }
-        let got_mem_global_base = if request.got_mem_count > 0 {
-            let base = next_global;
-            next_global = next_global
-                .checked_add(request.got_mem_count)
-                .context("Wasm global index overflow")?;
-            Some(base)
-        } else {
-            None
-        };
-        let got_func_global_base = if request.got_func_count > 0 {
-            let base = next_global;
-            next_global = next_global
-                .checked_add(request.got_func_count)
-                .context("Wasm global index overflow")?;
-            Some(base)
-        } else {
-            None
-        };
-        let dynamic_data_global_base = if request.dynamic_data_count > 0 {
-            let base = next_global;
-            next_global = next_global
-                .checked_add(request.dynamic_data_count)
-                .context("Wasm global index overflow")?;
-            Some(base)
-        } else {
-            None
-        };
+        let got_mem_global_base = take_index_count(&mut next_global, request.got_mem_count)?;
+        let got_func_global_base = take_index_count(&mut next_global, request.got_func_count)?;
+        let dynamic_data_global_base =
+            take_index_count(&mut next_global, request.dynamic_data_count)?;
         let num_defined_globals = next_global - global_import_count;
 
         let mut next_func = function_import_count;
-        let call_ctors_func = needs_ctors.then(|| {
-            let idx = next_func;
-            next_func += 1;
-            idx
-        });
-        let init_tls_func = needs_init_tls.then(|| {
-            let idx = next_func;
-            next_func += 1;
-            idx
-        });
-        let init_memory_func = request.needs_init_memory.then(|| {
-            let idx = next_func;
-            next_func += 1;
-            idx
-        });
+        let call_ctors_func = take_index(&mut next_func, needs_ctors);
+        let init_tls_func = take_index(&mut next_func, needs_init_tls);
+        let init_memory_func = take_index(&mut next_func, request.needs_init_memory);
         for stub in &mut weak_undef_stubs {
             stub.function_index = next_func;
             next_func = next_func
@@ -5225,14 +5137,6 @@ fn borrowed_linker_function_body(bytes: &'static [u8]) -> WasmFunctionBody<'stat
     }
 }
 
-fn empty_linker_function_body() -> WasmFunctionBody<'static> {
-    borrowed_linker_function_body(EMPTY_FUNCTION_BODY)
-}
-
-fn unreachable_linker_function_body() -> WasmFunctionBody<'static> {
-    borrowed_linker_function_body(UNREACHABLE_FUNCTION_BODY)
-}
-
 fn owned_linker_function_body(bytes: Vec<u8>) -> WasmFunctionBody<'static> {
     WasmFunctionBody {
         bytes: Cow::Owned(bytes),
@@ -5374,17 +5278,7 @@ fn function_type_for_symbol<'a>(
     let type_index = if sym_index < n_imports {
         input.function_imports[sym_index].type_index
     } else {
-        let original = sym_index - n_imports;
-        let dense = input
-            .defined_function_live_ordinal
-            .get(original)
-            .copied()
-            .unwrap_or(WASM_DEAD_INDEX);
-        ensure!(
-            dense != WASM_DEAD_INDEX,
-            "Wasm init/reference to GC'd function index {}",
-            sym.index
-        );
+        let dense = local_defined_function_index(input, sym)?;
         *input
             .module_functions
             .get(dense as usize)
@@ -5502,32 +5396,14 @@ fn emit_reserved_linker_definitions(
             Cow::Owned(i32_const_for_u32(layout.tls_align)?),
         );
     }
-    for _ in &indices.data_address_globals {
-        push_i32_global(
-            &mut linker_globals,
-            false,
-            Cow::Borrowed(ZERO_I32_INIT_EXPR),
-        );
-    }
-    // GOT.mem placeholders. wasm-ld emits static GOT.data.internal.* as immutable i32 for
-    // freestanding executables.
-    for _ in 0..indices.got_mem_count {
-        push_i32_global(
-            &mut linker_globals,
-            false,
-            Cow::Borrowed(ZERO_I32_INIT_EXPR),
-        );
-    }
-    // GOT.func placeholders. Filled with table indices after the indirect table is finalized.
-    for _ in 0..indices.got_func_count {
-        push_i32_global(
-            &mut linker_globals,
-            false,
-            Cow::Borrowed(ZERO_I32_INIT_EXPR),
-        );
-    }
-    // `--export-dynamic` data symbol addresses. Filled once data addresses are known.
-    for _ in 0..indices.dynamic_data_count {
+    // Immutable i32 placeholders, as wasm-ld does for static GOT.data.internal.*.
+    // Exported data addresses, GOT.mem, GOT.func, and `--export-dynamic` data globals are
+    // filled once their addresses or table slots are known.
+    let placeholder_globals = indices.data_address_globals.len()
+        + indices.got_mem_count as usize
+        + indices.got_func_count as usize
+        + indices.dynamic_data_count as usize;
+    for _ in 0..placeholder_globals {
         push_i32_global(
             &mut linker_globals,
             false,
@@ -5548,7 +5424,7 @@ fn emit_reserved_linker_definitions(
             type_indices.push(merged_type_index(&layout.output_types, &void_void)?);
             bodies.push(match call_ctors_body {
                 Some(bytes) => owned_linker_function_body(bytes),
-                None => empty_linker_function_body(),
+                None => borrowed_linker_function_body(EMPTY_FUNCTION_BODY),
             });
         }
         if indices.init_tls_func.is_some() || indices.init_memory_func.is_some() {
@@ -5580,7 +5456,7 @@ fn emit_reserved_linker_definitions(
 
         for stub in &indices.weak_undef_stubs {
             type_indices.push(merged_type_index(&layout.output_types, &stub.ty)?);
-            bodies.push(unreachable_linker_function_body());
+            bodies.push(borrowed_linker_function_body(UNREACHABLE_FUNCTION_BODY));
         }
         type_indices.append(&mut layout.function_type_indices);
 
@@ -5976,24 +5852,6 @@ fn resolve_entry_function<'data>(
         export_name,
         function_index,
     }))
-}
-
-/// Export the command entry (default `_start`).
-fn ensure_entry_export<'data>(
-    exports: &mut Vec<OutputExport<'data>>,
-    entry: Option<&ResolvedEntry<'data>>,
-) {
-    let Some(entry) = entry else {
-        return;
-    };
-    if export_name_exists(exports, entry.export_name) {
-        return;
-    }
-    exports.push(OutputExport {
-        name: entry.export_name,
-        kind: wasmparser::ExternalKind::Func,
-        index: entry.function_index,
-    });
 }
 
 fn requested_linker_export_symbols(args: &WasmArgs) -> Vec<WasmLinkerSymbol> {
@@ -6402,7 +6260,9 @@ where
             .collect::<Result<Vec<_>>>()?
     };
 
-    let linker_memory = any_object_needs_linker_memory(&layout_inputs);
+    let linker_memory = layout_inputs
+        .iter()
+        .any(|input| !input.memory_imports.is_empty() || !input.memories.is_empty());
     let stack_size = symbol_db.args.z_stack_size;
     let stack_first = symbol_db.args.stack_first;
     let initial_memory = symbol_db.args.initial_memory;
@@ -6687,7 +6547,14 @@ where
         )?;
         fill_dynamic_data_global_inits(&mut layout, &indices, &dynamic_exports)?;
         fill_stack_pointer_init(&mut layout, &indices, stack_size, stack_first)?;
-        ensure_entry_export(&mut layout.exports, entry.as_ref());
+        if let Some(entry) = entry.as_ref() {
+            push_export(
+                &mut layout.exports,
+                entry.export_name,
+                wasmparser::ExternalKind::Func,
+                entry.function_index,
+            );
+        }
         if layout.shared_memory_tls {
             if let Some(index) = indices.tls_size_global {
                 push_export(
@@ -7020,9 +6887,7 @@ fn data_segment_places(object_data_layout: &[WasmDataSegmentLayout<'_>]) -> Vec<
         }
         by_original[slot] = if segment.tls_template {
             SegmentPlace::Tls(segment.output_memory_offset)
-        } else if segment.shared_init {
-            SegmentPlace::Active(segment.output_memory_offset)
-        } else if segment.passive {
+        } else if segment.passive && !segment.shared_init {
             SegmentPlace::Passive
         } else {
             SegmentPlace::Active(segment.output_memory_offset)
@@ -8549,30 +8414,26 @@ fn wasm_symbol_from_info(
     to_name_range: impl Fn(&str) -> (u32, u32),
 ) -> WasmSymbol {
     let mut sym = WasmSymbol::default();
-    let mut set_name = |name: Option<&str>| {
-        if let Some(n) = name {
-            let (start, len) = to_name_range(n);
+    let mut fill_indexed = |kind: WasmSymbolKind, flags: u32, index: u32, name: Option<&str>| {
+        sym.kind = kind;
+        sym.flags = flags;
+        sym.index = index;
+        if let Some(name) = name {
+            let (start, len) = to_name_range(name);
             sym.name_start = start;
             sym.name_len = len;
         }
     };
     match info {
         SymbolInfo::Func { flags, index, name } => {
-            sym.kind = WasmSymbolKind::Func;
-            sym.flags = flags.bits();
-            sym.index = index;
-            set_name(name);
+            fill_indexed(WasmSymbolKind::Func, flags.bits(), index, name);
         }
         SymbolInfo::Data {
             flags,
             name,
             symbol,
         } => {
-            sym.kind = WasmSymbolKind::Data;
-            sym.flags = flags.bits();
-            let (start, len) = to_name_range(name);
-            sym.name_start = start;
-            sym.name_len = len;
+            fill_indexed(WasmSymbolKind::Data, flags.bits(), 0, Some(name));
             if let Some(def) = symbol {
                 sym.index = def.index;
                 sym.offset = def.offset;
@@ -8580,10 +8441,7 @@ fn wasm_symbol_from_info(
             }
         }
         SymbolInfo::Global { flags, index, name } => {
-            sym.kind = WasmSymbolKind::Global;
-            sym.flags = flags.bits();
-            sym.index = index;
-            set_name(name);
+            fill_indexed(WasmSymbolKind::Global, flags.bits(), index, name);
         }
         SymbolInfo::Section { flags, section } => {
             sym.kind = WasmSymbolKind::Section;
@@ -8591,16 +8449,10 @@ fn wasm_symbol_from_info(
             sym.index = section;
         }
         SymbolInfo::Event { flags, index, name } => {
-            sym.kind = WasmSymbolKind::Event;
-            sym.flags = flags.bits();
-            sym.index = index;
-            set_name(name);
+            fill_indexed(WasmSymbolKind::Event, flags.bits(), index, name);
         }
         SymbolInfo::Table { flags, index, name } => {
-            sym.kind = WasmSymbolKind::Table;
-            sym.flags = flags.bits();
-            sym.index = index;
-            set_name(name);
+            fill_indexed(WasmSymbolKind::Table, flags.bits(), index, name);
         }
     }
 
