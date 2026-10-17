@@ -31,23 +31,31 @@ use winnow::token::take_while;
 pub(crate) fn maybe_apply_sysroot(
     linker_script_path: &Path,
     input_path: &Path,
-    sysroot: &Path,
+    sysroot: Option<&Path>,
 ) -> Option<Box<Path>> {
+    if let Some(forced) = maybe_forced_sysroot(input_path, sysroot) {
+        return Some(forced);
+    }
+    let sysroot = sysroot?;
     debug_assert!(linker_script_path.is_absolute());
     debug_assert!(sysroot.is_absolute());
     if linker_script_path.starts_with(sysroot) {
         Some(Box::from(sysroot.join(input_path.strip_prefix("/").ok()?)))
     } else {
-        maybe_forced_sysroot(input_path, sysroot)
+        None
     }
 }
 
-pub(crate) fn maybe_forced_sysroot(lib_path: &Path, sysroot: &Path) -> Option<Box<Path>> {
+pub(crate) fn maybe_forced_sysroot(lib_path: &Path, sysroot: Option<&Path>) -> Option<Box<Path>> {
     let lib_path_str = lib_path.to_string_lossy();
-    lib_path_str
+    let stripped = lib_path_str
         .strip_prefix('=')
-        .or_else(|| lib_path_str.strip_prefix("$SYSROOT"))
-        .map(|stripped| Box::from(sysroot.join(stripped.trim_start_matches('/'))))
+        .or_else(|| lib_path_str.strip_prefix("$SYSROOT"))?;
+    if let Some(sysroot) = sysroot {
+        Some(Box::from(sysroot.join(stripped.trim_start_matches('/'))))
+    } else {
+        Some(Box::from(Path::new(stripped)))
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1122,7 +1130,7 @@ fn parse_assignment_op(input: &mut &BStr) -> winnow::Result<AssignmentOp> {
             "&=".value(AssignmentOp::BitwiseAnd),
             "|=".value(AssignmentOp::BitwiseOr),
             "^=".value(AssignmentOp::BitwiseXor),
-            ("=", winnow::combinator::not('=')).value(AssignmentOp::Assign),
+            ("=", winnow::combinator::not(alt(('=', '/')))).value(AssignmentOp::Assign),
         )),
     ))
     .parse_next(input)
@@ -1635,7 +1643,7 @@ mod tests {
             maybe_apply_sysroot(
                 &sysroot.join("lib/libc.so"),
                 Path::new("/lib/libc.so.6"),
-                sysroot,
+                Some(sysroot),
             ),
             Some(Box::from(sysroot.join("lib/libc.so.6"))),
         );
@@ -1644,16 +1652,34 @@ mod tests {
             maybe_apply_sysroot(
                 Path::new("/lib/libc.so"),
                 Path::new("/lib/libc.so.6"),
-                sysroot,
+                Some(sysroot),
             ),
             None,
         );
-        // Sysroot enforced by `=/`
+        // Sysroot enforced by `=/` when script is in sysroot
+        assert_equal(
+            maybe_apply_sysroot(
+                &sysroot.join("lib/libc.so"),
+                Path::new("=/lib/libc.so.6"),
+                Some(sysroot),
+            ),
+            Some(Box::from(sysroot.join("lib/libc.so.6"))),
+        );
+        // Sysroot enforced by `$SYSROOT` when script is in sysroot
+        assert_equal(
+            maybe_apply_sysroot(
+                &sysroot.join("lib/libc.so"),
+                Path::new("$SYSROOT/lib/libc.so.6"),
+                Some(sysroot),
+            ),
+            Some(Box::from(sysroot.join("lib/libc.so.6"))),
+        );
+        // Sysroot enforced by `=/` when script is not in sysroot
         assert_equal(
             maybe_apply_sysroot(
                 Path::new("/lib/libc.so"),
                 Path::new("=/lib/libc.so.6"),
-                sysroot,
+                Some(sysroot),
             ),
             Some(Box::from(sysroot.join("lib/libc.so.6"))),
         );
@@ -1662,7 +1688,7 @@ mod tests {
             maybe_apply_sysroot(
                 Path::new("/lib/libc.so"),
                 Path::new("=lib/libc.so.6"),
-                sysroot,
+                Some(sysroot),
             ),
             Some(Box::from(sysroot.join("lib/libc.so.6"))),
         );
@@ -1671,7 +1697,7 @@ mod tests {
             maybe_apply_sysroot(
                 Path::new("/lib/libc.so"),
                 Path::new("$SYSROOT/lib/libc.so.6"),
-                sysroot,
+                Some(sysroot),
             ),
             Some(Box::from(sysroot.join("lib/libc.so.6"))),
         );
@@ -1680,9 +1706,34 @@ mod tests {
             maybe_apply_sysroot(
                 Path::new("/lib/libc.so"),
                 Path::new("$SYSROOTlib/libc.so.6"),
-                sysroot,
+                Some(sysroot),
             ),
             Some(Box::from(sysroot.join("lib/libc.so.6"))),
+        );
+        // Forced sysroot without sysroot configured (default empty sysroot)
+        assert_equal(
+            maybe_apply_sysroot(
+                Path::new("/lib/libc.so"),
+                Path::new("=/lib/libc.so.6"),
+                None,
+            ),
+            Some(Box::from(Path::new("/lib/libc.so.6"))),
+        );
+        assert_equal(
+            maybe_apply_sysroot(Path::new("/lib/libc.so"), Path::new("=lib/libc.so.6"), None),
+            Some(Box::from(Path::new("lib/libc.so.6"))),
+        );
+        assert_equal(
+            maybe_apply_sysroot(
+                Path::new("/lib/libc.so"),
+                Path::new("$SYSROOT/lib/libc.so.6"),
+                None,
+            ),
+            Some(Box::from(Path::new("/lib/libc.so.6"))),
+        );
+        assert_equal(
+            maybe_apply_sysroot(Path::new("/lib/libc.so"), Path::new("/lib/libc.so.6"), None),
+            None,
         );
     }
 
