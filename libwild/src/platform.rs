@@ -113,6 +113,17 @@ pub(crate) trait Arch: Send + Sync + 'static {
         Self::write_plt_entry(plt_entry, got_address, plt_address)
     }
 
+    /// Write a PLT entry, optionally enabling AArch64 BTI.
+    fn write_plt_entry_with_bti(
+        plt_entry: &mut [u8],
+        got_address: u64,
+        plt_address: u64,
+        toc_base: u64,
+        _bti_enabled: bool,
+    ) -> Result {
+        Self::write_plt_entry_with_toc(plt_entry, got_address, plt_address, toc_base)
+    }
+
     /// Patches the instruction after a call that goes through a PLT stub. ppc64 replaces the
     /// compiler's nop with `ld r2, 24(r1)`, undoing the save the stub did before the indirect
     /// branch.

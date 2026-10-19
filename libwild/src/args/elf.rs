@@ -132,6 +132,7 @@ pub struct ElfArgs {
     pub(crate) z_interpose: bool,
     pub(crate) z_isa: Option<NonZeroU32>,
     pub(crate) force_ibt: bool,
+    pub(crate) force_bti: bool,
     pub(crate) cet_report: CetReport,
     pub(crate) z_stack_size: Option<NonZeroU64>,
     pub(crate) z_pack_relative_relocs: bool,
@@ -417,6 +418,7 @@ impl Default for ElfArgs {
             z_stack_size: None,
             z_isa: None,
             force_ibt: false,
+            force_bti: false,
             cet_report: CetReport::None,
             z_pack_relative_relocs: false,
             max_page_size: None,
@@ -902,6 +904,14 @@ fn setup_argument_parser() -> ArgumentParser<ElfArgs> {
                     exponent: size.trailing_zeros() as u8,
                 });
 
+                Ok(())
+            },
+        )
+        .sub_option(
+            "force-bti",
+            "Force AArch64 BTI in PLT entries",
+            |args, _| {
+                args.force_bti = true;
                 Ok(())
             },
         )

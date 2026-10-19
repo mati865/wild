@@ -874,7 +874,8 @@ impl<'layout, 'out, C: ElfClass> TableWriter<'layout, 'out, C> {
             // `.TOC.` is the start of the GOT. The allocation check calls this without a layout;
             // a zero displacement still consumes the PLT slot.
             let toc_base = layout.map_or(got_address, |layout| layout.got_base());
-            self.write_plt_entry::<A>(got_address, plt_address.get(), toc_base)?;
+            let bti_enabled = layout.is_some_and(|layout| layout.format_specific.has_aarch64_bti());
+            self.write_plt_entry::<A>(got_address, plt_address.get(), toc_base, bti_enabled)?;
         }
 
         // For ifunc symbols with GOT-relative references, write the PLT stub
@@ -1036,9 +1037,10 @@ impl<'layout, 'out, C: ElfClass> TableWriter<'layout, 'out, C> {
         got_address: u64,
         plt_address: u64,
         toc_base: u64,
+        bti_enabled: bool,
     ) -> Result {
         let plt_entry = self.take_plt_got_entry()?;
-        A::write_plt_entry_with_toc(plt_entry, got_address, plt_address, toc_base)
+        A::write_plt_entry_with_bti(plt_entry, got_address, plt_address, toc_base, bti_enabled)
     }
 
     fn take_plt_got_entry(&mut self) -> Result<&'out mut [u8]> {
@@ -5100,11 +5102,16 @@ fn write_epilogue_dynamic_entries<C: ElfClass>(
             .write(object::elf::DT_AUXILIARY, offset.into())?;
     }
 
+    let bti_plt = layout.args().architecture() == crate::arch::Architecture::AArch64
+        && layout.section_part_layouts.get(part_id::PLT_GOT).mem_size > 0
+        && layout.format_specific.has_aarch64_bti();
+
     let inputs = DynamicEntryInputs {
         args: layout.args(),
         has_static_tls: layout.has_static_tls,
         has_textrel: layout.has_textrel,
         has_variant_pcs: layout.has_variant_pcs,
+        bti_plt,
         section_layouts: &layout.merged_section_layouts,
         section_part_layouts: &layout.section_part_layouts,
         non_addressable_counts: layout.non_addressable_counts,
@@ -6385,6 +6392,11 @@ const EPILOGUE_DYNAMIC_ENTRY_WRITERS: &[DynamicEntryWriter] = &[
         |_inputs| 0,
     ),
     DynamicEntryWriter::optional(
+        object::elf::DT_AARCH64_BTI_PLT,
+        |inputs| inputs.bti_plt,
+        |_inputs| 0,
+    ),
+    DynamicEntryWriter::optional(
         object::elf::DT_AARCH64_VARIANT_PCS,
         |inputs| {
             inputs.has_variant_pcs
@@ -6414,6 +6426,7 @@ struct DynamicEntryInputs<'layout> {
     has_static_tls: bool,
     has_textrel: bool,
     has_variant_pcs: bool,
+    bti_plt: bool,
     section_layouts: &'layout OutputSectionMap<OutputRecordLayout>,
     section_part_layouts: &'layout OutputSectionPartMap<OutputRecordLayout>,
     non_addressable_counts: NonAddressableCounts,

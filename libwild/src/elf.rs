@@ -4741,6 +4741,11 @@ impl LayoutExt {
             merge_gnu_property_notes::<C, A>(states.clone(), args.z_isa, args.force_ibt);
 
         merge_aarch64_build_attributes(states.clone(), &mut gnu_property_notes)?;
+
+        if args.force_bti {
+            apply_force_bti::<C, A>(groups, args, &mut gnu_property_notes)?;
+        }
+
         if args.force_ibt || args.cet_report != crate::args::elf::CetReport::None {
             for obj in objects_iter(groups) {
                 let filename = obj.input.file.filename.to_string_lossy();
@@ -4760,6 +4765,16 @@ impl LayoutExt {
         })
     }
 
+    pub(crate) fn has_aarch64_bti(&self) -> bool {
+        self.gnu_property_notes.iter().any(|property| {
+            property.ptype == object::elf::GNU_PROPERTY_AARCH64_FEATURE_1_AND
+                && property
+                    .data
+                    .as_u32()
+                    .is_some_and(|bits| bits & object::elf::GNU_PROPERTY_AARCH64_FEATURE_1_BTI != 0)
+        })
+    }
+
     fn num_got_plt_header_entries(&self, has_plt_relocations: bool) -> u64 {
         if has_plt_relocations {
             self.num_got_plt_header_entries
@@ -4767,6 +4782,45 @@ impl LayoutExt {
             0
         }
     }
+}
+
+fn apply_force_bti<'files, 'data: 'files, C: ElfClass, A: Arch<Platform = Elf<C>>>(
+    groups: &'files [layout::GroupState<'data, Elf<C>>],
+    args: &ElfArgs,
+    gnu_property_notes: &mut Vec<GnuProperty>,
+) -> Result {
+    ensure!(
+        A::arch_identifier() == object::elf::EM_AARCH64,
+        "-z force-bti is only supported on AArch64"
+    );
+
+    let bti = object::elf::GNU_PROPERTY_AARCH64_FEATURE_1_BTI;
+    if let Some(property) = gnu_property_notes
+        .iter_mut()
+        .find(|property| property.ptype == object::elf::GNU_PROPERTY_AARCH64_FEATURE_1_AND)
+    {
+        let Some(bits) = property.data.as_u32_mut() else {
+            bail!("Invalid AArch64 feature GNU property");
+        };
+        *bits |= bti;
+    } else {
+        gnu_property_notes.push(GnuProperty {
+            ptype: object::elf::GNU_PROPERTY_AARCH64_FEATURE_1_AND,
+            data: GnuPropertyData::U32(bti),
+        });
+        gnu_property_notes.sort_by_key(|property| property.ptype);
+    }
+    for obj in objects_iter(groups) {
+        let features = effective_aarch64_features(&obj.format_specific)?.unwrap_or(0);
+        if features & object::elf::GNU_PROPERTY_AARCH64_FEATURE_1_BTI == 0 {
+            let filename = obj.input.file.filename.to_string_lossy();
+            args.warning(format!(
+                "{filename}: -z force-bti: file does not have BTI property"
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 fn check_cet_properties(filename: &str, props: &[GnuProperty], args: &ElfArgs) -> Result {
@@ -4928,6 +4982,30 @@ fn get_aarch64_pauth_gnu_property(properties: &[GnuProperty]) -> Result<Option<A
     Ok(pauth)
 }
 
+fn effective_aarch64_features<C: ElfClass>(
+    state: &ObjectLayoutStateExt<'_, C>,
+) -> Result<Option<u32>> {
+    let attributes_features = state
+        .aarch64_build_attributes
+        .and_then(|attributes| attributes.feature_and_bits);
+
+    let gnu_features = state
+        .gnu_property_notes
+        .iter()
+        .filter(|property| property.ptype == object::elf::GNU_PROPERTY_AARCH64_FEATURE_1_AND)
+        .filter_map(|property| property.data.as_u32())
+        .reduce(|lhs, rhs| lhs | rhs);
+
+    if let (Some(build_features), Some(gnu_features)) = (attributes_features, gnu_features) {
+        ensure!(
+            build_features == gnu_features,
+            "GNU properties and build attributes have conflicting AArch64 feature data"
+        );
+    }
+
+    Ok(attributes_features.or(gnu_features))
+}
+
 fn merge_aarch64_build_attributes<'states, 'data: 'states, C: ElfClass>(
     states: impl Iterator<Item = &'states ObjectLayoutStateExt<'data, C>> + Clone,
     output: &mut Vec<GnuProperty>,
@@ -4989,23 +5067,7 @@ fn merge_aarch64_build_attributes<'states, 'data: 'states, C: ElfClass>(
     for state in states {
         let attributes = state.aarch64_build_attributes.unwrap_or_default();
 
-        let gnu_features = state
-            .gnu_property_notes
-            .iter()
-            .filter(|property| property.ptype == object::elf::GNU_PROPERTY_AARCH64_FEATURE_1_AND)
-            .filter_map(|property| property.data.as_u32())
-            .reduce(|lhs, rhs| lhs | rhs);
-
-        if let (Some(build_features), Some(gnu_features)) =
-            (attributes.feature_and_bits, gnu_features)
-        {
-            ensure!(
-                build_features == gnu_features,
-                "GNU properties and build attributes have conflicting AArch64 feature data"
-            );
-        }
-
-        let effective_features = attributes.feature_and_bits.or(gnu_features);
+        let effective_features = effective_aarch64_features(state)?;
         saw_features |= effective_features.is_some();
         merged_features &= effective_features.unwrap_or(0);
 

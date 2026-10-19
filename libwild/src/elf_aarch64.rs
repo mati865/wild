@@ -161,6 +161,29 @@ impl crate::platform::Arch for ElfAArch64 {
         Ok(())
     }
 
+    fn write_plt_entry_with_bti(
+        plt_entry: &mut [u8],
+        got_address: u64,
+        plt_address: u64,
+        _toc_base: u64,
+        bti_enabled: bool,
+    ) -> crate::error::Result {
+        if !bti_enabled {
+            return Self::write_plt_entry(plt_entry, got_address, plt_address);
+        }
+
+        // The BTI instruction precedes ADRP, so relocations must be
+        // calculated relative to the new ADRP instruction address.
+        ensure!(plt_address <= u64::MAX - 4, "PLT address overflow");
+        Self::write_plt_entry(plt_entry, got_address, plt_address + 4)?;
+
+        // Replace ADRP/LDR/BR/NOP with BTI/ADRP/LDR/BR.
+        plt_entry.copy_within(0..12, 4);
+        plt_entry[..4].copy_from_slice(&[0x5f, 0x24, 0x03, 0xd5]);
+
+        Ok(())
+    }
+
     fn tp_offset_start(layout: &Layout<Elf64>) -> u64 {
         layout.tls_start_address_aarch64()
     }
