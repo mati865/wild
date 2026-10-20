@@ -307,40 +307,15 @@ jobs:
       - name: Spell Check Repo
         uses: crate-ci/typos@v1.51.1
 
-  calc-matrix:
-    name: Find Nix checks
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    outputs:
-      matrix: ${{ steps.calc-matrix.outputs.matrix }}
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-          fetch-depth: 0
-
-      - name: Install Nix
-        uses: nixbuild/nix-quick-install-action@v35
-        with:
-          nix_on_tmpfs: true
-
-      - name: Calculate check
-        id: calc-matrix
-        run: |
-          set -euo pipefail
-          matrix=$(nix flake show --json | jq -c '.checks."x86_64-linux"|keys_unsorted')
-          echo "Matrix: $matrix"
-          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
-
   nix-checks:
-    needs:
-      - calc-matrix
     strategy:
       fail-fast: false
       matrix:
-        check: ${{ fromJson(needs.calc-matrix.outputs.matrix) }}
+        include:
+          - check: wild
+            targets: .#checks.x86_64-linux.wild
+          - check: adapters
+            targets: .#checks.x86_64-linux.adapterGcc .#checks.x86_64-linux.adapter-llvm
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     name: Nix/${{ matrix.check }}
@@ -363,9 +338,11 @@ jobs:
           restore-prefixes-first-match: nix-${{ runner.os }}-
 
       - name: Run ${{ matrix.check }}
-        run: nix build .#checks.x86_64-linux.${MATRIX_CHECK} -L --show-trace
+        run: |
+          read -r -a targets <<< "$NIX_TARGETS"
+          nix build "${targets[@]}" -L --show-trace
         env:
-          MATRIX_CHECK: ${{ matrix.check }}
+          NIX_TARGETS: ${{ matrix.targets }}
 
   reuse-check:
     runs-on: ubuntu-latest
