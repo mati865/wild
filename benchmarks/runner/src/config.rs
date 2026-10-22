@@ -31,12 +31,17 @@ pub(crate) struct Config {
 #[derive(Deserialize, Serialize, Debug, Default, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct BenchConfig {
+    #[serde(default, rename = "abstract")]
+    pub(crate) is_abstract: bool,
     #[serde(default)]
     pub(crate) skip: bool,
     pub(crate) min_wild_version: Option<String>,
     #[serde(default)]
     pub(crate) skip_linkers: Vec<LinkerKind>,
     pub(crate) filesystem: Option<String>,
+    pub(crate) threads: Option<ThreadCounts>,
+    #[serde(default, rename = "latest-only")]
+    pub(crate) latest_only: Option<bool>,
     #[serde(default, rename = "delete-output")]
     pub(crate) delete_output: Option<bool>,
     #[serde(default)]
@@ -62,8 +67,27 @@ impl Config {
 }
 
 impl BenchConfig {
+    pub(crate) fn thread_counts(&self) -> Vec<Option<u32>> {
+        match &self.threads {
+            Some(counts) if !counts.0.is_empty() => counts.0.iter().copied().map(Some).collect(),
+            _ => vec![None],
+        }
+    }
+
+    pub(crate) fn has_explicit_threads(&self) -> bool {
+        self.threads
+            .as_ref()
+            .is_some_and(|counts| !counts.0.is_empty())
+    }
+
     pub(crate) fn filesystem(&self) -> &str {
-        self.filesystem.as_deref().unwrap_or("tmpfs")
+        self.filesystem
+            .as_deref()
+            .unwrap_or(if cfg!(target_os = "macos") {
+                "apfs"
+            } else {
+                "tmpfs"
+            })
     }
 
     fn inherit(&self, parent: &Self) -> Self {
@@ -81,6 +105,7 @@ impl BenchConfig {
         skip_linkers.extend_from_slice(&self.skip_linkers);
 
         Self {
+            is_abstract: self.is_abstract,
             skip: parent.skip || self.skip,
             min_wild_version: self
                 .min_wild_version
@@ -92,6 +117,8 @@ impl BenchConfig {
                 .clone()
                 .or_else(|| parent.filesystem.clone()),
             delete_output: self.delete_output.or(parent.delete_output),
+            threads: self.threads.clone().or_else(|| parent.threads.clone()),
+            latest_only: self.latest_only.or(parent.latest_only),
             flags,
             linker_flags,
             variants: IndexMap::new(),
@@ -112,22 +139,20 @@ impl Config {
             validate_name(directory)?;
             let base = bench.inherit(&self.defaults);
 
-            let entries = if bench.variants.is_empty() {
-                vec![(directory.clone(), base)]
-            } else {
-                let mut entries = Vec::new();
-                for (variant, settings) in &bench.variants {
-                    validate_name(variant)?;
-                    if !settings.variants.is_empty() {
-                        bail!("Nested variants are not permitted: {directory}.{variant}");
-                    }
-                    entries.push((format!("{directory}.{variant}"), settings.inherit(&base)));
+            let mut entries = vec![(directory.clone(), base.clone())];
+            for (variant, settings) in &bench.variants {
+                validate_name(variant)?;
+                if !settings.variants.is_empty() {
+                    bail!("Nested variants are not permitted: {directory}.{variant}");
                 }
-                entries
-            };
+                entries.push((format!("{directory}.{variant}"), settings.inherit(&base)));
+            }
 
             for (name, settings) in entries {
                 validate_name(settings.filesystem())?;
+                if settings.is_abstract {
+                    continue;
+                }
 
                 if out
                     .insert(name.clone(), (directory.clone(), settings))
@@ -191,7 +216,7 @@ binary = "mold"
         let expanded = config.expanded()?;
         assert_eq!(
             expanded.keys().map(String::as_str).collect::<Vec<_>>(),
-            ["z.z", "z.a", "a"]
+            ["z", "z.z", "z.a", "a"]
         );
         let bytes = postcard::to_stdvec(&config)?;
         let restored: Config = postcard::from_bytes(&bytes)?;
@@ -204,5 +229,55 @@ binary = "mold"
             expanded.keys().collect::<Vec<_>>()
         );
         Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub(crate) struct ThreadCounts(Vec<u32>);
+
+impl std::str::FromStr for ThreadCounts {
+    type Err = anyhow::Error;
+
+    fn from_str(input: &str) -> Result<Self> {
+        if input == "default" {
+            return Ok(Self(Vec::new()));
+        }
+        let mut counts = std::collections::BTreeSet::new();
+        for part in input.split(',') {
+            let part = part.trim();
+            let (start, end) = part.split_once('-').unwrap_or((part, part));
+            let start: u32 = start.parse().context("Invalid thread count")?;
+            let end: u32 = end.parse().context("Invalid thread count")?;
+            anyhow::ensure!(
+                start > 0 && start <= end,
+                "Thread ranges must be positive and ascending"
+            );
+            counts.extend(start..=end);
+        }
+        Ok(Self(counts.into_iter().collect()))
+    }
+}
+
+impl TryFrom<String> for ThreadCounts {
+    type Error = anyhow::Error;
+
+    fn try_from(value: String) -> Result<Self> {
+        value.parse()
+    }
+}
+
+impl From<ThreadCounts> for String {
+    fn from(counts: ThreadCounts) -> Self {
+        if counts.0.is_empty() {
+            "default".to_owned()
+        } else {
+            counts
+                .0
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        }
     }
 }
