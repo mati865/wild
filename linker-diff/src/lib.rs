@@ -59,6 +59,7 @@ mod x86_64;
 
 type Result<T = (), E = anyhow::Error> = core::result::Result<T, E>;
 type ElfFile64<'data> = object::read::elf::ElfFile64<'data, Endianness>;
+type ValidationMap = (&'static str, fn(&Binary) -> Result);
 
 pub use crate::colour::ColourMode;
 use arch::Arch;
@@ -643,44 +644,20 @@ impl Report {
         Ok(report)
     }
 
+    const VALIDATION_MAP: &[ValidationMap] = &[
+        (GNU_HASH_SECTION_NAME_STR, gnu_hash::check_object),
+        (HASH_SECTION_NAME_STR, sysv_hash::check_object),
+        ("index", asm_diff::validate_indexes),
+        ("section.null", asm_diff::validate_null_section),
+        (GOT_PLT_SECTION_NAME_STR, asm_diff::validate_got_plt),
+        (SYMTAB_SECTION_NAME_STR, symtab::validate_debug),
+        (DYNSYM_SECTION_NAME_STR, symtab::validate_dynamic),
+    ];
+
     fn run_on_objects(&mut self, objects: &[Binary], arch: ArchKind) {
-        validate_objects(
-            self,
-            objects,
-            GNU_HASH_SECTION_NAME_STR,
-            gnu_hash::check_object,
-        );
-        validate_objects(
-            self,
-            objects,
-            HASH_SECTION_NAME_STR,
-            sysv_hash::check_object,
-        );
-        validate_objects(self, objects, "index", asm_diff::validate_indexes);
-        validate_objects(
-            self,
-            objects,
-            "section.null",
-            asm_diff::validate_null_section,
-        );
-        validate_objects(
-            self,
-            objects,
-            GOT_PLT_SECTION_NAME_STR,
-            asm_diff::validate_got_plt,
-        );
-        validate_objects(
-            self,
-            objects,
-            SYMTAB_SECTION_NAME_STR,
-            symtab::validate_debug,
-        );
-        validate_objects(
-            self,
-            objects,
-            DYNSYM_SECTION_NAME_STR,
-            symtab::validate_dynamic,
-        );
+        for (validation_name, validation_fn) in Self::VALIDATION_MAP {
+            validate_objects(self, objects, validation_name, validation_fn);
+        }
         header_diff::check_dynamic_headers(self, objects);
         header_diff::check_file_headers(self, objects);
         header_diff::check_macho_linkedit_alignment(self, objects);
