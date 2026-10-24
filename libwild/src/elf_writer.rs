@@ -5761,7 +5761,22 @@ fn get_defsym_attributes<C: ElfClass>(
 
         if let Some(target_id) = target_symbol_id {
             let canonical_id = layout.symbol_db.definition(target_id);
-            get_symbol_attributes(layout, canonical_id)
+            let (target_shndx, target_type) = get_symbol_attributes(layout, canonical_id)?;
+            if let Some(rel_sec) = redirect.loc.relative_section_id()
+                && matches!(target_shndx, SymbolSection::Raw(object::elf::SHN_ABS))
+            {
+                let os = layout.output_sections.primary_output_section(rel_sec);
+                let shndx = layout.output_sections.output_index_of_section(os);
+                Ok((
+                    shndx.map_or(
+                        SymbolSection::Raw(object::elf::SHN_ABS),
+                        SymbolSection::Index,
+                    ),
+                    target_type,
+                ))
+            } else {
+                Ok((target_shndx, target_type))
+            }
         } else {
             Err(redirect.missing_target(target_name))
         }

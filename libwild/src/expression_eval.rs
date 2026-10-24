@@ -58,6 +58,77 @@ pub(crate) enum SymbolValue {
     },
 }
 
+impl SymbolValue {
+    pub(crate) fn new(address: u64, section_id: Option<OutputSectionId>) -> Self {
+        match section_id {
+            Some(section_id) => SymbolValue::SectionRelative {
+                section_id,
+                address,
+            },
+            None => SymbolValue::Absolute(address),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ExpressionValueKind {
+    Number,
+    Address,
+    Absolute,
+    Relative(OutputSectionId),
+}
+
+impl ExpressionValueKind {
+    pub(crate) fn is_absolute(self) -> bool {
+        matches!(self, ExpressionValueKind::Absolute)
+    }
+
+    pub(crate) fn is_number(self) -> bool {
+        matches!(self, ExpressionValueKind::Number)
+    }
+
+    pub(crate) fn section_id(self) -> Option<OutputSectionId> {
+        match self {
+            ExpressionValueKind::Relative(sec) => Some(sec),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct EvaluatedValue {
+    pub(crate) value: u64,
+    pub(crate) value_kind: ExpressionValueKind,
+}
+
+impl EvaluatedValue {
+    pub(crate) fn is_absolute(&self) -> bool {
+        self.value_kind.is_absolute()
+    }
+
+    pub(crate) fn section_id(&self) -> Option<OutputSectionId> {
+        self.value_kind.section_id()
+    }
+}
+
+fn evaluate_section_address(
+    target_section: OutputSectionId,
+    address: u64,
+    section_layouts: &OutputSectionMap<OutputRecordLayout>,
+    value_kind: &mut ExpressionValueKind,
+    name: &[u8],
+) -> Result<u64> {
+    *value_kind = ExpressionValueKind::Relative(target_section);
+    let section_base = section_layouts.get(target_section).mem_offset;
+    let offset = address.checked_sub(section_base).with_context(|| {
+        format!(
+            "address of '{}' is before its output section",
+            String::from_utf8_lossy(name)
+        )
+    })?;
+    Ok(offset)
+}
+
 fn evaluate_symbol_value<P: Platform>(
     symbol_value: &SymbolValue,
     loc: &SymbolLoc,
@@ -72,7 +143,11 @@ fn evaluate_symbol_value<P: Platform>(
         .map(|id| output_sections.primary_output_section(id));
     match symbol_value {
         SymbolValue::Absolute(value) => {
-            value_kind.contains_absolute = true;
+            if current_section.is_some() {
+                *value_kind = ExpressionValueKind::Number;
+            } else {
+                *value_kind = ExpressionValueKind::Absolute;
+            }
             Ok(*value)
         }
         SymbolValue::SectionRelative {
@@ -80,24 +155,10 @@ fn evaluate_symbol_value<P: Platform>(
             address,
         } => {
             let primary_section = output_sections.primary_output_section(*section_id);
-            if current_section == Some(primary_section) {
-                value_kind.contains_section_relative = true;
-                let section_base = section_layouts.get(primary_section).mem_offset;
-                let offset = address.checked_sub(section_base).with_context(|| {
-                    format!(
-                        "address of symbol '{}' is before its output section",
-                        String::from_utf8_lossy(name)
-                    )
-                })?;
-                Ok(offset)
-            } else if let Some(section) = current_section {
-                value_kind.contains_absolute = true;
-                let section_base = section_layouts.get(section).mem_offset;
-                Ok(address + section_base)
-            } else {
-                value_kind.contains_absolute = true;
-                Ok(*address)
-            }
+            let section_base = section_layouts.get(primary_section).mem_offset;
+            let offset = address.wrapping_sub(section_base);
+            *value_kind = ExpressionValueKind::Relative(primary_section);
+            Ok(offset)
         }
         SymbolValue::PartRelative { part_id, offset } => {
             let Some(part_address) = laid_out_mem_offsets.get(*part_id) else {
@@ -109,33 +170,204 @@ fn evaluate_symbol_value<P: Platform>(
             let address = part_address + offset;
             let symbol_section =
                 output_sections.primary_output_section(part_id.output_section_id::<P>());
-            if current_section == Some(symbol_section) {
-                value_kind.contains_section_relative = true;
-                let section_base = section_layouts.get(symbol_section).mem_offset;
-                let offset = address.checked_sub(section_base).with_context(|| {
-                    format!(
-                        "address of symbol '{}' is before its output section",
-                        String::from_utf8_lossy(name)
-                    )
-                })?;
-                Ok(offset)
-            } else {
-                value_kind.contains_absolute = true;
-                Ok(address)
-            }
+            evaluate_section_address(symbol_section, address, section_layouts, value_kind, name)
         }
     }
 }
 
-#[derive(Default)]
-struct ExpressionValueKind {
-    contains_absolute: bool,
-    contains_section_relative: bool,
+fn arithmetic_binary_op(
+    mut val_l: u64,
+    mut kind_l: ExpressionValueKind,
+    mut val_r: u64,
+    mut kind_r: ExpressionValueKind,
+    current_section: Option<OutputSectionId>,
+    section_layouts: &OutputSectionMap<OutputRecordLayout>,
+    op: impl FnOnce(u64, u64) -> Result<u64>,
+) -> Result<EvaluatedValue> {
+    let is_in_section = current_section.is_some();
+    let normalize_rel = |val: &mut u64, kind: &mut ExpressionValueKind, sec: OutputSectionId| {
+        *val = val.wrapping_add(section_layouts.get(sec).mem_offset);
+        *kind = ExpressionValueKind::Address;
+    };
+
+    match (kind_l, kind_r) {
+        (ExpressionValueKind::Relative(sec_l), ExpressionValueKind::Relative(sec_r)) => {
+            if sec_l != sec_r || !is_in_section {
+                normalize_rel(&mut val_l, &mut kind_l, sec_l);
+                normalize_rel(&mut val_r, &mut kind_r, sec_r);
+            }
+        }
+        (
+            ExpressionValueKind::Relative(sec_l),
+            ExpressionValueKind::Absolute | ExpressionValueKind::Address,
+        ) => {
+            normalize_rel(&mut val_l, &mut kind_l, sec_l);
+        }
+        (
+            ExpressionValueKind::Absolute | ExpressionValueKind::Address,
+            ExpressionValueKind::Relative(sec_r),
+        ) => {
+            normalize_rel(&mut val_r, &mut kind_r, sec_r);
+        }
+        (ExpressionValueKind::Relative(sec_l), ExpressionValueKind::Number) if !is_in_section => {
+            normalize_rel(&mut val_l, &mut kind_l, sec_l);
+        }
+        (ExpressionValueKind::Number, ExpressionValueKind::Relative(sec_r)) if !is_in_section => {
+            normalize_rel(&mut val_r, &mut kind_r, sec_r);
+        }
+        _ => {}
+    }
+
+    let value_kind = if is_in_section {
+        match (kind_l, kind_r) {
+            (ExpressionValueKind::Number, ExpressionValueKind::Number) => {
+                ExpressionValueKind::Number
+            }
+            (ExpressionValueKind::Relative(_), ExpressionValueKind::Relative(_)) => {
+                ExpressionValueKind::Number
+            }
+            (
+                ExpressionValueKind::Absolute | ExpressionValueKind::Address,
+                ExpressionValueKind::Absolute | ExpressionValueKind::Address,
+            ) => ExpressionValueKind::Number,
+            (ExpressionValueKind::Relative(sec), _) | (_, ExpressionValueKind::Relative(sec)) => {
+                ExpressionValueKind::Relative(sec)
+            }
+            (ExpressionValueKind::Absolute, _) | (_, ExpressionValueKind::Absolute) => {
+                ExpressionValueKind::Absolute
+            }
+            _ => ExpressionValueKind::Address,
+        }
+    } else if kind_l.is_number() && kind_r.is_number() {
+        ExpressionValueKind::Number
+    } else if matches!(kind_l, ExpressionValueKind::Address)
+        && matches!(kind_r, ExpressionValueKind::Number)
+        || matches!(kind_l, ExpressionValueKind::Number)
+            && matches!(kind_r, ExpressionValueKind::Address)
+    {
+        ExpressionValueKind::Address
+    } else {
+        ExpressionValueKind::Absolute
+    };
+
+    Ok(EvaluatedValue {
+        value: op(val_l, val_r)?,
+        value_kind,
+    })
 }
 
-impl ExpressionValueKind {
-    fn needs_section_base(&self) -> bool {
-        self.contains_section_relative || !self.contains_absolute
+fn compare_binary_op(
+    mut val_l: u64,
+    kind_l: ExpressionValueKind,
+    mut val_r: u64,
+    kind_r: ExpressionValueKind,
+    current_section: Option<OutputSectionId>,
+    section_layouts: &OutputSectionMap<OutputRecordLayout>,
+    op: impl FnOnce(u64, u64) -> bool,
+) -> EvaluatedValue {
+    let to_address = |val: &mut u64, kind: ExpressionValueKind| {
+        if let ExpressionValueKind::Relative(sec) = kind {
+            *val = val.wrapping_add(section_layouts.get(sec).mem_offset);
+        }
+    };
+
+    if current_section.is_some() {
+        match (kind_l, kind_r) {
+            (ExpressionValueKind::Relative(sec_l), ExpressionValueKind::Relative(sec_r)) => {
+                if sec_l != sec_r {
+                    to_address(&mut val_l, kind_l);
+                    to_address(&mut val_r, kind_r);
+                }
+            }
+            (
+                ExpressionValueKind::Relative(_),
+                ExpressionValueKind::Absolute | ExpressionValueKind::Address,
+            ) => {
+                to_address(&mut val_l, kind_l);
+            }
+            (
+                ExpressionValueKind::Absolute | ExpressionValueKind::Address,
+                ExpressionValueKind::Relative(_),
+            ) => {
+                to_address(&mut val_r, kind_r);
+            }
+            _ => {}
+        }
+    } else {
+        to_address(&mut val_l, kind_l);
+        to_address(&mut val_r, kind_r);
+    }
+
+    let res = op(val_l, val_r);
+
+    let value_kind = if current_section.is_some() {
+        ExpressionValueKind::Number
+    } else {
+        ExpressionValueKind::Absolute
+    };
+
+    EvaluatedValue {
+        value: u64::from(res),
+        value_kind,
+    }
+}
+
+fn min_max_binary_op(
+    mut val_l: u64,
+    l_kind: ExpressionValueKind,
+    mut val_r: u64,
+    r_kind: ExpressionValueKind,
+    current_section: Option<OutputSectionId>,
+    section_layouts: &OutputSectionMap<OutputRecordLayout>,
+    op: impl FnOnce(u64, u64) -> u64,
+) -> EvaluatedValue {
+    if let Some(curr_sec) = current_section
+        && !l_kind.is_absolute()
+        && !r_kind.is_absolute()
+        && (matches!(l_kind, ExpressionValueKind::Address)
+            || matches!(r_kind, ExpressionValueKind::Address))
+    {
+        let curr_base = section_layouts.get(curr_sec).mem_offset;
+        let to_addr = |val: u64, kind: ExpressionValueKind| match kind {
+            ExpressionValueKind::Relative(sec) => {
+                section_layouts.get(sec).mem_offset.wrapping_add(val)
+            }
+            ExpressionValueKind::Number => curr_base.wrapping_add(val),
+            _ => val,
+        };
+        let addr_l = to_addr(val_l, l_kind);
+        let addr_r = to_addr(val_r, r_kind);
+        let res_addr = op(addr_l, addr_r);
+        return EvaluatedValue {
+            value: res_addr.wrapping_sub(curr_base),
+            value_kind: ExpressionValueKind::Relative(curr_sec),
+        };
+    }
+
+    let is_in_section = current_section.is_some();
+    let value_kind = if l_kind.section_id().is_some() && l_kind.section_id() == r_kind.section_id()
+    {
+        l_kind
+    } else if l_kind.is_number() && r_kind.is_number() {
+        ExpressionValueKind::Number
+    } else if is_in_section && l_kind.section_id().is_some() && r_kind.is_number() {
+        l_kind
+    } else if is_in_section && l_kind.is_number() && r_kind.section_id().is_some() {
+        r_kind
+    } else {
+        let to_address = |val: &mut u64, kind: ExpressionValueKind| {
+            if let ExpressionValueKind::Relative(sec) = kind {
+                *val = val.wrapping_add(section_layouts.get(sec).mem_offset);
+            }
+        };
+        to_address(&mut val_l, l_kind);
+        to_address(&mut val_r, r_kind);
+        ExpressionValueKind::Absolute
+    };
+
+    EvaluatedValue {
+        value: op(val_l, val_r),
+        value_kind,
     }
 }
 
@@ -144,19 +376,20 @@ fn evaluate_location<'data, P: Platform>(
     section_layouts: &OutputSectionMap<OutputRecordLayout>,
     output_sections: &OutputSections<'data, P>,
     resolved_location_counters: &[ResolvedLocationCounter],
+    value_kind: &mut ExpressionValueKind,
 ) -> Result<u64> {
+    if let Some(id) = expr_loc.section_id() {
+        let primary_id = output_sections.primary_output_section(id);
+        *value_kind = ExpressionValueKind::Relative(primary_id);
+    }
     match expr_loc {
         SymbolLoc::SectionStartRelative(_) => Ok(0),
-        SymbolLoc::SectionEndRelative(id) => {
+        SymbolLoc::SectionEndRelative(id) | SymbolLoc::SectionEnd(id) => {
             let primary_id = output_sections.primary_output_section(*id);
             let primary_start = section_layouts.get(primary_id).mem_offset;
             let id_layout = section_layouts.get(*id);
             let id_end = id_layout.mem_offset + id_layout.mem_size;
             Ok(id_end - primary_start)
-        }
-        SymbolLoc::SectionEnd(id) => {
-            let layout = section_layouts.get(*id);
-            Ok(layout.mem_offset + layout.mem_size)
         }
         SymbolLoc::FirstSection | SymbolLoc::None => Ok(0),
         SymbolLoc::LocationCounter(idx, section_id) => {
@@ -187,8 +420,8 @@ pub(crate) fn evaluate_expression<'data, P: Platform>(
     resolved_location_counters: &[ResolvedLocationCounter],
     laid_out_mem_offsets: &OutputSectionPartMap<Option<u64>>,
     symbol_resolution_callback: &mut dyn FnMut(&[u8]) -> Result<SymbolValue>,
-) -> Result<u64> {
-    let mut value_kind = ExpressionValueKind::default();
+) -> Result<EvaluatedValue> {
+    let mut value_kind = ExpressionValueKind::Number;
     let value = evaluate_expression_value(
         expr,
         expr_loc,
@@ -204,19 +437,34 @@ pub(crate) fn evaluate_expression<'data, P: Platform>(
         symbol_resolution_callback,
     )?;
 
-    let offset = if value_kind.needs_section_base() {
-        if let Some(id) = expr_loc.relative_section_id() {
-            let primary_id = output_sections.primary_output_section(id);
-            let section_layout = section_layouts.get(primary_id);
-            section_layout.mem_offset
-        } else {
-            0
-        }
+    let current_section = expr_loc
+        .relative_section_id()
+        .map(|id| output_sections.primary_output_section(id));
+    let offset = if let ExpressionValueKind::Relative(sec) = value_kind {
+        section_layouts.get(sec).mem_offset
+    } else if let ExpressionValueKind::Number = value_kind
+        && let Some(primary_id) = current_section
+    {
+        section_layouts.get(primary_id).mem_offset
     } else {
         0
     };
 
-    Ok(value + offset)
+    let value_kind = match value_kind {
+        ExpressionValueKind::Number => {
+            if let Some(id) = expr_loc.relative_section_id() {
+                ExpressionValueKind::Relative(output_sections.primary_output_section(id))
+            } else {
+                ExpressionValueKind::Number
+            }
+        }
+        _ => value_kind,
+    };
+
+    Ok(EvaluatedValue {
+        value: value.wrapping_add(offset),
+        value_kind,
+    })
 }
 
 fn evaluate_expression_value<'data, P: Platform>(
@@ -235,6 +483,9 @@ fn evaluate_expression_value<'data, P: Platform>(
 ) -> Result<u64> {
     macro_rules! eval {
         ($e:expr) => {
+            eval!($e, value_kind)
+        };
+        ($e:expr, $kind:expr) => {
             evaluate_expression_value(
                 $e,
                 expr_loc,
@@ -245,47 +496,67 @@ fn evaluate_expression_value<'data, P: Platform>(
                 symbol_db,
                 sizeof_headers,
                 resolved_location_counters,
-                value_kind,
+                $kind,
                 laid_out_mem_offsets,
                 symbol_resolution_callback,
             )
         };
     }
 
-    macro_rules! eval_abs {
-        ($e:expr) => {
-            evaluate_expression(
-                $e,
-                expr_loc,
-                input_ref,
+    let current_section = expr_loc
+        .relative_section_id()
+        .map(|id| output_sections.primary_output_section(id));
+
+    macro_rules! try_eval_binary_op {
+        ($l:expr, $r:expr, $func:ident, $op:expr) => {{
+            let mut l_kind = ExpressionValueKind::Number;
+            let mut r_kind = ExpressionValueKind::Number;
+            let val_l = eval!($l, &mut l_kind)?;
+            let val_r = eval!($r, &mut r_kind)?;
+            let result = $func(
+                val_l,
+                l_kind,
+                val_r,
+                r_kind,
+                current_section,
                 section_layouts,
-                output_sections,
-                memory_regions,
-                symbol_db,
-                sizeof_headers,
-                resolved_location_counters,
-                laid_out_mem_offsets,
-                symbol_resolution_callback,
-            )
-        };
+                $op,
+            )?;
+            *value_kind = result.value_kind;
+            Ok(result.value)
+        }};
+    }
+
+    macro_rules! eval_binary_op {
+        ($l:expr, $r:expr, $func:ident, $op:expr) => {{
+            let mut l_kind = ExpressionValueKind::Number;
+            let mut r_kind = ExpressionValueKind::Number;
+            let val_l = eval!($l, &mut l_kind)?;
+            let val_r = eval!($r, &mut r_kind)?;
+            let result = $func(
+                val_l,
+                l_kind,
+                val_r,
+                r_kind,
+                current_section,
+                section_layouts,
+                $op,
+            );
+            *value_kind = result.value_kind;
+            Ok(result.value)
+        }};
     }
 
     match expr {
         Expression::Number(n) => Ok(*n),
 
-        Expression::LocationCounter => {
-            if expr_loc.relative_section_id().is_some() {
-                value_kind.contains_section_relative = true;
-            } else {
-                value_kind.contains_absolute = true;
-            }
-            evaluate_location(
-                expr_loc,
-                section_layouts,
-                output_sections,
-                resolved_location_counters,
-            )
-        }
+        Expression::LocationCounter => evaluate_location(
+            expr_loc,
+            section_layouts,
+            output_sections,
+            resolved_location_counters,
+            value_kind,
+        ),
 
         Expression::Symbol(name) => {
             let value = symbol_resolution_callback(name)?;
@@ -300,85 +571,166 @@ fn evaluate_expression_value<'data, P: Platform>(
             )
         }
 
-        Expression::Add(l, r) => Ok(eval!(l)?.wrapping_add(eval!(r)?)),
-        Expression::Subtract(l, r) => Ok(eval!(l)?.wrapping_sub(eval!(r)?)),
-        Expression::Multiply(l, r) => Ok(eval!(l)?.wrapping_mul(eval!(r)?)),
-        Expression::Divide(l, r) => {
-            let divisor = eval!(r)?;
-            if divisor == 0 {
+        Expression::Add(l, r) => {
+            try_eval_binary_op!(l, r, arithmetic_binary_op, |a, b| Ok(a.wrapping_add(b)))
+        }
+        Expression::Subtract(l, r) => {
+            try_eval_binary_op!(l, r, arithmetic_binary_op, |a, b| Ok(a.wrapping_sub(b)))
+        }
+        Expression::Multiply(l, r) => {
+            try_eval_binary_op!(l, r, arithmetic_binary_op, |a, b| Ok(a.wrapping_mul(b)))
+        }
+        Expression::Divide(l, r) => try_eval_binary_op!(l, r, arithmetic_binary_op, |a, b| {
+            if b == 0 {
                 bail!("Division by zero in linker script expression");
             }
-            Ok(((eval!(l)? as i64).wrapping_div(divisor as i64)) as u64)
-        }
-        Expression::Modulo(l, r) => {
-            let divisor = eval!(r)?;
-            if divisor == 0 {
+            Ok(((a as i64).wrapping_div(b as i64)) as u64)
+        }),
+        Expression::Modulo(l, r) => try_eval_binary_op!(l, r, arithmetic_binary_op, |a, b| {
+            if b == 0 {
                 bail!("Modulo by zero in linker script expression");
             }
-            Ok(((eval!(l)? as i64).wrapping_rem(divisor as i64)) as u64)
-        }
+            Ok(((a as i64).wrapping_rem(b as i64)) as u64)
+        }),
 
         // Comparisons return 1 (true) or 0 (false)
-        Expression::LessThan(l, r) => Ok(u64::from(eval_abs!(l)? < eval_abs!(r)?)),
-        Expression::GreaterThan(l, r) => Ok(u64::from(eval_abs!(l)? > eval_abs!(r)?)),
-        Expression::LessEqual(l, r) => Ok(u64::from(eval_abs!(l)? <= eval_abs!(r)?)),
-        Expression::GreaterEqual(l, r) => Ok(u64::from(eval_abs!(l)? >= eval_abs!(r)?)),
-        Expression::Equal(l, r) => Ok(u64::from(eval_abs!(l)? == eval_abs!(r)?)),
-        Expression::NotEqual(l, r) => Ok(u64::from(eval_abs!(l)? != eval_abs!(r)?)),
+        Expression::LessThan(l, r) => {
+            eval_binary_op!(l, r, compare_binary_op, |a, b| a < b)
+        }
+        Expression::GreaterThan(l, r) => {
+            eval_binary_op!(l, r, compare_binary_op, |a, b| a > b)
+        }
+        Expression::LessEqual(l, r) => {
+            eval_binary_op!(l, r, compare_binary_op, |a, b| a <= b)
+        }
+        Expression::GreaterEqual(l, r) => {
+            eval_binary_op!(l, r, compare_binary_op, |a, b| a >= b)
+        }
+        Expression::Equal(l, r) => {
+            eval_binary_op!(l, r, compare_binary_op, |a, b| a == b)
+        }
+        Expression::NotEqual(l, r) => {
+            eval_binary_op!(l, r, compare_binary_op, |a, b| a != b)
+        }
 
         Expression::Sizeof(name) => Ok(section_size(name, section_layouts, output_sections)),
         Expression::Alignof(name) => Ok(section_align(name, section_layouts, output_sections)),
         Expression::Addr(name) => {
-            value_kind.contains_absolute = true;
-            section_address(name, section_layouts, output_sections)
+            section_address(name, section_layouts, output_sections, value_kind)
         }
 
         Expression::Loadaddr(name) => {
-            value_kind.contains_absolute = true;
+            *value_kind = ExpressionValueKind::Absolute;
             section_load_address(name, section_layouts, output_sections)
         }
 
         Expression::Align(exponent, expr) => {
-            let align = eval!(exponent)?;
+            let mut exponent_kind = ExpressionValueKind::Number;
+            let align = eval!(exponent, &mut exponent_kind)?;
             if align == 0 {
                 bail!("ALIGN(0) is invalid");
             }
-            let expr = expr.as_ref().map_or_else(
-                || {
-                    evaluate_location(
-                        expr_loc,
-                        section_layouts,
-                        output_sections,
-                        resolved_location_counters,
-                    )
-                },
-                |e| eval!(e),
-            )?;
-            Ok(expr.next_multiple_of(align))
+            let is_dot = expr.is_none();
+            let val = match expr.as_ref() {
+                Some(e) => {
+                    let mut val = eval!(e, value_kind)?;
+                    if current_section.is_none() {
+                        if let ExpressionValueKind::Relative(sec) = *value_kind {
+                            val = val.wrapping_add(section_layouts.get(sec).mem_offset);
+                        }
+                        *value_kind = ExpressionValueKind::Absolute;
+                    }
+                    val
+                }
+                None => evaluate_location(
+                    expr_loc,
+                    section_layouts,
+                    output_sections,
+                    resolved_location_counters,
+                    value_kind,
+                )?,
+            };
+            if is_dot && let ExpressionValueKind::Relative(sec) = *value_kind {
+                let base = section_layouts.get(sec).mem_offset;
+                Ok(base
+                    .wrapping_add(val)
+                    .next_multiple_of(align)
+                    .wrapping_sub(base))
+            } else {
+                Ok(val.next_multiple_of(align))
+            }
         }
 
-        Expression::Min(l, r) => Ok(eval!(l)?.min(eval!(r)?)),
-        Expression::Max(l, r) => Ok(eval!(l)?.max(eval!(r)?)),
-        Expression::BitwiseAnd(l, r) => Ok(eval!(l)? & eval!(r)?),
-        Expression::BitwiseOr(l, r) => Ok(eval!(l)? | eval!(r)?),
-        Expression::BitwiseXor(l, r) => Ok(eval!(l)? ^ eval!(r)?),
-        Expression::LeftShift(l, r) => Ok(eval!(l)?.wrapping_shl(eval!(r)? as u32)),
-        Expression::RightShift(l, r) => Ok(eval!(l)?.wrapping_shr(eval!(r)? as u32)),
-        Expression::LogicalAnd(l, r) => Ok(u64::from(eval!(l)? != 0 && eval!(r)? != 0)),
-        Expression::LogicalOr(l, r) => Ok(u64::from(eval!(l)? != 0 || eval!(r)? != 0)),
-        Expression::LogicalNot(e) => Ok(u64::from(eval!(e)? == 0)),
-        Expression::BitwiseNot(e) => Ok(!eval!(e)?),
-        Expression::Negate(e) => Ok(eval!(e)?.wrapping_neg()),
+        Expression::Min(l, r) => eval_binary_op!(l, r, min_max_binary_op, u64::min),
+        Expression::Max(l, r) => eval_binary_op!(l, r, min_max_binary_op, u64::max),
+        Expression::BitwiseAnd(l, r) => {
+            try_eval_binary_op!(l, r, arithmetic_binary_op, |a, b| Ok(a & b))
+        }
+        Expression::BitwiseOr(l, r) => {
+            try_eval_binary_op!(l, r, arithmetic_binary_op, |a, b| Ok(a | b))
+        }
+        Expression::BitwiseXor(l, r) => {
+            try_eval_binary_op!(l, r, arithmetic_binary_op, |a, b| Ok(a ^ b))
+        }
+        Expression::LeftShift(l, r) => {
+            try_eval_binary_op!(l, r, arithmetic_binary_op, |a, b| {
+                Ok(a.wrapping_shl(b as u32))
+            })
+        }
+        Expression::RightShift(l, r) => {
+            try_eval_binary_op!(l, r, arithmetic_binary_op, |a, b| {
+                Ok(a.wrapping_shr(b as u32))
+            })
+        }
+        Expression::LogicalAnd(l, r) => {
+            eval_binary_op!(l, r, compare_binary_op, |a, b| a != 0 && b != 0)
+        }
+        Expression::LogicalOr(l, r) => {
+            eval_binary_op!(l, r, compare_binary_op, |a, b| a != 0 || b != 0)
+        }
+        Expression::LogicalNot(e) => {
+            let mut e_kind = ExpressionValueKind::Number;
+            let mut val = eval!(e, &mut e_kind)?;
+            if current_section.is_none()
+                && let ExpressionValueKind::Relative(sec) = e_kind
+            {
+                val = val.wrapping_add(section_layouts.get(sec).mem_offset);
+            }
+            *value_kind = if current_section.is_some() && !e_kind.is_absolute() {
+                ExpressionValueKind::Number
+            } else {
+                ExpressionValueKind::Absolute
+            };
+            Ok(u64::from(val == 0))
+        }
+        Expression::BitwiseNot(e) => {
+            let mut e_kind = ExpressionValueKind::Number;
+            let val = eval!(e, &mut e_kind)?;
+            *value_kind = e_kind;
+            Ok(!val)
+        }
+        Expression::Negate(e) => {
+            let mut e_kind = ExpressionValueKind::Number;
+            let val = eval!(e, &mut e_kind)?;
+            *value_kind = e_kind;
+            Ok(val.wrapping_neg())
+        }
 
         Expression::Origin(name) => {
-            value_kind.contains_absolute = true;
             let region = memory_regions.get(name).with_context(|| {
                 format!(
                     "ORIGIN: memory region '{}' not found",
                     String::from_utf8_lossy(name)
                 )
             })?;
-            Ok(region.origin)
+            if let Some(curr_sec) = current_section {
+                let section_base = section_layouts.get(curr_sec).mem_offset;
+                *value_kind = ExpressionValueKind::Relative(curr_sec);
+                Ok(region.origin.wrapping_sub(section_base))
+            } else {
+                *value_kind = ExpressionValueKind::Address;
+                Ok(region.origin)
+            }
         }
         Expression::Length(name) => {
             let region = memory_regions.get(name).with_context(|| {
@@ -390,16 +742,30 @@ fn evaluate_expression_value<'data, P: Platform>(
             Ok(region.length)
         }
         Expression::SegmentStart(name, default_expr) => {
-            value_kind.contains_absolute = true;
-            if let Some(val) = symbol_db.args.segment_start_override(*name) {
-                Ok(val)
+            let res = if let Some(val) = symbol_db.args.segment_start_override(*name) {
+                val
             } else {
-                eval!(default_expr)
+                let mut default_kind = ExpressionValueKind::Number;
+                eval!(default_expr, &mut default_kind)?
+            };
+            if let Some(curr_sec) = current_section {
+                let section_base = section_layouts.get(curr_sec).mem_offset;
+                *value_kind = ExpressionValueKind::Relative(curr_sec);
+                Ok(res.wrapping_sub(section_base))
+            } else {
+                *value_kind = ExpressionValueKind::Address;
+                Ok(res)
             }
         }
         Expression::SizeofHeaders => Ok(sizeof_headers),
         Expression::Ternary(cond, if_true, if_false) => {
-            let cond = eval!(cond)?;
+            let mut cond_kind = ExpressionValueKind::Number;
+            let mut cond = eval!(cond, &mut cond_kind)?;
+            if current_section.is_none()
+                && let ExpressionValueKind::Relative(sec) = cond_kind
+            {
+                cond = cond.wrapping_add(section_layouts.get(sec).mem_offset);
+            }
             if cond != 0 {
                 eval!(if_true)
             } else {
@@ -497,8 +863,8 @@ pub(crate) fn evaluate_early_expression<'data, P: Platform>(
     sizeof_headers: u64,
     section_positions: &OnceCell<InputSectionPositions>,
     visited_nodes: &mut hashbrown::HashSet<SymbolId>,
-) -> Result<u64> {
-    crate::expression_eval::evaluate_expression(
+) -> Result<EvaluatedValue> {
+    evaluate_expression(
         expr,
         loc,
         None,
@@ -524,64 +890,33 @@ pub(crate) fn evaluate_early_expression<'data, P: Platform>(
             let file = group_states
                 .get(file_id.group())
                 .and_then(|group| group.files.get(file_id.file()));
-            match file {
-                Some(FileLayoutState::Object(obj)) => layout::resolve_early_object_symbol(
-                    canonical_id,
-                    obj,
-                    section_positions.get_or_init(|| {
-                        layout::compute_input_section_positions(
-                            group_states,
-                            sizes.new_empty_like(),
-                            symbol_db,
-                            output_sections,
-                        )
-                    }),
-                    symbol_db,
-                ),
+            let def_info = match file {
+                Some(FileLayoutState::Object(obj)) => {
+                    return layout::resolve_early_object_symbol(
+                        canonical_id,
+                        obj,
+                        section_positions.get_or_init(|| {
+                            layout::compute_input_section_positions(
+                                group_states,
+                                sizes.new_empty_like(),
+                                symbol_db,
+                                output_sections,
+                            )
+                        }),
+                        symbol_db,
+                    );
+                }
                 Some(FileLayoutState::LinkerScript(ls))
                     if let Group::LinkerScripts(scripts) = &symbol_db.groups[file_id.group()] =>
                 {
                     let script = &scripts[file_id.file()];
                     let symbol_offset = ls.symbol_id_range.id_to_offset(canonical_id);
-
-                    let def_info = &script.parsed.symbol_defs[symbol_offset];
-                    evaluate_early_expression_internal_symbol(
-                        memory_regions,
-                        section_layouts,
-                        resolved_lc,
-                        laid_out_mem_offsets,
-                        group_states,
-                        sizes,
-                        output_sections,
-                        symbol_db,
-                        sizeof_headers,
-                        section_positions,
-                        visited_nodes,
-                        canonical_id,
-                        def_info,
-                    )
+                    &script.parsed.symbol_defs[symbol_offset]
                 }
                 Some(FileLayoutState::Prelude(prelude))
                     if let Group::Prelude(p) = &symbol_db.groups[file_id.group()] =>
                 {
-                    let def_info =
-                        &p.symbol_definitions[prelude.symbol_id_range().id_to_offset(canonical_id)];
-
-                    evaluate_early_expression_internal_symbol(
-                        memory_regions,
-                        section_layouts,
-                        resolved_lc,
-                        laid_out_mem_offsets,
-                        group_states,
-                        sizes,
-                        output_sections,
-                        symbol_db,
-                        sizeof_headers,
-                        section_positions,
-                        visited_nodes,
-                        canonical_id,
-                        def_info,
-                    )
+                    &p.symbol_definitions[prelude.symbol_id_range().id_to_offset(canonical_id)]
                 }
                 _ => {
                     bail!(
@@ -589,7 +924,23 @@ pub(crate) fn evaluate_early_expression<'data, P: Platform>(
                         symbol_db.symbol_name_for_display(canonical_id)
                     );
                 }
-            }
+            };
+
+            evaluate_early_expression_internal_symbol(
+                memory_regions,
+                section_layouts,
+                resolved_lc,
+                laid_out_mem_offsets,
+                group_states,
+                sizes,
+                output_sections,
+                symbol_db,
+                sizeof_headers,
+                section_positions,
+                visited_nodes,
+                canonical_id,
+                def_info,
+            )
         },
     )
 }
@@ -614,7 +965,7 @@ fn evaluate_early_expression_internal_symbol<'data, P: Platform>(
             if !visited_nodes.insert(canonical_id) {
                 return Ok(SymbolValue::Absolute(0));
             }
-            let value = evaluate_early_expression(
+            let evaluated = evaluate_early_expression(
                 &redirect.expression,
                 &redirect.loc,
                 memory_regions,
@@ -628,21 +979,14 @@ fn evaluate_early_expression_internal_symbol<'data, P: Platform>(
                 sizeof_headers,
                 section_positions,
                 visited_nodes,
-            );
+            )?;
             visited_nodes.remove(&canonical_id);
-            let value = value?;
-            let symbol_section = redirect
-                .loc
-                .relative_section_id()
-                .map(|id| output_sections.primary_output_section(id));
-            if let Some(symbol_section) = symbol_section {
-                Ok(SymbolValue::SectionRelative {
-                    section_id: symbol_section,
-                    address: value,
-                })
+            let symbol_value = if evaluated.is_absolute() {
+                SymbolValue::Absolute(evaluated.value)
             } else {
-                Ok(SymbolValue::Absolute(value))
-            }
+                SymbolValue::new(evaluated.value, evaluated.section_id())
+            };
+            Ok(symbol_value)
         }
         SymbolPlacement::SectionStart(section_id) => Ok(SymbolValue::SectionRelative {
             section_id: *section_id,
@@ -707,6 +1051,7 @@ fn section_address<'data, P: Platform>(
     name: &[u8],
     section_layouts: &OutputSectionMap<OutputRecordLayout>,
     output_sections: &OutputSections<'data, P>,
+    value_kind: &mut ExpressionValueKind,
 ) -> Result<u64> {
     let id = output_sections
         .section_id_by_name(SectionName(name))
@@ -716,7 +1061,9 @@ fn section_address<'data, P: Platform>(
                 String::from_utf8_lossy(name)
             )
         })?;
-    Ok(section_layouts.get(id).mem_offset)
+    let primary_section = output_sections.primary_output_section(id);
+    let address = section_layouts.get(primary_section).mem_offset;
+    evaluate_section_address(primary_section, address, section_layouts, value_kind, name)
 }
 
 fn section_load_address<'data, P: Platform>(
@@ -787,6 +1134,7 @@ mod tests {
                 &OutputSectionPartMap::default(),
                 &mut |_| Ok(SymbolValue::Absolute(1)),
             )
+            .map(|evaluated| evaluated.value)
         })
     }
 
@@ -1245,6 +1593,7 @@ mod tests {
                     &OutputSectionPartMap::default(),
                     &mut |_| Ok(SymbolValue::Absolute(0)),
                 )
+                .map(|evaluated| evaluated.value)
             };
             assert_eq!(eval(&Expression::Origin(b"rom")).unwrap(), 0x08000000);
             assert_eq!(eval(&Expression::Length(b"rom")).unwrap(), 0x100000);

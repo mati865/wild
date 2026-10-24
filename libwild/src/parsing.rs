@@ -377,6 +377,19 @@ impl Redirect<'_> {
     pub(crate) fn is_provide(&self) -> bool {
         matches!(self.kind, RedirectKind::Provide)
     }
+
+    pub(crate) fn update_for_evaluated_value(
+        &mut self,
+        evaluated: &crate::expression_eval::EvaluatedValue,
+    ) {
+        if evaluated.is_absolute() && self.loc.relative_section_id().is_some() {
+            self.loc = SymbolLoc::None;
+        } else if let Some(sec_id) = evaluated.section_id()
+            && self.loc.relative_section_id() != Some(sec_id)
+        {
+            self.loc = SymbolLoc::SectionEnd(sec_id);
+        }
+    }
 }
 
 impl RedirectKind {
