@@ -478,13 +478,26 @@ fn update_allocation_sizes<P: Platform>(layout: &mut Layout<P>) {
 fn update_file_offset<P: Platform>(layout: &mut Layout<P>) -> Result {
     timing_phase!("Update file offsets post-compression");
 
-    let section_ids: Vec<OutputSectionId> = (&layout.output_order)
-        .into_iter()
-        .filter_map(|event| match event {
-            OrderEvent::Section(section_id) => Some(section_id),
-            _ => None,
-        })
-        .collect();
+    let mut nonalloc_prefix = Vec::new();
+    let mut section_ids = Vec::new();
+    let mut seen_alloc = false;
+
+    for event in &layout.output_order {
+        if let OrderEvent::Section(section_id) = event {
+            let is_regular = section_id != crate::output_section_id::FILE_HEADER
+                && !P::CUSTOM_PHDR_EXCLUDED_SECTION_IDS.contains(&section_id);
+            let is_alloc = layout.output_sections.section_flags(section_id).is_alloc();
+            if is_regular && is_alloc {
+                seen_alloc = true;
+            }
+            if !seen_alloc && is_regular && !is_alloc {
+                nonalloc_prefix.push(section_id);
+            } else {
+                section_ids.push(section_id);
+            }
+        }
+    }
+    section_ids.extend(nonalloc_prefix);
 
     let mut cursor = 0usize;
     let mut resized = false;

@@ -2,12 +2,49 @@
 //#Object:runtime.c
 // RISC-V: BFD complains about missing __global_pointer$ (defined in the default linker script)
 //#SkipArch:riscv64
+//#ReferenceLinkers:bfd,lld
 
 //#Config:page_aligned_x86_64:default
 //#Arch:x86_64
 //#LinkerScript:page-aligned.ld
 //#ExpectProgramHeader:LOAD flags=RX,sections=[.text,*],vaddr=0x5ff000
 //#ExpectProgramHeader:LOAD flags=RW,sections=[.data,*],vaddr=0x800000
+
+//#Config:phdrs_no_base_address:default
+//#Arch:x86_64
+//#ReferenceLinkers:bfd,lld
+//#LinkerScript:phdrs-no-base-address.ld
+//#ExpectProgramHeader:LOAD flags=RX,sections=[.text,*],vaddr=0x3ff000
+//#ExpectSection:.text address=0x400000
+
+//#AbstractConfig:nonalloc_first:default
+//#CompArgs:-g
+//#LinkArgs: --no-gc-sections
+//#LinkerScript:nonalloc-first.ld
+//#ExpectSection:.debug_info address=0,index=1
+//#ExpectSection:.debug_str address=0,index=2
+//#ExpectSection:.debug_line address=0
+//#ExpectSection:.text address=0x400000
+
+//#Config:nonalloc_first_x86:nonalloc_first
+//#Arch:x86_64
+//#ExpectProgramHeader:LOAD flags=RX,sections=[.text,*],vaddr=0x3ff000
+
+//#Config:nonalloc_first_aarch64:nonalloc_first
+//#Arch:aarch64
+//#ExpectProgramHeader:LOAD flags=RX,sections=[.text,*],vaddr=0x3f0000
+
+//#Config:nonalloc_first_compressed:nonalloc_first_x86
+//#LinkArgs:--compress-debug-sections=zlib
+
+//#Config:nonalloc_secondary:default
+//#Arch:x86_64
+//#Object:nonalloc-secondary.s
+//#LinkerScript:nonalloc-secondary.ld
+//#ExpectSection:.metadata address=0
+//#ExpectSectionBytes:.metadata=0x0102
+//#ExpectSection:.text address=0x400000
+//#ExpectProgramHeader:LOAD flags=RX,sections=[.text,*],vaddr=0x3ff000
 
 //#Config:page_aligned_aarch64:default
 //#Arch:aarch64
@@ -48,6 +85,33 @@
 //#ExpectSym:other address=0x700000
 //#ExpectSym:rodata address=0x500000
 //#DiffIgnore:segment.LOAD.RX.alignment
+
+//#Config:below_default_base_x86:default
+//#Arch:x86_64
+//#LinkerScript:below-default-base.ld
+//#ExpectSection:.text address=0x3fe800
+//#ExpectProgramHeader:LOAD vaddr=0x3fe000,sections=[.text,*]
+
+//#Config:below_default_base_aarch64:default
+//#Arch:aarch64
+//#LinkerScript:below-default-base.ld
+//#ExpectSection:.text address=0x3fe800
+//#ExpectProgramHeader:LOAD vaddr=0x3f0000,sections=[.text,*]
+
+//#AbstractConfig:zero_base:default
+//#CompArgs: -fPIC
+//#LinkerScript:zero-base.ld
+//#ExpectSection:.text address=0x1000
+//#ExpectProgramHeader:LOAD vaddr=0,sections=[.text,*]
+//#RunEnabled:false
+
+//#Config:pie:zero_base
+//#Mode:dynamic
+//#LinkArgs:-pie
+//#DiffMatchAny:true
+
+//#Config:shared:zero_base
+//#LinkArgs:-shared
 
 #include "../common/runtime.h"
 

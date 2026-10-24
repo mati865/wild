@@ -117,6 +117,8 @@
 //!   or 1 if sh_entsize is 0).
 //!   flags=WAX: Asserts the section has the specified section flags.
 //!   type=int: Asserts the section has the specified section type.
+//!   address=int: Asserts the section has the specified address.
+//!   index=int: Asserts the section has the specified section header index.
 //!
 //! RelrCount:N Checks that .relr.dyn encodes at least N total relocations (counting both address
 //! entries and bitmap-encoded relocations).
@@ -266,6 +268,9 @@
 //! thunks must specify a sufficiently large value here.
 //!
 //! RemoveSection:{section-name} Remove the section with the specified name from the output binary.
+//!
+//! ExpectMinAllocAddress: {address} Asserts the minimum address of all sections with the alloc
+//! flag.
 //!
 //! DriverMode:{mode} Links using a non-standard mode. See Driver Modes section below.
 //!
@@ -2095,6 +2100,7 @@ struct Assertions {
     expected_program_headers: Vec<ExpectedProgramHeaders>,
     absent_program_headers: Vec<ProgramHeaderType>,
     skip_overlap_segments_check: bool,
+    min_alloc_address: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2148,6 +2154,10 @@ struct SectionAssertions {
 
     #[serde(rename = "type")]
     stype: Option<u32>,
+
+    address: Option<u64>,
+
+    index: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -3121,6 +3131,9 @@ fn process_directive(
         }
         "MaxThunks" => {
             config.assertions.max_thunks = arg.parse()?;
+        }
+        "ExpectMinAllocAddress" => {
+            config.assertions.min_alloc_address = Some(parse_number(arg.trim())?);
         }
         other => bail!("Unknown directive '{other}'"),
     }
@@ -5479,6 +5492,7 @@ impl Assertions {
         self.verify_expected_sections(&obj)?;
         self.verify_absent_sections(&obj)?;
         self.verify_section_bytes(&obj)?;
+        self.verify_min_alloc_address(&obj)?;
         Self::verify_eh_frame_terminator(&obj, linker_used)?;
         self.verify_relr_count(&obj)?;
         self.verify_gdb_index_cu_count(&obj)?;
@@ -5820,6 +5834,28 @@ impl Assertions {
                     ptype
                 );
             }
+
+            if let Some(expected_address) = expected.assertions.address {
+                let actual_address = section.address();
+                ensure!(
+                    actual_address == expected_address,
+                    "Section `{}` address mismatch: expected {:#x}, got {:#x}",
+                    expected.section_name,
+                    expected_address,
+                    actual_address
+                );
+            }
+
+            if let Some(expected_index) = expected.assertions.index {
+                let index = section.index().0;
+                ensure!(
+                    index == expected_index,
+                    "Section `{}` index mismatch: expected {:#x}, got {:#x}",
+                    expected.section_name,
+                    expected_index,
+                    index
+                );
+            }
         }
         Ok(())
     }
@@ -5831,6 +5867,27 @@ impl Assertions {
                 "Section `{name}` should not exist but was found"
             );
         }
+        Ok(())
+    }
+
+    fn verify_min_alloc_address(&self, obj: &object::File) -> Result {
+        let Some(expected) = self.min_alloc_address else {
+            return Ok(());
+        };
+        let min_address = obj
+            .sections()
+            .filter(|section| match section.flags() {
+                object::SectionFlags::Elf { sh_flags, .. } => {
+                    (sh_flags.0 & object::elf::SHF_ALLOC.0) != 0
+                }
+                _ => false,
+            })
+            .map(|section| section.address())
+            .min();
+        ensure!(
+            min_address == Some(expected),
+            "Minimum alloc section address mismatch: expected {expected:#x}, got {min_address:#x?}"
+        );
         Ok(())
     }
 

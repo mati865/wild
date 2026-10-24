@@ -1301,7 +1301,10 @@ impl<C: ElfClass> platform::Platform for Elf<C> {
 
         // The .riscv.attributes section is non-alloc but is expected to be put into a
         // RISCV_ATTRIBUTES segment.
+        let primary_info = output_sections.output_info(merge_target);
         if [sht::NOTE, sht::RISCV_ATTRIBUTES].contains(&section_info.section_attributes.ty) {
+        } else if !section_flags.is_alloc() && primary_info.phdrs == [b"NONE"] {
+            return Ok(());
         } else {
             // All segments should only cover sections that are allocated and have a non-zero
             // address.

@@ -2356,6 +2356,12 @@ fn compute_segment_layout<'data, P: Platform>(
                             continue;
                         }
 
+                        if !section_flags.is_alloc()
+                            && program_segments.is_load_segment(rec.segment_id)
+                        {
+                            continue;
+                        }
+
                         if file_layout == SegmentFileLayout::FromSections {
                             rec.file_start = rec.file_start.min(section_layout.file_offset);
                             rec.file_end = rec.file_end.max(section_layout.file_end());
@@ -6227,7 +6233,7 @@ fn compute_layout_sections<'data, P: Platform>(
     // object symbols referenced from location-counter expressions.
     let mut laid_out_mem_offsets = output_sections.new_part_map::<Option<u64>>();
     let mut file_offset = 0;
-    let base_address = expression_eval(
+    let mut base_address = expression_eval(
         &output_sections.base_address,
         &SymbolLoc::None,
         memory_regions,
@@ -6235,9 +6241,28 @@ fn compute_layout_sections<'data, P: Platform>(
         &[],
         &laid_out_mem_offsets,
     )?;
+    let has_custom_base_address = output_sections.has_custom_base_address()
+        || (output_order.custom_phdrs_include_headers()
+            && output_order
+                .first_section_address_expr(output_sections)
+                .is_some());
+    if output_order.custom_phdrs_include_headers()
+        && !output_sections.has_custom_base_address()
+        && let Some(first_expr) = output_order.first_section_address_expr(output_sections)
+    {
+        base_address = expression_eval(
+            first_expr,
+            &SymbolLoc::None,
+            memory_regions,
+            &section_layouts,
+            &[],
+            &laid_out_mem_offsets,
+        )?;
+    }
     let alignment = args.loadable_segment_alignment().value();
+
     if (output_order.custom_phdrs_include_headers() || !output_order.has_custom_phdrs())
-        && output_sections.has_custom_base_address()
+        && has_custom_base_address
         && base_address < sizeof_headers
     {
         bail!(
@@ -6245,7 +6270,9 @@ fn compute_layout_sections<'data, P: Platform>(
         );
     }
     let mut mem_offset = base_address;
-    if output_order.custom_phdrs_include_headers() || output_sections.has_custom_base_address() {
+    let header_start_mem_offset = if output_order.custom_phdrs_include_headers()
+        || has_custom_base_address
+    {
         let offset_in_page = mem_offset % alignment;
         if offset_in_page >= sizeof_headers {
             mem_offset -= offset_in_page;
@@ -6255,7 +6282,10 @@ fn compute_layout_sections<'data, P: Platform>(
                 mem_offset = adjusted;
             }
         }
-    }
+        Some(mem_offset)
+    } else {
+        None
+    };
     let mut lma_offset = mem_offset;
     let mut nonalloc_mem_offsets: OutputSectionMap<u64> =
         OutputSectionMap::with_size(output_sections.num_sections());
@@ -6280,6 +6310,10 @@ fn compute_layout_sections<'data, P: Platform>(
     // template, so we don't do it.
     let mut tls_memsave: Option<u64> = None;
     let mut in_tls = false;
+    let mut has_reset_base_address =
+        output_order.has_custom_phdrs() || !output_sections.has_custom_base_address();
+    let mut deferred_nonalloc = Vec::new();
+    let mut has_seen_alloc_section = false;
 
     for event in output_order {
         match event {
@@ -6365,6 +6399,26 @@ fn compute_layout_sections<'data, P: Platform>(
             }
             OrderEvent::SegmentEnd(_) => {}
             OrderEvent::Section(section_id) => {
+                let is_alloc = output_sections.section_flags(section_id).is_alloc();
+                let is_regular_section = section_id != crate::output_section_id::FILE_HEADER
+                    && !P::CUSTOM_PHDR_EXCLUDED_SECTION_IDS.contains(&section_id);
+                let is_deferred = is_regular_section && !is_alloc && !has_seen_alloc_section;
+
+                if is_regular_section {
+                    if is_alloc {
+                        has_seen_alloc_section = true;
+                        if !has_reset_base_address {
+                            if let Some(header_start) = header_start_mem_offset {
+                                mem_offset = base_address;
+                                file_offset = (base_address - header_start) as usize;
+                            }
+                            has_reset_base_address = true;
+                        }
+                    } else if is_deferred {
+                        deferred_nonalloc.push(section_id);
+                    }
+                }
+
                 let section_info = output_sections.output_info(section_id);
                 let section_offset = pending_location.take();
 
@@ -6479,8 +6533,8 @@ fn compute_layout_sections<'data, P: Platform>(
 
                     // Note, we align up even if our size is zero, otherwise our section will
                     // start at an unaligned address. We don't however align up for NOBITS
-                    // sections.
-                    if output_sections.has_data_in_file(merge_target) {
+                    // sections or sections whose file layout is deferred.
+                    if output_sections.has_data_in_file(merge_target) && !is_deferred {
                         file_offset = alignment.align_up_usize(file_offset);
                     }
 
@@ -6517,15 +6571,18 @@ fn compute_layout_sections<'data, P: Platform>(
                         (mem_offset, mem_offset)
                     };
 
+                    let part_file_offset = if is_deferred { 0 } else { file_offset };
                     *part_layout = OutputRecordLayout {
                         file_size,
                         mem_size,
                         alignment,
-                        file_offset,
+                        file_offset: part_file_offset,
                         mem_offset: part_mem_offset,
                         lma_offset: part_lma_offset,
                     };
-                    file_offset += file_size;
+                    if !is_deferred {
+                        file_offset += file_size;
+                    }
 
                     *laid_out_mem_offsets.get_mut(part_id) = Some(part_layout.mem_offset);
 
@@ -6572,6 +6629,17 @@ fn compute_layout_sections<'data, P: Platform>(
                 }
             }
         }
+    }
+
+    for nonalloc_id in deferred_nonalloc {
+        let section_layout = section_layouts.get_mut(nonalloc_id);
+        file_offset = section_layout.alignment.align_up_usize(file_offset);
+        file_offset = assign_section_file_range::<P>(
+            nonalloc_id,
+            section_layout,
+            &mut records_out,
+            file_offset,
+        );
     }
 
     validate_all_non_empty_sections_emitted(sizes, output_sections, output_order)?;
