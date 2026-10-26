@@ -45,6 +45,7 @@ pub(crate) type SymtabEntry = object::pe::ImageSymbol;
 pub(crate) type SectionHeader = object::pe::ImageSectionHeader;
 pub(crate) type DynamicEntry = ();
 pub(crate) type RelocationSections = ();
+pub(crate) type SymbolTable<'data> = object::read::coff::SymbolTable<'data>;
 pub(crate) type VersionNames = ();
 
 #[derive(Debug, Copy, Clone, Default)]
@@ -119,69 +120,27 @@ pub(crate) struct File<'data> {
     pub(crate) arch: Architecture,
     #[debug(skip)]
     pub(crate) data: &'data [u8],
+    pub(crate) sections: object::coff::SectionTable<'data>,
+    pub(crate) symbols: object::read::coff::SymbolTable<'data>,
 }
 
 impl<'data> File<'data> {
     fn parse_coff_bytes(data: &'data [u8], is_dynamic: bool) -> Result<Self> {
-        let header = object::pe::ImageFileHeader::parse(data, &mut 0)?;
-        // let architecture = header.e_machine(endian).try_into()?;
-        // let sections = header.sections(endian, data)?;
-        // let eflags = header.e_flags(endian);
-
-        // let mut group_sections = 0..0;
-        // let mut symbols = crate::coff::SymbolTable::<C>::default();
-        //
-        // // Find all the sections that we're interested in a single scan of the section table so
-        // // as to avoid multiple scans.
-        // for (section_index, section) in sections.enumerate() {
-        //     match section.sh_type(endian) {
-        //         sht::GROUP if !is_dynamic => {
-        //             if group_sections.is_empty() {
-        //                 group_sections.start = section_index.0;
-        //             }
-        //             group_sections.end = section_index.0 + 1;
-        //         }
-        //         sht::DYNSYM if is_dynamic => {
-        //             symbols =
-        //                 crate::elf::SymbolTable::<C>::parse(endian, data, &sections,
-        // section_index, section)?;         }
-        //         sht::SYMTAB if !is_dynamic => {
-        //             symbols =
-        //                 crate::elf::SymbolTable::<C>::parse(endian, data, &sections,
-        // section_index, section)?;         }
-        //         sht::GNU_VERSYM => {
-        //             versym = section.data_as_array(endian, data)?;
-        //         }
-        //         sht::GNU_VERDEF => {
-        //             verdef = section.gnu_verdef(endian, data)?;
-        //             verdefnum = section.sh_info(endian);
-        //         }
-        //         sht::GNU_VERNEED => {
-        //             verneed = section.gnu_verneed(endian, data)?;
-        //         }
-        //         _ => {}
-        //     }
-        // }
-        //
-        // let dynamic_tag_values =
-        //     is_dynamic.then(|| DynamicTagValues::read::<C>(&sections, data, &symbols));
+        let mut offset = 0;
+        let header = object::pe::ImageFileHeader::parse(data, &mut offset)?;
         let arch = match header.machine() {
             object::pe::IMAGE_FILE_MACHINE_AMD64 => Architecture::X86_64,
             _ => bail!("Unsupported architecture: {:?}", header.machine()),
         };
 
+        let sections = header.sections(data, offset)?;
+        let symbols = header.symbols(data)?;
+
         Ok(Self {
-            // group_sections,
             arch,
             data,
-            // sections,
-            // symbols,
-            // versym,
-            // verdef,
-            // verdefnum,
-            // verneed,
-            // eflags,
-            // dynamic_tag_values,
+            sections,
+            symbols,
         })
     }
 }
@@ -804,7 +763,7 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
     }
 
     fn symbol(&self, index: SymbolIndex) -> Result<&SymtabEntry> {
-        todo!()
+        Ok(self.symbols.symbol(index)?)
     }
 
     fn symbol_name(&self, symbol: &SymtabEntry) -> Result<&'data [u8]> {
@@ -828,7 +787,7 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
     }
 
     fn num_symbols(&self) -> usize {
-        todo!()
+        self.symbols.len()
     }
 
     fn is_dynamic(&self) -> bool {
@@ -845,12 +804,11 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
     }
 
     fn section_iter<'a>(&'a self) -> core::slice::Iter<'a, SectionHeader> {
-        todo!()
+        self.sections.iter()
     }
 
     fn enumerate_sections(&self) -> impl Iterator<Item = (object::SectionIndex, &SectionHeader)> {
-        // TODO
-        std::iter::empty()
+        self.sections.enumerate()
     }
 
     fn get_version_names(&self) -> Result<VersionNames> {
@@ -869,8 +827,7 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
     }
 
     fn symbols_iter(&self) -> impl Iterator<Item = &SymtabEntry> {
-        // TODO
-        std::iter::empty()
+        self.symbols.iter().map(|(_, sym)| sym)
     }
 
     fn verneed_table(&self) -> Result<VerneedTable<'data>> {
@@ -878,7 +835,7 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
     }
 
     fn num_sections(&self) -> usize {
-        todo!()
+        self.sections.len()
     }
 
     fn process_gnu_note_section(
