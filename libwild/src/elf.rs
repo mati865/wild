@@ -998,11 +998,7 @@ impl<C: ElfClass> platform::Platform for Elf<C> {
         if let Some(v) = &state.format_specific.verneed_info
             && v.version_count > 0
         {
-            memory_offsets.increment(
-                part_id::GNU_VERSION_R,
-                size_of::<crate::elf::Verneed>() as u64
-                    + u64::from(v.version_count) * size_of::<crate::elf::Vernaux>() as u64,
-            );
+            memory_offsets.increment(part_id::GNU_VERSION_R, version_need_size(v.version_count));
 
             let version_r_layout = resources
                 .section_layouts
@@ -2096,11 +2092,10 @@ impl<C: ElfClass> platform::Platform for Elf<C> {
         output_kind: OutputKind,
         args: &Self::Args,
     ) {
-        let has_dynamic_symbol =
-            flags.is_dynamic() || (flags.needs_export_dynamic() && flags.is_interposable());
+        let has_dynamic_symbol = flags.needs_dynamic_symbol_relocation();
 
         if flags.needs_got() && !flags.needs_tls_got() {
-            let is_got_relr = is_got_relr_eligible(flags, has_dynamic_symbol, args, output_kind);
+            let is_got_relr = is_got_relr_eligible(flags, args, output_kind);
             if is_got_relr {
                 mem_sizes.increment(part_id::GOT_RELR, C::GOT_ENTRY_SIZE);
             } else {
@@ -2109,20 +2104,22 @@ impl<C: ElfClass> platform::Platform for Elf<C> {
             if flags.needs_plt() {
                 mem_sizes.increment(part_id::PLT_GOT, PLT_ENTRY_SIZE);
             }
-            if flags.needs_canonical_plt() {
-                mem_sizes.increment(part_id::RELA_PLT, C::RELA_ENTRY_SIZE);
-            } else if has_dynamic_symbol {
-                mem_sizes.increment(part_id::RELA_DYN_GENERAL, C::RELA_ENTRY_SIZE);
-            } else if flags.is_ifunc() {
-                mem_sizes.increment(part_id::RELA_PLT, C::RELA_ENTRY_SIZE);
-            } else if flags.has_link_time_address() && output_kind.is_position_independent() {
-                if args.is_relr_enabled() && !is_got_relr {
-                    // Flat RELR for section boundary symbols (not bitmap-packed)
-                    mem_sizes.increment(part_id::RELR_DYN, C::RELR_ENTRY_SIZE);
-                } else if !args.is_relr_enabled() {
-                    mem_sizes.increment(part_id::RELA_DYN_RELATIVE, C::RELA_ENTRY_SIZE);
+            match got_relocation_kind(flags, output_kind) {
+                GotRelocationKind::JumpSlot | GotRelocationKind::Ifunc => {
+                    mem_sizes.increment(part_id::RELA_PLT, C::RELA_ENTRY_SIZE);
                 }
-                // is_got_relr=true: RELR entries counted by post_compute_sizes
+                GotRelocationKind::DynamicSymbol => {
+                    mem_sizes.increment(part_id::RELA_DYN_GENERAL, C::RELA_ENTRY_SIZE);
+                }
+                GotRelocationKind::Relative => {
+                    if args.is_relr_enabled() && !is_got_relr {
+                        mem_sizes.increment(part_id::RELR_DYN, C::RELR_ENTRY_SIZE);
+                    } else if !args.is_relr_enabled() {
+                        mem_sizes.increment(part_id::RELA_DYN_RELATIVE, C::RELA_ENTRY_SIZE);
+                    }
+                    // Bitmap-packed GOT relocations are counted by post_compute_sizes.
+                }
+                GotRelocationKind::None => {}
             }
 
             if flags.needs_canonical_plt_got_for_address() {
@@ -2151,9 +2148,7 @@ impl<C: ElfClass> platform::Platform for Elf<C> {
 
         if flags.needs_got_tls_module() {
             mem_sizes.increment(part_id::GOT, C::GOT_ENTRY_SIZE * 2);
-            // For executables, the TLS module ID is known at link time. For shared objects, we need
-            // a runtime relocation to fill it in.
-            if !output_kind.is_executable() || flags.is_dynamic() {
+            if needs_tls_module_relocation(flags, output_kind) {
                 mem_sizes.increment(part_id::RELA_DYN_GENERAL, C::RELA_ENTRY_SIZE);
             }
             if has_dynamic_symbol {
@@ -2342,9 +2337,7 @@ impl<C: ElfClass> platform::Platform for Elf<C> {
             } else {
                 1
             };
-            let has_dynamic_symbol =
-                flags.is_dynamic() || (flags.needs_export_dynamic() && flags.is_interposable());
-            let is_got_relr = is_got_relr_eligible(flags, has_dynamic_symbol, args, output_kind);
+            let is_got_relr = is_got_relr_eligible(flags, args, output_kind);
             resolution.format_specific.got_address = if is_got_relr && num_got_entries == 1 {
                 Some(allocate_got_relr::<C>(memory_offsets))
             } else {
@@ -2366,9 +2359,7 @@ impl<C: ElfClass> platform::Platform for Elf<C> {
             resolution.format_specific.got_address =
                 Some(allocate_got::<C>(num_got_slots, memory_offsets));
         } else if flags.needs_got() {
-            let has_dynamic_symbol =
-                flags.is_dynamic() || (flags.needs_export_dynamic() && flags.is_interposable());
-            let is_got_relr = is_got_relr_eligible(flags, has_dynamic_symbol, args, output_kind);
+            let is_got_relr = is_got_relr_eligible(flags, args, output_kind);
             resolution.format_specific.got_address = if is_got_relr {
                 Some(allocate_got_relr::<C>(memory_offsets))
             } else {
@@ -3849,11 +3840,7 @@ impl<'data, C: ElfClass> platform::ObjectFile<'data> for File<'data, C> {
 
             if version_count > 0 {
                 mem_sizes.increment(part_id::DYNSTR, base_size);
-                mem_sizes.increment(
-                    part_id::GNU_VERSION_R,
-                    size_of::<crate::elf::Verneed>() as u64
-                        + u64::from(version_count) * size_of::<crate::elf::Vernaux>() as u64,
-                );
+                mem_sizes.increment(part_id::GNU_VERSION_R, version_need_size(version_count));
 
                 state.verneed_info = Some(VerneedInfo {
                     defs,
@@ -5818,6 +5805,10 @@ fn verneed_names_by_index<'data, C: ElfClass>(
     Ok(version_names)
 }
 
+pub(crate) fn version_need_size(version_count: u16) -> u64 {
+    size_of::<Verneed>() as u64 + u64::from(version_count) * size_of::<Vernaux>() as u64
+}
+
 #[derive(Debug)]
 pub(crate) struct VerneedInfo<'data, C: ElfClass> {
     pub(crate) defs: VerdefIterator<'data, C>,
@@ -7047,8 +7038,7 @@ fn materialize_relocation_requirements<'data, C: ElfClass, A: Arch<Platform = El
                 .store(true, atomic::Ordering::Relaxed);
         }
     } else if rel_kind == RelocationKind::SymbolSize
-        && flags.is_interposable()
-        && (flags.is_dynamic() || symbol_db.output_kind.is_shared_object())
+        && needs_dynamic_symbol_size_relocation(flags, symbol_db.output_kind)
     {
         if !section_is_writable {
             bail!(
@@ -7121,9 +7111,8 @@ fn materialize_relocation_requirements<'data, C: ElfClass, A: Arch<Platform = El
         if section_is_writable {
             require_address_sized_relocation()?;
 
-            // Odd offsets can't be encoded as RELR address entries (LSB used as
-            // bitmap marker), so fall back to RELA for them.
-            if resources.symbol_db.args.is_relr_enabled() && classified.rel_offset.is_multiple_of(2)
+            if resources.symbol_db.args.is_relr_enabled()
+                && can_encode_relr_address(classified.rel_offset)
             {
                 relr_writer.encode(classified.rel_offset, |_, encoding| {
                     if matches!(encoding, RelrEntryEncoding::New) {
@@ -7228,17 +7217,55 @@ pub(crate) struct SymtabShndxEntry {
     pub(crate) _shndx: u32,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum GotRelocationKind {
+    None,
+    JumpSlot,
+    DynamicSymbol,
+    Ifunc,
+    Relative,
+}
+
+pub(crate) fn got_relocation_kind(flags: ValueFlags, output_kind: OutputKind) -> GotRelocationKind {
+    if flags.needs_canonical_plt() {
+        GotRelocationKind::JumpSlot
+    } else if flags.needs_dynamic_symbol_relocation() {
+        GotRelocationKind::DynamicSymbol
+    } else if flags.is_ifunc() {
+        GotRelocationKind::Ifunc
+    } else if flags.has_link_time_address() && output_kind.is_position_independent() {
+        GotRelocationKind::Relative
+    } else {
+        GotRelocationKind::None
+    }
+}
+
+pub(crate) fn needs_tls_module_relocation(flags: ValueFlags, output_kind: OutputKind) -> bool {
+    !output_kind.is_executable() || flags.is_dynamic()
+}
+
+pub(crate) fn needs_dynamic_symbol_size_relocation(
+    flags: ValueFlags,
+    output_kind: OutputKind,
+) -> bool {
+    flags.is_interposable() && (flags.is_dynamic() || output_kind.is_shared_object())
+}
+
+pub(crate) fn can_encode_relr_address(address: u64) -> bool {
+    // The low bit distinguishes bitmap entries from address entries.
+    address.is_multiple_of(2)
+}
+
 /// Returns true if this GOT entry should go to GOT_RELR (bitmap-packed)
 /// rather than GOT (flat RELR or RELA).
 pub(crate) fn is_got_relr_eligible(
     flags: ValueFlags,
-    has_dynamic_symbol: bool,
     args: &ElfArgs,
     output_kind: OutputKind,
 ) -> bool {
     args.is_relr_enabled()
         && !flags.is_ifunc()
-        && !has_dynamic_symbol
+        && !flags.needs_dynamic_symbol_relocation()
         && flags.has_link_time_address()
         && !flags.is_downgraded_to_local()
         && output_kind.is_position_independent()

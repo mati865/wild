@@ -805,10 +805,7 @@ impl<'layout, 'out, C: ElfClass> TableWriter<'layout, 'out, C> {
 
         // For TLS variables, we'll generally only have one of these, but we might have all 3
         // combinations.
-        if flags.needs_got_tls_offset()
-            || flags.needs_got_tls_module()
-            || flags.needs_got_tls_descriptor()
-        {
+        if flags.needs_tls_got() {
             if flags.needs_got_tls_offset() {
                 self.process_got_tls_offset::<A>(
                     res,
@@ -827,48 +824,48 @@ impl<'layout, 'out, C: ElfClass> TableWriter<'layout, 'out, C> {
             return Ok(());
         }
 
-        let has_dynamic_symbol =
-            res.flags.is_dynamic() || (flags.needs_export_dynamic() && res.flags.is_interposable());
-        let is_got_relr =
-            crate::elf::is_got_relr_eligible(res.flags, has_dynamic_symbol, args, self.output_kind);
+        let is_got_relr = crate::elf::is_got_relr_eligible(res.flags, args, self.output_kind);
         let got_entry = if is_got_relr {
             self.take_next_got_relr_entry()?
         } else {
             self.take_next_got_entry()?
         };
-        if res.flags.needs_canonical_plt() {
-            *got_entry = elf::Word::<C>::from_u64(0)?;
-            self.write_jump_slot_relocation::<A>(got_address, res.dynamic_symbol_index()?)?;
-        } else if has_dynamic_symbol {
-            *got_entry = elf::Word::<C>::from_u64(0)?;
-            debug_assert_bail!(
-                compute_allocations::<elf::Elf<C>>(res, self.output_kind, args)
-                    .get(part_id::RELA_DYN_GENERAL)
-                    > 0,
-                "Tried to write glob-dat with no allocation. {}",
-                res.flags
-            );
-            self.write_dynamic_symbol_relocation::<A>(
-                got_address,
-                0,
-                res.dynamic_symbol_index()?,
-                DynamicRelocationKind::GotEntry,
-            )?;
-        } else if res.flags.is_ifunc() {
-            *got_entry = elf::Word::<C>::from_u64(0)?;
-            self.write_ifunc_relocation::<A>(res)?;
-        } else {
-            let value = if is_got_relr {
-                // GOT_RELR entries are bitmap-packed by write_got_relr_bitmap — just store value.
-                res.raw_value
-            } else if res.flags.has_link_time_address()
-                && self.output_kind.is_position_independent()
-            {
-                self.write_relr_entry_flat::<A>(got_address, res.raw_value)?
-            } else {
-                res.raw_value
-            };
-            *got_entry = elf::Word::<C>::from_u64(value)?;
+        match elf::got_relocation_kind(flags, self.output_kind) {
+            elf::GotRelocationKind::JumpSlot => {
+                *got_entry = elf::Word::<C>::from_u64(0)?;
+                self.write_jump_slot_relocation::<A>(got_address, res.dynamic_symbol_index()?)?;
+            }
+            elf::GotRelocationKind::DynamicSymbol => {
+                *got_entry = elf::Word::<C>::from_u64(0)?;
+                debug_assert_bail!(
+                    compute_allocations::<elf::Elf<C>>(res, self.output_kind, args)
+                        .get(part_id::RELA_DYN_GENERAL)
+                        > 0,
+                    "Tried to write glob-dat with no allocation. {}",
+                    res.flags
+                );
+                self.write_dynamic_symbol_relocation::<A>(
+                    got_address,
+                    0,
+                    res.dynamic_symbol_index()?,
+                    DynamicRelocationKind::GotEntry,
+                )?;
+            }
+            elf::GotRelocationKind::Ifunc => {
+                *got_entry = elf::Word::<C>::from_u64(0)?;
+                self.write_ifunc_relocation::<A>(res)?;
+            }
+            elf::GotRelocationKind::Relative => {
+                let value = if is_got_relr {
+                    res.raw_value
+                } else {
+                    self.write_relr_entry_flat::<A>(got_address, res.raw_value)?
+                };
+                *got_entry = elf::Word::<C>::from_u64(value)?;
+            }
+            elf::GotRelocationKind::None => {
+                *got_entry = elf::Word::<C>::from_u64(res.raw_value)?;
+            }
         }
         if let Some(plt_address) = res.format_specific.plt_address {
             // `.TOC.` is the start of the GOT. The allocation check calls this without a layout;
@@ -916,9 +913,7 @@ impl<'layout, 'out, C: ElfClass> TableWriter<'layout, 'out, C> {
         got_address: u64,
     ) -> Result {
         let got_entry = self.take_next_got_entry()?;
-        if res.flags.is_dynamic()
-            || (res.flags.needs_export_dynamic() && res.flags.is_interposable())
-        {
+        if res.flags.needs_dynamic_symbol_relocation() {
             *got_entry = elf::Word::<C>::from_u64(0)?;
             return self.write_tpoff_relocation::<A>(got_address, res.dynamic_symbol_index()?, 0);
         }
@@ -961,9 +956,7 @@ impl<'layout, 'out, C: ElfClass> TableWriter<'layout, 'out, C> {
         got_address: u64,
     ) -> Result {
         let got_entry = self.take_next_got_entry()?;
-        if self.output_kind.is_executable() && !res.flags.is_dynamic() {
-            *got_entry = elf::Word::<C>::from_u64(elf::CURRENT_EXE_TLS_MOD)?;
-        } else {
+        if elf::needs_tls_module_relocation(res.flags, self.output_kind) {
             *got_entry = elf::Word::<C>::from_u64(0)?;
             let dynamic_symbol_index = res
                 .dynamic_symbol_index
@@ -977,6 +970,8 @@ impl<'layout, 'out, C: ElfClass> TableWriter<'layout, 'out, C> {
                 res.flags
             );
             self.write_dtpmod_relocation::<A>(got_address, dynamic_symbol_index)?;
+        } else {
+            *got_entry = elf::Word::<C>::from_u64(elf::CURRENT_EXE_TLS_MOD)?;
         }
         let offset_entry = self.take_next_got_entry()?;
         if let Some(dynamic_symbol_index) = res.dynamic_symbol_index
@@ -1286,7 +1281,7 @@ impl<'layout, 'out, C: ElfClass> TableWriter<'layout, 'out, C> {
         relative_address: u64,
     ) -> Result<u64> {
         if let Some(relr_writer) = &mut self.relr_dyn
-            && place.is_multiple_of(2)
+            && elf::can_encode_relr_address(place)
         {
             let entry = relr_writer
                 .split_off_first_mut()
@@ -1319,10 +1314,8 @@ impl<'layout, 'out, C: ElfClass> TableWriter<'layout, 'out, C> {
             self.output_kind.is_position_independent(),
             "write_address_relocation called when output is not position-independent"
         );
-        // Odd offsets can't be encoded as RELR address entries (LSB used as bitmap
-        // marker), so fall back to RELA for them.
         if let Some(relr_writer) = &mut self.relr_dyn
-            && place.is_multiple_of(2)
+            && elf::can_encode_relr_address(place)
         {
             self.relr_writer.encode(place, |encoded, encoding| {
                 match encoding {
@@ -3939,9 +3932,10 @@ fn apply_relocation<
         )?,
         RelocationKind::SymbolSize => {
             if section_info.section_flags.is_alloc()
-                && resolution.flags.is_interposable()
-                && (resolution.flags.is_dynamic()
-                    || layout.symbol_db.output_kind.is_shared_object())
+                && elf::needs_dynamic_symbol_size_relocation(
+                    resolution.flags,
+                    layout.symbol_db.output_kind,
+                )
             {
                 table_writer.write_rela_dyn_general(
                     place,
@@ -7121,8 +7115,7 @@ fn write_dynamic_file<'data, C: ElfClass, A: Arch<Platform = elf::Elf<C>>>(
         let next_verneed_offset = if object.format_specific.is_last_verneed {
             0
         } else {
-            (size_of::<Verneed>() + size_of::<Vernaux>() * verneed_info.version_count as usize)
-                as u32
+            elf::version_need_size(verneed_info.version_count) as u32
         };
 
         ver_need.vn_version.set(e, 1);
