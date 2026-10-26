@@ -24,6 +24,7 @@ use crate::symbol_db::Visibility;
 use object::LittleEndian;
 use object::SymbolIndex;
 use object::coff::CoffHeader;
+use object::coff::Symbol;
 use std::borrow::Cow;
 use std::fmt::Display;
 use std::fmt::Formatter;
@@ -767,7 +768,13 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
     }
 
     fn symbol_name(&self, symbol: &SymtabEntry) -> Result<&'data [u8]> {
-        todo!()
+        // FIXME: find sane solution
+        for (_, sym) in self.symbols.iter() {
+            if std::ptr::eq(symbol, sym) {
+                return Ok(sym.name(self.symbols.strings())?);
+            }
+        }
+        bail!("TODO")
     }
 
     fn symbol_section(
@@ -822,7 +829,6 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
         version_names: &VersionNames,
     ) -> Result<RawSymbolName<'data>> {
         let name_bytes = self.symbol_name(symbol)?;
-
         Ok(RawSymbolName { name: name_bytes })
     }
 
