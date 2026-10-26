@@ -748,7 +748,7 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
     }
 
     fn section_size(&self, section: &SectionHeader) -> Result<u64> {
-        todo!()
+        Ok(section.size_of_raw_data.get(LittleEndian).into())
     }
 
     fn section_alignment(&self, section: &SectionHeader) -> Result<u64> {
@@ -929,8 +929,8 @@ impl platform::Symbol for SymtabEntry {
     }
 
     fn size(&self) -> u64 {
-        // TODO
-        0
+        // TODO: IMAGE_SIZEOF_SYMBOL vs IMAGE_SIZEOF_SYMBOL_EX
+        object::pe::IMAGE_SIZEOF_SYMBOL as u64
     }
 
     fn has_name(&self) -> bool {
@@ -1237,19 +1237,19 @@ impl<'data> Display for RawSymbolName<'data> {
 
 impl<'data> platform::RawSymbolName<'data> for RawSymbolName<'data> {
     fn parse(bytes: &'data [u8]) -> Self {
-        todo!()
+        Self { name: bytes }
     }
 
     fn name(&self) -> &'data [u8] {
-        todo!()
+        self.name
     }
 
     fn version_name(&self) -> Option<&'data [u8]> {
-        todo!()
+        None
     }
 
     fn is_default(&self) -> bool {
-        todo!()
+        true
     }
 }
 
