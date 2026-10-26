@@ -75,6 +75,8 @@ pub(crate) mod verification;
 mod version;
 pub use version::DEFAULT_LINKER_NAME;
 pub use version::WildVersionInfo;
+mod coff;
+mod coff_x86_64;
 pub(crate) mod version_script;
 pub(crate) mod wasm;
 pub(crate) mod wasm_wasm32;
@@ -267,7 +269,7 @@ impl<F: FileSystem> Linker<F> {
         }
 
         match args {
-            Args::Coff(_) => crate::bail!("PE/COFF (Windows) support is not yet implemented"),
+            Args::Coff(coff_args) => crate::coff::link_for_arch(self, coff_args),
             Args::Elf(elf_args) => crate::elf::link_for_arch(self, elf_args),
             Args::MachO(macho_args) => crate::macho::link_for_arch(self, macho_args),
             Args::Wasm(wasm_args) => crate::wasm::link_for_arch(self, wasm_args),
