@@ -13,6 +13,7 @@ use crate::output_section_id::OutputSectionId;
 use crate::output_section_id::SectionIdentity;
 use crate::output_section_id::SectionName;
 use crate::output_section_part_map::OutputSectionPartMap;
+use crate::part_id::PartId;
 use crate::platform;
 use crate::platform::Arch;
 use crate::platform::Args;
@@ -26,8 +27,6 @@ use object::SymbolIndex;
 use object::coff::CoffHeader;
 use object::coff::Symbol;
 use std::borrow::Cow;
-use std::fmt::Display;
-use std::fmt::Formatter;
 use std::marker::PhantomData;
 
 pub(crate) fn link_for_arch<'data, F: FileSystem>(
@@ -42,7 +41,6 @@ pub(crate) fn link_for_arch<'data, F: FileSystem>(
     }
 }
 
-pub(crate) type SymtabEntry = object::pe::ImageSymbol;
 pub(crate) type SectionHeader = object::pe::ImageSectionHeader;
 pub(crate) type DynamicEntry = ();
 pub(crate) type RelocationSections = ();
@@ -52,41 +50,21 @@ pub(crate) type VersionNames = ();
 #[derive(Debug, Copy, Clone, Default)]
 pub(crate) struct Coff;
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SymtabEntry {
+    pub(crate) raw: object::pe::ImageSymbol,
+    pub(crate) index: u32,
+    pub(crate) is_aux: bool,
+}
+
 #[repr(u32)]
 #[derive(Clone, Copy)]
 enum SinglePartSectionId {
-    ProgramHeaders = crate::output_section_id::NUM_COMMON_SINGLE_PART_SECTIONS,
-    SectionHeaders,
-    Shstrtab,
+    SectionHeaders = crate::output_section_id::NUM_COMMON_SINGLE_PART_SECTIONS,
     Strtab,
-    Got,
-    GotRelr,
-    PltGot,
-    RelaPlt,
-    EhFrame,
-    EhFrameHdr,
-    Sframe,
-    Dynamic,
-    SysvHash,
-    GnuHash,
-    Dynsym,
-    Dynstr,
-    Interp,
-    GnuVersion,
-    GnuVersionD,
-    GnuVersionR,
-    NoteGnuProperty,
-    NoteGnuBuildId,
     SymtabLocal,
     SymtabGlobal,
     RelaDynRelative,
-    RelaDynGeneral,
-    RiscvAttributes,
-    RelroPadding,
-    RelrDyn,
-    SymtabShndxLocal,
-    SymtabShndxGlobal,
-    GdbIndex,
 
     // Must be last.
     Count,
@@ -98,19 +76,11 @@ enum RegularSectionId {
     Rodata,
     InitArray,
     FiniArray,
-    PreinitArray,
     Text,
-    Init,
-    Fini,
-    Data,
-    Tdata,
-    Tbss,
-    Bss,
-    Comment,
-    GccExceptTable,
-    NoteAbiTag,
-    DataRelRo,
-    PartialLinkingSingletons,
+    Pdata,
+    Tls,
+    Rsrc,
+    Edata,
 
     // Must be last.
     Count,
@@ -122,7 +92,8 @@ pub(crate) struct File<'data> {
     #[debug(skip)]
     pub(crate) data: &'data [u8],
     pub(crate) sections: object::coff::SectionTable<'data>,
-    pub(crate) symbols: object::read::coff::SymbolTable<'data>,
+    pub(crate) symbol_table: object::read::coff::SymbolTable<'data>,
+    pub(crate) symbols: Vec<SymtabEntry>,
 }
 
 impl<'data> File<'data> {
@@ -135,28 +106,103 @@ impl<'data> File<'data> {
         };
 
         let sections = header.sections(data, offset)?;
-        let symbols = header.symbols(data)?;
+        let symbol_table = header.symbols(data)?;
+        let num_symbols = header.number_of_symbols() as usize;
+        let mut symbols = Vec::with_capacity(num_symbols);
+        let mut aux_remaining = 0;
+        for i in 0..num_symbols {
+            let raw = *symbol_table.symbol(SymbolIndex(i))?;
+            if aux_remaining > 0 {
+                aux_remaining -= 1;
+                symbols.push(SymtabEntry {
+                    raw,
+                    index: i as u32,
+                    is_aux: true,
+                });
+            } else {
+                aux_remaining = raw.number_of_aux_symbols;
+                symbols.push(SymtabEntry {
+                    raw,
+                    index: i as u32,
+                    is_aux: false,
+                });
+            }
+        }
 
         Ok(Self {
             arch,
             data,
             sections,
+            symbol_table,
             symbols,
         })
     }
 }
 
-const ELF_NUM_SINGLE_PART_SECTIONS: u32 = SinglePartSectionId::Count as u32;
-const ELF_NUM_BUILT_IN_REGULAR_SECTIONS: usize = RegularSectionId::Count as usize;
-const ELF_NUM_BUILT_IN_SECTIONS: usize =
-    ELF_NUM_SINGLE_PART_SECTIONS as usize + ELF_NUM_BUILT_IN_REGULAR_SECTIONS;
+const PE_NUM_SINGLE_PART_SECTIONS: u32 = SinglePartSectionId::Count as u32;
+const PE_NUM_BUILT_IN_REGULAR_SECTIONS: usize = RegularSectionId::Count as usize;
+const PE_NUM_BUILT_IN_SECTIONS: usize =
+    PE_NUM_SINGLE_PART_SECTIONS as usize + PE_NUM_BUILT_IN_REGULAR_SECTIONS;
+
+pub(crate) mod part_id {
+    use super::SinglePartSectionId;
+    use crate::part_id::PartId;
+
+    pub(crate) const SECTION_HEADERS: PartId = SinglePartSectionId::SectionHeaders.part_id();
+    pub(crate) const STRTAB: PartId = SinglePartSectionId::Strtab.part_id();
+    pub(crate) const SYMTAB_LOCAL: PartId = SinglePartSectionId::SymtabLocal.part_id();
+    pub(crate) const SYMTAB_GLOBAL: PartId = SinglePartSectionId::SymtabGlobal.part_id();
+    pub(crate) const RELA_DYN_RELATIVE: PartId = SinglePartSectionId::RelaDynRelative.part_id();
+}
+
+pub(crate) mod output_section_id {
+    use super::RegularSectionId;
+    use super::SinglePartSectionId;
+    use crate::output_section_id::OutputSectionId;
+
+    pub(crate) const SECTION_HEADERS: OutputSectionId =
+        SinglePartSectionId::SectionHeaders.output_section_id();
+    pub(crate) const STRTAB: OutputSectionId = SinglePartSectionId::Strtab.output_section_id();
+    pub(crate) const SYMTAB_LOCAL: OutputSectionId =
+        SinglePartSectionId::SymtabLocal.output_section_id();
+    pub(crate) const SYMTAB_GLOBAL: OutputSectionId =
+        SinglePartSectionId::SymtabGlobal.output_section_id();
+    pub(crate) const RELA_DYN_RELATIVE: OutputSectionId =
+        SinglePartSectionId::RelaDynRelative.output_section_id();
+
+    pub(crate) const RODATA: OutputSectionId = RegularSectionId::Rodata.output_section_id();
+    pub(crate) const INIT_ARRAY: OutputSectionId = RegularSectionId::InitArray.output_section_id();
+    pub(crate) const FINI_ARRAY: OutputSectionId = RegularSectionId::FiniArray.output_section_id();
+    pub(crate) const TEXT: OutputSectionId = RegularSectionId::Text.output_section_id();
+    pub(crate) const PDATA: OutputSectionId = RegularSectionId::Pdata.output_section_id();
+    pub(crate) const TLS: OutputSectionId = RegularSectionId::Tls.output_section_id();
+    pub(crate) const RSRC: OutputSectionId = RegularSectionId::Rsrc.output_section_id();
+    pub(crate) const EDATA: OutputSectionId = RegularSectionId::Edata.output_section_id();
+}
 
 impl Platform for Coff {
-    const NUM_SINGLE_PART_SECTIONS: u32 = SinglePartSectionId::Count as u32;
-    const NUM_BUILT_IN_REGULAR_SECTIONS: usize = 0;
+    const NUM_SINGLE_PART_SECTIONS: u32 = PE_NUM_SINGLE_PART_SECTIONS;
+    const NUM_BUILT_IN_REGULAR_SECTIONS: usize = PE_NUM_BUILT_IN_REGULAR_SECTIONS;
 
-    const VERIFY_IGNORE_SECTION_IDS: &'static [OutputSectionId] =
-        &[crate::output_section_id::FILE_HEADER];
+    const TEXT_SECTION_ID: Option<OutputSectionId> = Some(output_section_id::TEXT);
+    // const DATA_SECTION_ID: Option<OutputSectionId> = Some(output_section_id::DATA);
+    // const BSS_SECTION_ID: Option<OutputSectionId> = Some(output_section_id::BSS);
+    const RODATA_SECTION_ID: Option<OutputSectionId> = Some(output_section_id::RODATA);
+    // const TDATA_SECTION_ID: Option<OutputSectionId> = Some(output_section_id::TDATA);
+    // const TBSS_SECTION_ID: Option<OutputSectionId> = Some(output_section_id::TBSS);
+    const STRTAB_SECTION_ID: Option<OutputSectionId> = Some(output_section_id::STRTAB);
+    const SYMTAB_GLOBAL_SECTION_ID: Option<OutputSectionId> =
+        Some(output_section_id::SYMTAB_GLOBAL);
+    const SYMTAB_LOCAL_SECTION_ID: Option<OutputSectionId> = Some(output_section_id::SYMTAB_LOCAL);
+
+    const CUSTOM_PHDR_EXCLUDED_SECTION_IDS: &'static [OutputSectionId] =
+        &[output_section_id::SECTION_HEADERS];
+
+    const VERIFY_IGNORE_SECTION_IDS: &'static [OutputSectionId] = &[
+        output_section_id::RELA_DYN_RELATIVE,
+        crate::output_section_id::FILE_HEADER,
+        output_section_id::SECTION_HEADERS,
+    ];
 
     type File<'data> = File<'data>;
     type FileFlags = u32;
@@ -401,7 +447,7 @@ impl Platform for Coff {
         symbol_id_range: crate::symbol_db::SymbolIdRange,
         file_id: crate::input_data::FileId,
     ) -> Self::ResolvedObjectExt<'data> {
-        todo!()
+        ()
     }
 
     fn new_object_layout_state_ext<'data>(
@@ -716,7 +762,11 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
     }
 
     fn section_name(&self, index: object::SectionIndex) -> Result<&'data [u8]> {
-        todo!()
+        // TODO: Check if correct later
+        Ok(self
+            .sections
+            .section(index)?
+            .name(self.symbol_table.strings())?)
     }
 
     fn section_display_name(&self, index: object::SectionIndex) -> Cow<'data, str> {
@@ -752,7 +802,7 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
     }
 
     fn section_alignment(&self, section: &SectionHeader) -> Result<u64> {
-        todo!()
+        Ok(section.coff_alignment())
     }
 
     fn relocations(
@@ -764,17 +814,17 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
     }
 
     fn symbol(&self, index: SymbolIndex) -> Result<&SymtabEntry> {
-        Ok(self.symbols.symbol(index)?)
+        self.symbols
+            .get(index.0)
+            .ok_or_else(|| crate::error!("Invalid symbol index {index:?}"))
     }
 
     fn symbol_name(&self, symbol: &SymtabEntry) -> Result<&'data [u8]> {
-        // FIXME: find sane solution
-        for (_, sym) in self.symbols.iter() {
-            if std::ptr::eq(symbol, sym) {
-                return Ok(sym.name(self.symbols.strings())?);
-            }
-        }
-        bail!("TODO")
+        debug_assert!(!symbol.is_aux);
+        let sym = self
+            .symbol_table
+            .symbol(SymbolIndex(symbol.index as usize))?;
+        Ok(sym.name(self.symbol_table.strings())?)
     }
 
     fn symbol_section(
@@ -782,7 +832,15 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
         symbol: &SymtabEntry,
         index: SymbolIndex,
     ) -> Result<Option<object::SectionIndex>> {
-        todo!()
+        if symbol.is_aux {
+            return Ok(None);
+        }
+        let sec = symbol.raw.section_number.get(LittleEndian) as i16;
+        if sec > 0 {
+            Ok(Some(object::SectionIndex(sec as usize - 1)))
+        } else {
+            Ok(None)
+        }
     }
 
     fn dynamic_tags(&self) -> Result<&'data [DynamicEntry]> {
@@ -790,7 +848,8 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
     }
 
     fn parse_relocations(&self) -> Result<RelocationSections> {
-        todo!()
+        // TODO
+        Ok(())
     }
 
     fn num_symbols(&self) -> usize {
@@ -833,7 +892,7 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
     }
 
     fn symbols_iter(&self) -> impl Iterator<Item = &SymtabEntry> {
-        self.symbols.iter().map(|(_, sym)| sym)
+        self.symbols.iter()
     }
 
     fn verneed_table(&self) -> Result<VerneedTable<'data>> {
@@ -904,11 +963,14 @@ impl platform::Symbol for SymtabEntry {
     }
 
     fn is_undefined(&self) -> bool {
-        self.section_number.get(LittleEndian) == object::pe::IMAGE_SYM_UNDEFINED.0 as u16
+        !self.is_aux
+            && self.raw.section_number.get(LittleEndian) == object::pe::IMAGE_SYM_UNDEFINED.0 as u16
     }
 
     fn is_local(&self) -> bool {
-        false
+        self.is_aux
+            // Section name
+            || self.raw.storage_class != object::pe::IMAGE_SYM_CLASS_STATIC && self.value() != 0
     }
 
     fn visibility(&self) -> Visibility {
@@ -916,16 +978,16 @@ impl platform::Symbol for SymtabEntry {
     }
 
     fn is_absolute(&self) -> bool {
-        self.section_number.get(LittleEndian) == object::pe::IMAGE_SYM_ABSOLUTE.0 as u16
+        !self.is_aux
+            && self.raw.section_number.get(LittleEndian) == object::pe::IMAGE_SYM_ABSOLUTE.0 as u16
     }
 
     fn is_weak(&self) -> bool {
-        // TODO
-        false
+        !self.is_aux && self.raw.storage_class == object::pe::IMAGE_SYM_CLASS_WEAK_EXTERNAL
     }
 
     fn value(&self) -> u64 {
-        self.value.get(LittleEndian) as u64
+        u64::from(self.raw.value.get(LittleEndian))
     }
 
     fn size(&self) -> u64 {
@@ -934,8 +996,7 @@ impl platform::Symbol for SymtabEntry {
     }
 
     fn has_name(&self) -> bool {
-        // TODO
-        true
+        !self.is_aux
     }
 
     fn is_default_strippable(&self, name: &[u8]) -> bool {
@@ -960,8 +1021,8 @@ impl platform::Symbol for SymtabEntry {
     }
 
     fn is_func(&self) -> bool {
-        // TODO
-        false
+        !self.is_aux
+            && self.raw.typ.get(LittleEndian) == object::pe::IMAGE_SYM_DTYPE_FUNCTION.into()
     }
 
     fn is_ifunc(&self) -> bool {
@@ -1168,8 +1229,8 @@ impl platform::ProgramSegmentDef for ProgramSegmentDef {
     }
 }
 
-impl Display for ProgramSegmentDef {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+impl std::fmt::Display for ProgramSegmentDef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         todo!()
     }
 }
@@ -1229,9 +1290,10 @@ pub(crate) struct RawSymbolName<'data> {
     name: &'data [u8],
 }
 
-impl<'data> Display for RawSymbolName<'data> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        todo!()
+impl std::fmt::Display for RawSymbolName<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", dbg!(String::from_utf8_lossy(self.name)))?;
+        Ok(())
     }
 }
 
@@ -1259,4 +1321,20 @@ struct SectionRule<'data> {
 
 struct ObjectLayoutStateExt<'data> {
     _phantom: PhantomData<&'data ()>,
+}
+
+impl SinglePartSectionId {
+    const fn part_id(self) -> PartId {
+        PartId::from_u32(self as u32)
+    }
+
+    const fn output_section_id(self) -> OutputSectionId {
+        OutputSectionId::from_u32(self as u32)
+    }
+}
+
+impl RegularSectionId {
+    const fn output_section_id(self) -> OutputSectionId {
+        OutputSectionId::from_u32(PE_NUM_SINGLE_PART_SECTIONS).offset(self as usize)
+    }
 }

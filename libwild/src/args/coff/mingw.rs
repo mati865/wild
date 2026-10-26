@@ -7,7 +7,6 @@ use crate::args::InputSpec;
 use crate::args::coff::CoffArgs;
 use crate::platform::Args;
 use itertools::Itertools;
-use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::Arc;
 use strum::EnumMessage;
@@ -167,15 +166,6 @@ pub(super) fn setup_argument_parser() -> ArgumentParser<CoffArgs> {
             Ok(())
         });
 
-    parser
-        .declare_with_param()
-        .long("thread-count")
-        .help("Set the number of threads to use")
-        .execute(|args, _modifier_stack, value| {
-            args.common_mut().num_threads = Some(NonZeroUsize::from_str_radix(value, 10)?);
-            Ok(())
-        });
-
     // TODO: port MSVC leftovers
     // parser
     //     .declare_with_param()
@@ -264,6 +254,8 @@ pub(super) fn setup_argument_parser() -> ArgumentParser<CoffArgs> {
     //         }
     //         Ok(())
     //     });
+
+    crate::args::declare_common_args(&mut parser);
 
     add_silently_ignored_flags(&mut parser);
 
