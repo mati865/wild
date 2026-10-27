@@ -2148,7 +2148,10 @@ impl<C: ElfClass> platform::Platform for Elf<C> {
 
         if flags.needs_got_tls_offset() {
             mem_sizes.increment(part_id::GOT, C::GOT_ENTRY_SIZE);
-            if flags.is_interposable() || output_kind.is_shared_object() {
+            if !matches!(
+                tls_offset_relocation_kind(flags, output_kind),
+                TlsOffsetRelocationKind::None
+            ) {
                 mem_sizes.increment(part_id::RELA_DYN_GENERAL, C::RELA_ENTRY_SIZE);
             }
         }
@@ -7274,6 +7277,25 @@ pub(crate) fn got_relocation_kind(flags: ValueFlags, output_kind: OutputKind) ->
         GotRelocationKind::Relative
     } else {
         GotRelocationKind::None
+    }
+}
+
+pub(crate) enum TlsOffsetRelocationKind {
+    None,
+    Symbol,
+    Local,
+}
+
+pub(crate) fn tls_offset_relocation_kind(
+    flags: ValueFlags,
+    output_kind: OutputKind,
+) -> TlsOffsetRelocationKind {
+    if flags.needs_dynamic_symbol_relocation() {
+        TlsOffsetRelocationKind::Symbol
+    } else if output_kind.is_shared_object() {
+        TlsOffsetRelocationKind::Local
+    } else {
+        TlsOffsetRelocationKind::None
     }
 }
 

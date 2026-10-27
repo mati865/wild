@@ -913,38 +913,33 @@ impl<'layout, 'out, C: ElfClass> TableWriter<'layout, 'out, C> {
         got_address: u64,
     ) -> Result {
         let got_entry = self.take_next_got_entry()?;
-        if res.flags.needs_dynamic_symbol_relocation() {
+        let kind = elf::tls_offset_relocation_kind(res.flags, self.output_kind);
+        if matches!(kind, elf::TlsOffsetRelocationKind::Symbol) {
             *got_entry = elf::Word::<C>::from_u64(0)?;
             return self.write_tpoff_relocation::<A>(got_address, res.dynamic_symbol_index()?, 0);
         }
-        let address = res.raw_value;
-        if address == 0 {
-            // Resolution is undefined.
-            *got_entry = elf::Word::<C>::from_u64(0)?;
-            return Ok(());
-        }
-        // TLS_MODULE_BASE points at the end of the .tbss in some cases, thus relax the
-        // verification.
-        if !(self.tls.start..=self.tls.end).contains(&address) {
-            bail!(
-                "GotTlsOffset resolves to address not in TLS segment 0x{:x}",
-                address
-            );
-        }
-        if self.output_kind.is_executable() {
-            // Convert the address to an offset relative to the TCB.
-
-            *got_entry =
-                elf::Word::<C>::from_u64(address.wrapping_sub(A::tp_offset_start(layout)))?;
+        let offset = if res.flags.is_undefined_weak() {
+            0
         } else {
-            debug_assert_bail!(
-                compute_allocations::<elf::Elf<C>>(res, self.output_kind, layout.args())
-                    .get(part_id::RELA_DYN_GENERAL)
-                    > 0,
-                "Tried to write tpoff with no allocation. {}",
-                res.flags
-            );
-            self.write_tpoff_relocation::<A>(got_address, 0, address.sub(self.tls.start) as i64)?;
+            let address = res.raw_value;
+            // _TLS_MODULE_BASE_ can point to the end of .tbss, so include the segment end.
+            if !(self.tls.start..=self.tls.end).contains(&address) {
+                bail!(
+                    "GotTlsOffset resolves to address not in TLS segment 0x{:x}",
+                    address
+                );
+            }
+            let base = match kind {
+                elf::TlsOffsetRelocationKind::None => A::tp_offset_start(layout),
+                elf::TlsOffsetRelocationKind::Local => self.tls.start,
+                elf::TlsOffsetRelocationKind::Symbol => unreachable!(),
+            };
+            address.wrapping_sub(base)
+        };
+        if matches!(kind, elf::TlsOffsetRelocationKind::Local) {
+            self.write_tpoff_relocation::<A>(got_address, 0, offset as i64)?;
+        } else {
+            *got_entry = elf::Word::<C>::from_u64(offset)?;
         }
         Ok(())
     }
