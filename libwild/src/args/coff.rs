@@ -104,7 +104,8 @@ impl platform::Args for CoffArgs {
     }
 
     fn should_strip_debug(&self) -> bool {
-        todo!()
+        // TODO
+        true
     }
 
     fn should_strip_all(&self) -> bool {
