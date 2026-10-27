@@ -91,7 +91,6 @@ tests = [
   "arch-x86_64-z-dynamic-undefined-weak.sh",
   "arch-x86_64-z-rewrite-endbr.sh",
   "arch-x86_64-z-rewrite-endbr2.sh",
-  "arch-x86_64-z-shstk.sh",
   "arch-x86_64-z-text.sh",
   "arch-x86_64-emit-relocs-relax.sh",
   "arch-x86_64-icf-personality.sh",

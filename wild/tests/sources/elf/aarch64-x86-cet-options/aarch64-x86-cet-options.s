@@ -4,9 +4,10 @@
 //#Mode:static
 //#RunEnabled:false
 //#ReferenceLinkers:bfd
-//#LinkArgs:-z ibt -z ibtplt -z force-ibt -z cet-report=warning
+//#LinkArgs:-z ibt -z ibtplt -z shstk -z force-ibt -z cet-report=warning
 //#ExpectWarning:-z ibt ignored
 //#ExpectWarning:-z ibtplt ignored
+//#ExpectWarning:-z shstk ignored
 //#ExpectWarning:-z force-ibt ignored
 //#ExpectWarning:-z cet-report.* ignored
 //#NoSection:.note.gnu.property

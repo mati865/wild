@@ -136,6 +136,8 @@ pub struct ElfArgs {
     pub(crate) z_ibt: bool,
     /// -z ibtplt: accepted on x86-64, where Wild's PLT entries already start with `endbr64`.
     pub(crate) z_ibtplt: bool,
+    /// -z shstk: mark the output as compatible with Intel Shadow Stack.
+    pub(crate) z_shstk: bool,
     pub(crate) force_bti: bool,
     pub(crate) cet_report: CetReport,
     pub(crate) z_stack_size: Option<NonZeroU64>,
@@ -423,6 +425,7 @@ impl Default for ElfArgs {
             force_ibt: false,
             z_ibt: false,
             z_ibtplt: false,
+            z_shstk: false,
             force_bti: false,
             cet_report: CetReport::None,
             z_pack_relative_relocs: false,
@@ -933,6 +936,14 @@ fn setup_argument_parser() -> ArgumentParser<ElfArgs> {
             "Mark output as compatible with Intel Indirect Branch Tracking",
             |args, _| {
                 args.z_ibt = true;
+                Ok(())
+            },
+        )
+        .sub_option(
+            "shstk",
+            "Mark output as compatible with Intel Shadow Stack",
+            |args, _| {
+                args.z_shstk = true;
                 Ok(())
             },
         )

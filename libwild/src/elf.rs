@@ -4751,9 +4751,17 @@ impl LayoutExt {
         if !is_x86_64 {
             warn_ignored_x86_cet_options(args);
         }
-        let add_ibt = (args.force_ibt || args.z_ibt) && is_x86_64;
+        let mut forced_x86_features = 0;
+        if is_x86_64 {
+            if args.force_ibt || args.z_ibt {
+                forced_x86_features |= GNU_PROPERTY_X86_FEATURE_1_IBT;
+            }
+            if args.z_shstk {
+                forced_x86_features |= GNU_PROPERTY_X86_FEATURE_1_SHSTK;
+            }
+        }
         let mut gnu_property_notes =
-            merge_gnu_property_notes::<C, A>(states.clone(), args.z_isa, add_ibt);
+            merge_gnu_property_notes::<C, A>(states.clone(), args.z_isa, forced_x86_features);
 
         merge_aarch64_build_attributes(states.clone(), &mut gnu_property_notes)?;
 
@@ -4843,6 +4851,7 @@ fn warn_ignored_x86_cet_options(args: &ElfArgs) {
     for (given, option) in [
         (args.z_ibt, "-z ibt"),
         (args.z_ibtplt, "-z ibtplt"),
+        (args.z_shstk, "-z shstk"),
         (args.force_ibt, "-z force-ibt"),
         (
             args.cet_report != crate::args::elf::CetReport::None,
@@ -4879,9 +4888,10 @@ fn check_cet_properties(filename: &str, props: &[GnuProperty], args: &ElfArgs) -
                 "GNU_PROPERTY_X86_FEATURE_1_SHSTK",
             ),
         ] {
-            // `-z ibt` marks the output as IBT-compatible anyway, so like bfd, don't report
-            // inputs that lack the IBT property.
-            let suppressed = bit == GNU_PROPERTY_X86_FEATURE_1_IBT && args.z_ibt;
+            // `-z ibt` and `-z shstk` mark the output as compatible anyway, so like bfd, don't
+            // report inputs that lack the corresponding property.
+            let suppressed = (bit == GNU_PROPERTY_X86_FEATURE_1_IBT && args.z_ibt)
+                || (bit == GNU_PROPERTY_X86_FEATURE_1_SHSTK && args.z_shstk);
             if feature_bits & bit == 0 && !suppressed {
                 let msg = format!("{filename}: -z cet-report: file does not have {name} property");
                 match args.cet_report {
@@ -4898,7 +4908,7 @@ fn check_cet_properties(filename: &str, props: &[GnuProperty], args: &ElfArgs) -
 fn merge_gnu_property_notes<'states, 'data: 'states, C: ElfClass, A: Arch>(
     states: impl Iterator<Item = &'states ObjectLayoutStateExt<'data, C>>,
     isa_needed: Option<NonZeroU32>,
-    add_ibt: bool,
+    forced_x86_features: u32,
 ) -> Vec<GnuProperty> {
     timing_phase!("Merge GNU property notes");
 
@@ -4975,20 +4985,20 @@ fn merge_gnu_property_notes<'states, 'data: 'states, C: ElfClass, A: Arch>(
         })
         .collect_vec();
 
-    // Add the IBT property for -z ibt or -z force-ibt. This is done after merging so that it
-    // overrides the AND logic, matching bfd and lld.
-    if add_ibt {
+    // Add the x86 features forced on by -z ibt, -z force-ibt or -z shstk. This is done after
+    // merging so that it overrides the AND logic, matching bfd and lld.
+    if forced_x86_features != 0 {
         if let Some(prop) = output
             .iter_mut()
             .find(|p| p.ptype == GNU_PROPERTY_X86_FEATURE_1_AND)
         {
             if let Some(data) = prop.data.as_u32_mut() {
-                *data |= GNU_PROPERTY_X86_FEATURE_1_IBT;
+                *data |= forced_x86_features;
             }
         } else {
             output.push(GnuProperty {
                 ptype: GNU_PROPERTY_X86_FEATURE_1_AND,
-                data: GnuPropertyData::U32(GNU_PROPERTY_X86_FEATURE_1_IBT),
+                data: GnuPropertyData::U32(forced_x86_features),
             });
             output.sort_by_key(|p| p.ptype);
         }
