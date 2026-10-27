@@ -822,6 +822,7 @@ pub(crate) trait Platform:
         symbols: &mut crate::parsing::InternalSymbolsBuilder<Self>,
         output_kind: OutputKind,
         args: &Self::Args,
+        should_emit_linker_symbols: bool,
     );
 
     fn built_in_section_infos<'data>()

@@ -27,3 +27,6 @@ SECTIONS {
 ASSERT(__sections_start == 0, "__sections_start != 0");
 ASSERT(__sections_mid == __text_end, "__sections_mid != __text_end");
 ASSERT(__sections_end == __data_end, "__sections_end != __data_end");
+
+ASSERT(DEFINED(_GLOBAL_OFFSET_TABLE_) ? 1 : DEFINED(.TOC.), "_GLOBAL_OFFSET_TABLE_/.TOC. not defined");
+ASSERT(DEFINED(_DYNAMIC), "_DYNAMIC not defined");

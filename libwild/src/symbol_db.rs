@@ -395,7 +395,7 @@ impl<'data, P: Platform> SymbolDb<'data, P> {
 
         let parsed_objects = loaded.objects.into_iter().try_collect()?;
 
-        let processed_linker_scripts = parsing::process_linker_scripts(
+        let (processed_linker_scripts, has_section_table) = parsing::process_linker_scripts(
             &loaded.linker_scripts,
             output_sections,
             layout_rules_builder,
@@ -411,6 +411,7 @@ impl<'data, P: Platform> SymbolDb<'data, P> {
                 .push(Group::Prelude(crate::parsing::Prelude::new(
                     self.args,
                     self.output_kind,
+                    !has_section_table,
                 )?));
         }
 

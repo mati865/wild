@@ -225,6 +225,7 @@ impl<'data> LayoutRulesBuilder<'data> {
         input: &InputLinkerScript<'data>,
         output_sections: &mut OutputSections<'data, P>,
         args: &P::Args,
+        has_section_table: &mut bool,
     ) -> Result<ProcessedLinkerScript<'data, P>> {
         let mut symbol_defs = Vec::new();
         let mut memory_regions = Vec::new();
@@ -262,6 +263,7 @@ impl<'data> LayoutRulesBuilder<'data> {
                 });
                 symbol_defs.push(crate::parsing::InternalSymDefInfo::new(placement, b""));
             } else if let linker_script::Command::Sections(sections) = cmd {
+                *has_section_table = true;
                 let mut section_start_lc_idx = last_lc_idx;
                 let mut prev_phdrs = Vec::new();
                 for sec_cmd in &sections.commands {

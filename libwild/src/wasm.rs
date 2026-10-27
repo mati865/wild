@@ -7671,6 +7671,7 @@ impl platform::Platform for Wasm {
         symbols: &mut crate::parsing::InternalSymbolsBuilder<Self>,
         _output_kind: crate::output_kind::OutputKind,
         args: &Self::Args,
+        _should_emit_linker_symbols: bool,
     ) {
         // Reserve SymbolId 0 as the linker’s undefined sentinel (Wasm objects have no null symbol
         // entry).

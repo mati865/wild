@@ -27,13 +27,23 @@ pub(crate) fn process_linker_scripts<'data, P: Platform>(
     output_sections: &mut OutputSections<'data, P>,
     layout_rules_builder: &mut LayoutRulesBuilder<'data>,
     args: &P::Args,
-) -> Result<Vec<ProcessedLinkerScript<'data, P>>> {
+) -> Result<(Vec<ProcessedLinkerScript<'data, P>>, bool)> {
     timing_phase!("Process linker scripts");
 
-    linker_scripts_in
+    let mut has_section_table = false;
+
+    let processed_scripts = linker_scripts_in
         .iter()
-        .map(|script| layout_rules_builder.process_linker_script(script, output_sections, args))
-        .collect::<Result<Vec<ProcessedLinkerScript<P>>>>()
+        .map(|script| {
+            layout_rules_builder.process_linker_script(
+                script,
+                output_sections,
+                args,
+                &mut has_section_table,
+            )
+        })
+        .collect::<Result<Vec<ProcessedLinkerScript<P>>>>()?;
+    Ok((processed_scripts, has_section_table))
 }
 
 #[derive(Debug)]
@@ -233,12 +243,21 @@ impl<'data, P: Platform> ParsedInputObject<'data, P> {
 }
 
 impl<'data, P: Platform> Prelude<'data, P> {
-    pub(crate) fn new(args: &'data P::Args, output_kind: OutputKind) -> Result<Self> {
+    pub(crate) fn new(
+        args: &'data P::Args,
+        output_kind: OutputKind,
+        should_emit_linker_symbols: bool,
+    ) -> Result<Self> {
         verbose_timing_phase!("Construct prelude");
 
         let mut symbols = InternalSymbolsBuilder::default();
 
-        P::create_linker_defined_symbols(&mut symbols, output_kind, args);
+        P::create_linker_defined_symbols(
+            &mut symbols,
+            output_kind,
+            args,
+            should_emit_linker_symbols,
+        );
 
         args.force_undefined_symbol_names().iter().for_each(|name| {
             symbols.add_symbol(InternalSymDefInfo::new(

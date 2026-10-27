@@ -1586,6 +1586,7 @@ impl platform::Platform for MachO {
         symbols: &mut crate::parsing::InternalSymbolsBuilder<Self>,
         _output_kind: crate::output_kind::OutputKind,
         _args: &Self::Args,
+        _should_emit_linker_symbols: bool,
     ) {
         // Mach-O object symbol names include the C ABI's leading underscore.
         symbols
