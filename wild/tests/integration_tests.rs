@@ -24,6 +24,11 @@
 //! with the path to the test's build directory. `$WASI_SYSROOT` will be replaced with the wasi-libc
 //! sysroot (see RequiresWasiLibc). These arguments are passed before input objects.
 //!
+//! Copy:{source}:{dest} Copies a file. Source path is relative to the test source directory or
+//! can use `$OUT_DIR`. Destinations must be relative to `$OUT_DIR`.
+//!
+//! LinkerWorkingDirectory:{path} Sets the linker working directory. Supports `$OUT_DIR`.
+//!
 //! PostLinkArgs:... Like LinkArgs, but appended after input objects. Useful for archive libraries
 //! such as `-lc` that need to appear after objects that reference them.
 //!
@@ -295,10 +300,10 @@
 //! `Shared:as(lib/libfoo.so),noadd:filename.c`.
 //! `$O` is replaced with the built input path. `$OUT_DIR` is replaced with the test build
 //! directory (same as in `LinkArgs`). At least one of `$O` or `$OUT_DIR` must appear.
-//! `as(path)` writes an Archive or Shared input to the specified path relative to `$OUT_DIR`.
-//! Shared inputs using `as(path)` must also use `SoSingleLinker`. `noadd` builds the input without
-//! adding it directly to the final linker command, allowing it to be found via mechanisms such as
-//! `-L` and `-l` instead.
+//! `as(path)` writes an Object, Archive, linker script, or Shared input to the specified path
+//! relative to `$OUT_DIR`. Shared inputs using `as(path)` must also use `SoSingleLinker`. `noadd`
+//! builds the input without adding it directly to the final linker command, allowing it to be found
+//! via mechanisms such as `-L` and `-l` instead.
 //!
 //! Object:{source-filename}[:extra-compilation-args] Builds the specified filename as a regular
 //! object and adds it to the link.
@@ -1520,6 +1525,7 @@ struct Config {
     linker_so_args: ArgumentSet,
     wild_extra_linker_args: ArgumentSet,
     linker_env: HashMap<String, String>,
+    linker_working_directory: Option<String>,
     compiler_args: ArgumentSet,
     compiler_so_args: ArgumentSet,
     diff_ignore: Vec<String>,
@@ -1527,7 +1533,7 @@ struct Config {
     cross_enabled: bool,
     section_equiv: Vec<(String, String)>,
     is_abstract: bool,
-    deps: Vec<Dep>,
+    build_steps: Vec<BuildStep>,
     compiler: String,
     should_diff: bool,
     diff_match_any: bool,
@@ -1966,12 +1972,13 @@ impl Config {
     /// of the current config with anything that shouldn't be inherited cleared.
     fn config_for_deps(&self) -> Config {
         let mut out = self.clone();
-        out.deps = Vec::new();
+        out.build_steps = Vec::new();
         out
     }
 
     fn can_use_wild_in_process(&self) -> bool {
         self.linker_env.is_empty()
+            && self.linker_working_directory.is_none()
             && !self.test_update_in_place
             && !self.test_hard_links
             && !self.test_only_keep_debug
@@ -1981,12 +1988,13 @@ impl Config {
     }
 
     fn source_path(&self, filename: &str) -> PathBuf {
-        let path = self.test_src_dir.join(filename);
+        let filename = expand_test_arg_placeholders(filename, self);
+        let path = self.test_src_dir.join(&filename);
         if path.exists() {
             return path;
         }
 
-        let common_path = self.common_dir().join(filename);
+        let common_path = self.common_dir().join(&filename);
         if common_path.exists() {
             return common_path;
         }
@@ -2041,6 +2049,15 @@ impl FilenameArgumentPair {
             args,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BuildStep {
+    Input(Dep),
+    Copy {
+        source: String,
+        destination: PathBuf,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2352,11 +2369,12 @@ impl Config {
             compiler_so_args: ArgumentSet::default_for_compiling(),
             wild_extra_linker_args: ArgumentSet::empty(),
             linker_env: Default::default(),
+            linker_working_directory: None,
             diff_ignore: Default::default(),
             reference_linkers: None,
             section_equiv: Default::default(),
             is_abstract: false,
-            deps: Default::default(),
+            build_steps: Default::default(),
             remove_sections: Vec::new(),
             compiler: platform.default_c_compiler().to_owned(),
             should_diff: platform.diff_supported(),
@@ -2480,6 +2498,20 @@ fn parse_configs(src_filename: &Path, default_config: &Config) -> Result<Vec<Con
     Ok(configs)
 }
 
+fn parse_output_path(value: &str) -> Result<PathBuf> {
+    let path = PathBuf::from(value);
+    ensure!(
+        !path.as_os_str().is_empty(),
+        "Output path must not be empty"
+    );
+    ensure!(
+        path.components()
+            .all(|component| matches!(component, std::path::Component::Normal(_))),
+        "Output path must be relative to the build directory and must not contain '.' or '..'"
+    );
+    Ok(path)
+}
+
 fn parse_dep_modifiers(arg: &str) -> Result<ParsedDepModifiers<'_>> {
     if !arg.starts_with("template(")
         && !arg.starts_with("as(")
@@ -2549,14 +2581,7 @@ fn parse_dep_modifiers(arg: &str) -> Result<ParsedDepModifiers<'_>> {
             template = Some(template_parts);
         } else if let Some(value) = part.strip_circumfix("as(", ")") {
             ensure!(output_path.is_none(), "Duplicate as modifier");
-            let path = PathBuf::from(value);
-            ensure!(!path.as_os_str().is_empty(), "as() path must not be empty");
-            ensure!(
-                path.components()
-                    .all(|component| matches!(component, std::path::Component::Normal(_))),
-                "as() path must be relative to the build directory and must not contain '.' or '..'"
-            );
-            output_path = Some(path);
+            output_path = Some(parse_output_path(value)?);
         } else if part == "noadd" {
             ensure!(auto_add, "Duplicate noadd modifier");
             auto_add = false;
@@ -2617,6 +2642,9 @@ fn process_directive(
                 bail!("Variant can only be specified once per config");
             }
             config.variant_num = Some(arg.parse()?);
+        }
+        "LinkerWorkingDirectory" => {
+            config.linker_working_directory = Some(arg.to_owned());
         }
         "LinkArgs" => {
             if is_rust {
@@ -3027,6 +3055,18 @@ fn process_directive(
                 .map(|(a, b)| (a.to_owned(), b.to_owned()))?,
         ),
         "AutoAddObjects" => config.auto_add_objects = arg.parse()?,
+        "Copy" => {
+            let (source, destination) = arg
+                .split_once(':')
+                .context("Copy requires source:destination")?;
+
+            let destination = parse_output_path(destination)?;
+
+            config.build_steps.push(BuildStep::Copy {
+                source: source.to_owned(),
+                destination,
+            });
+        }
         input_type @ ("Object"
         | "Relocatable"
         | "Archive"
@@ -3050,8 +3090,15 @@ fn process_directive(
             } = parse_dep_modifiers(arg)?;
             if output_path.is_some() {
                 ensure!(
-                    matches!(input_type, InputType::Archive | InputType::SharedObject),
-                    "as() is only supported for Archive and Shared inputs"
+                    matches!(
+                        input_type,
+                        InputType::Object
+                            | InputType::Archive
+                            | InputType::LinkerScript
+                            | InputType::AugmentLinkerScript
+                            | InputType::SharedObject
+                    ),
+                    "as() is not supported for this input type"
                 );
             }
 
@@ -3059,20 +3106,17 @@ fn process_directive(
                 .split(',')
                 .map(|arg| {
                     let (filename, comp_args) = arg.split_once(':').unwrap_or((arg, ""));
-                    Ok(FilenameArgumentPair::new(
-                        &config.source_path(filename),
-                        ArgumentSet::parse(comp_args),
-                    ))
+                    FilenameArgumentPair::new(Path::new(filename), ArgumentSet::parse(comp_args))
                 })
-                .collect::<Result<Vec<_>>>()?;
+                .collect();
 
-            config.deps.push(Dep {
+            config.build_steps.push(BuildStep::Input(Dep {
                 files,
                 input_type,
                 template,
                 output_path,
                 auto_add,
-            });
+            }));
         }
         "RemoveSection" => config.remove_sections.push(arg.to_owned()),
         "AssertOutputFileMatches" => {
@@ -3196,14 +3240,8 @@ impl ProgramInputs {
             cross_arch,
         );
 
-        let inputs = std::iter::once(primary)
-            .chain(
-                config
-                    .deps
-                    .iter()
-                    .map(|dep| build_linker_input(dep, config, linker, cross_arch)),
-            )
-            .collect::<Result<Vec<_>>>()?;
+        let mut inputs = vec![primary?];
+        inputs.extend(build_inputs(config, linker, cross_arch)?);
 
         if config.test_update_in_place && linker.is_wild() {
             let _ = std::fs::remove_file(linker.output_path(self.name(), config));
@@ -3736,6 +3774,43 @@ impl BuiltObject {
     }
 }
 
+fn build_inputs(
+    config: &Config,
+    linker: &Linker,
+    cross_arch: Option<Architecture>,
+) -> Result<Vec<LinkerInput>> {
+    let mut inputs = Vec::new();
+    for step in &config.build_steps {
+        match step {
+            BuildStep::Input(dep) => {
+                inputs.push(build_linker_input(dep, config, linker, cross_arch)?);
+            }
+            BuildStep::Copy {
+                source,
+                destination,
+            } => {
+                copy_to_build_dir(&config.source_path(source), destination, config)?;
+            }
+        }
+    }
+    Ok(inputs)
+}
+
+fn copy_to_build_dir(source: &Path, destination: &Path, config: &Config) -> Result<PathBuf> {
+    let destination = config.build_dir().join(destination);
+    if source != destination {
+        std::fs::create_dir_all(destination.parent().unwrap())?;
+        std::fs::copy(source, &destination).with_context(|| {
+            format!(
+                "Failed to copy `{}` to `{}`",
+                source.display(),
+                destination.display()
+            )
+        })?;
+    }
+    Ok(destination)
+}
+
 /// Creates a linker input from a source file. This will be either an object file or an archive.
 fn build_linker_input(
     dep: &Dep,
@@ -3750,7 +3825,9 @@ fn build_linker_input(
             dep.output_path.is_none(),
             "as() is not supported when using a prebuilt archive"
         );
-        let mut input = LinkerInput::new(single_file.path.clone());
+        let mut input = LinkerInput::new(
+            config.source_path(single_file.path.to_str().context("Non-UTF-8 source path")?),
+        );
         input.template = dep.template.clone();
         input.auto_add = dep.auto_add;
         return Ok(input);
@@ -3914,6 +3991,14 @@ fn build_linker_input(
         InputType::AugmentLinkerScript => LinkerInput::new(first_obj_path.to_owned()),
     };
 
+    if matches!(
+        dep.input_type,
+        InputType::Object | InputType::LinkerScript | InputType::AugmentLinkerScript
+    ) && let Some(path) = &dep.output_path
+    {
+        linker_input.path = copy_to_build_dir(&linker_input.path, path, &config)?;
+    }
+
     linker_input.template = dep.template.clone();
     linker_input.auto_add = dep.auto_add;
 
@@ -4010,7 +4095,7 @@ fn build_obj(
     input_type: InputType,
     cross_arch: Option<Architecture>,
 ) -> Result<BuiltObject> {
-    let src_path = file.path.clone();
+    let src_path = config.source_path(file.path.to_str().context("Non-UTF-8 source path")?);
 
     if input_type.is_linker_script() {
         let content = std::fs::read_to_string(&src_path)
@@ -4041,11 +4126,7 @@ fn build_obj(
         config = parse_single_config(&src_path, &config)?;
     }
 
-    let inputs = config
-        .deps
-        .iter()
-        .map(|dep| build_linker_input(dep, &config, linker, cross_arch))
-        .try_collect()?;
+    let inputs = build_inputs(&config, linker, cross_arch)?;
 
     if src_path.extension().is_some_and(|ext| ext == "wat") {
         return build_wat_obj(&src_path, &config, inputs);
@@ -5019,6 +5100,10 @@ impl LinkCommand {
             }
         }
 
+        if let Some(directory) = &config.linker_working_directory {
+            command.current_dir(expand_test_arg_placeholders(directory, config));
+        }
+
         command.envs(&config.linker_env);
 
         let mut link_command = LinkCommand {
@@ -5390,6 +5475,10 @@ impl LinkCommand {
 
         let mut hashes = format!("Cache version: {CACHE_VERSION}\n{self}");
 
+        if let Some(directory) = self.command.get_current_dir() {
+            write!(hashes, "\nWorking directory: {}", directory.display()).unwrap();
+        }
+
         hashes.push_str("\n\n");
 
         let mut hash_file = |path: &Path| {
@@ -5412,7 +5501,11 @@ impl LinkCommand {
 
         if let Ok(deps) = parse_deps_file(&self.depfile_path()) {
             for dep in deps {
-                hash_file(&dep);
+                if let Some(directory) = self.command.get_current_dir() {
+                    hash_file(&directory.join(dep));
+                } else {
+                    hash_file(&dep);
+                }
             }
         } else {
             for input in &self.inputs {
