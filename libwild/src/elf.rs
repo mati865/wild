@@ -1860,13 +1860,9 @@ impl<C: ElfClass> platform::Platform for Elf<C> {
                 VersionScript::Rust(_) => {}
             }
 
-            let dependencies_count = symbol_db.version_script.parent_count();
             mem_sizes.increment(
                 part_id::GNU_VERSION_D,
-                (size_of::<crate::elf::Verdef>() as u16 * version_count
-                    + size_of::<crate::elf::Verdaux>() as u16
-                        * (version_count + dependencies_count))
-                    .into(),
+                verdefs.iter().map(VersionDef::byte_size).sum(),
             );
             state.verdefs.replace(verdefs);
         }
@@ -1877,7 +1873,7 @@ impl<C: ElfClass> platform::Platform for Elf<C> {
     fn finalise_layout_epilogue<'data>(
         epilogue_state: &mut EpilogueLayoutExt,
         memory_offsets: &mut OutputSectionPartMap<u64>,
-        symbol_db: &SymbolDb<'data, Self>,
+        _symbol_db: &SymbolDb<'data, Self>,
         common_state: &LayoutExt,
         dynsym_start_index: u32,
         dynamic_symbol_defs: &[DynamicSymbolDefinition<Self>],
@@ -1923,10 +1919,7 @@ impl<C: ElfClass> platform::Platform for Elf<C> {
         if let Some(verdefs) = &epilogue_state.verdefs {
             memory_offsets.increment(
                 part_id::GNU_VERSION_D,
-                (size_of::<crate::elf::Verdef>() * verdefs.len()
-                    + size_of::<crate::elf::Verdaux>()
-                        * (verdefs.len() + symbol_db.version_script.parent_count() as usize))
-                    as u64,
+                verdefs.iter().map(VersionDef::byte_size).sum(),
             );
         }
 
@@ -6007,6 +6000,16 @@ pub(crate) struct VersionDef {
     #[debug("{}", String::from_utf8_lossy(name))]
     pub(crate) name: Vec<u8>,
     pub(crate) parent_index: Option<u16>,
+}
+
+impl VersionDef {
+    pub(crate) fn aux_count(&self) -> u16 {
+        if self.parent_index.is_some() { 2 } else { 1 }
+    }
+
+    pub(crate) fn byte_size(&self) -> u64 {
+        size_of::<Verdef>() as u64 + size_of::<Verdaux>() as u64 * u64::from(self.aux_count())
+    }
 }
 
 impl SysvHashLayout {

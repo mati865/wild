@@ -5101,7 +5101,7 @@ fn write_verdef<C: ElfClass>(
         verdef_out
             .vd_ndx
             .set(e, object::elf::VER_NDX_GLOBAL + i as u16);
-        let aux_count = if verdef.parent_index.is_some() { 2 } else { 1 };
+        let aux_count = verdef.aux_count();
         verdef_out.vd_cnt.set(e, aux_count);
         verdef_out.vd_hash.set(e, object::elf::hash(name));
         verdef_out
@@ -5109,8 +5109,7 @@ fn write_verdef<C: ElfClass>(
             .set(e, size_of::<crate::elf::Verdef>() as u32);
         // Offset to the next entry, unless it's the last one
         let offset = if i < verdefs.len() - 1 {
-            (size_of::<crate::elf::Verdef>()
-                + size_of::<crate::elf::Verdaux>() * aux_count as usize) as u32
+            verdef.byte_size() as u32
         } else {
             0
         };

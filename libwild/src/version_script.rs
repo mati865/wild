@@ -428,12 +428,6 @@ impl<'data> VersionScript<'data> {
         }
     }
 
-    pub(crate) fn parent_count(&self) -> u16 {
-        match self {
-            VersionScript::Regular(script) => script.parent_count(),
-            VersionScript::Rust(_) => 0,
-        }
-    }
     pub(crate) fn version_for_symbol(
         &self,
         name: &PreHashed<UnversionedSymbolName>,
@@ -470,13 +464,6 @@ impl<'data> RegularVersionScript<'data> {
         } else {
             self.versions.len() as u16
         }
-    }
-
-    pub(crate) fn parent_count(&self) -> u16 {
-        self.versions
-            .iter()
-            .filter(|v| v.parent_index.is_some())
-            .count() as u16
     }
 
     pub(crate) fn version_iter(&self) -> impl Iterator<Item = &Version<'data>> {
