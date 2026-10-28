@@ -2101,8 +2101,6 @@ impl<C: ElfClass> platform::Platform for Elf<C> {
         args: &Self::Args,
         is_linker_script_symbol: bool,
     ) {
-        let has_dynamic_symbol = flags.needs_dynamic_symbol_relocation();
-
         if flags.needs_got() && !flags.needs_tls_got() {
             let is_got_relr =
                 is_got_relr_eligible(flags, args, output_kind, is_linker_script_symbol);
@@ -2164,7 +2162,7 @@ impl<C: ElfClass> platform::Platform for Elf<C> {
             if needs_tls_module_relocation(flags, output_kind) {
                 mem_sizes.increment(part_id::RELA_DYN_GENERAL, C::RELA_ENTRY_SIZE);
             }
-            if has_dynamic_symbol {
+            if needs_tls_dynamic_offset_relocation(flags) {
                 mem_sizes.increment(part_id::RELA_DYN_GENERAL, C::RELA_ENTRY_SIZE);
             }
         }
@@ -7322,6 +7320,10 @@ pub(crate) fn tls_offset_relocation_kind(
     } else {
         TlsOffsetRelocationKind::None
     }
+}
+
+pub(crate) fn needs_tls_dynamic_offset_relocation(flags: ValueFlags) -> bool {
+    flags.is_interposable() && flags.needs_dynamic_symbol_relocation()
 }
 
 pub(crate) fn needs_tls_module_relocation(flags: ValueFlags, output_kind: OutputKind) -> bool {

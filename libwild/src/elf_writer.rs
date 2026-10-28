@@ -989,24 +989,26 @@ impl<'layout, 'out, C: ElfClass> TableWriter<'layout, 'out, C> {
         } else {
             *got_entry = elf::Word::<C>::from_u64(elf::CURRENT_EXE_TLS_MOD)?;
         }
+
         let offset_entry = self.take_next_got_entry()?;
-        if let Some(dynamic_symbol_index) = res.dynamic_symbol_index
-            && res.flags.is_interposable()
-        {
+
+        if elf::needs_tls_dynamic_offset_relocation(res.flags) {
             self.write_dtpoff_relocation::<A>(
                 got_address + C::GOT_ENTRY_SIZE,
-                dynamic_symbol_index.get(),
+                res.dynamic_symbol_index()?,
             )?;
             *offset_entry = elf::Word::<C>::from_u64(0)?;
             return Ok(());
         }
-        // Convert the address to an offset within the TLS segment
-        let address = res.address()?;
-        *offset_entry = elf::Word::<C>::from_u64(
-            address
-                .wrapping_sub(self.tls.start)
-                .wrapping_sub(A::get_dtv_offset()),
-        )?;
+
+        let offset = if res.flags.is_absolute() && res.flags.is_undefined_weak() {
+            0
+        } else {
+            res.address()?.wrapping_sub(self.tls.start)
+        };
+
+        *offset_entry = elf::Word::<C>::from_u64(offset.wrapping_sub(A::get_dtv_offset()))?;
+
         Ok(())
     }
 
