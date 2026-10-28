@@ -7888,6 +7888,7 @@ impl platform::Platform for Wasm {
         _mem_sizes: &mut crate::output_section_part_map::OutputSectionPartMap<u64>,
         _output_kind: crate::output_kind::OutputKind,
         _args: &Self::Args,
+        _is_linker_script_symbol: bool,
     ) {
     }
 
@@ -7930,6 +7931,7 @@ impl platform::Platform for Wasm {
         _memory_offsets: &mut crate::output_section_part_map::OutputSectionPartMap<u64>,
         _args: &<Self as crate::platform::Platform>::Args,
         _output_kind: crate::OutputKind,
+        _is_linker_script_symbol: bool,
     ) -> crate::layout::Resolution<Self> {
         crate::layout::Resolution {
             raw_value,

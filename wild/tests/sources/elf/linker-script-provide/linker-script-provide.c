@@ -19,13 +19,9 @@
 //#NoSym:undefined_sym
 //#ExpectSym:referenced_sym address=0x5000
 //#ExpectSym:referenced_sym2 address=0x5030
-//#DiffIgnore:.dynamic.*
-//#DiffIgnore:section.got
-//#DiffIgnore:section.rela.dyn
 //#DiffIgnore:segment.LOAD.RX.alignment
 //#DiffIgnore:segment.LOAD.RWX.alignment
-//#DiffIgnore:rel.extra-opt.R_X86_64_REX_GOTPCRELX.MovIndirectToLea.invalid-shared-object
-//#DiffIgnore:rel.missing-got-dynamic.shared-object
+//#DiffIgnore:rel.missing-opt.R_X86_64_REX_GOTPCRELX.MovIndirectToLea.invalid-shared-object
 //#DiffIgnore:rel.R_AARCH64_ADR_GOT_PAGE.R_AARCH64_ADR_GOT_PAGE
 // GNU ld behaves strangely when a symbol referenced in a linker script is empty. See this:
 // https://github.com/wild-linker/wild/pull/1525#discussion_r2785478582

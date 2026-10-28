@@ -792,6 +792,7 @@ impl<'layout, 'out, C: ElfClass> TableWriter<'layout, 'out, C> {
         layout: Option<&ElfLayout<'data, C>>,
         args: &ElfArgs,
         res: &Resolution<elf::Elf<C>>,
+        is_linker_script_symbol: bool,
     ) -> Result {
         if args.only_keep_debug() {
             return Ok(());
@@ -824,13 +825,18 @@ impl<'layout, 'out, C: ElfClass> TableWriter<'layout, 'out, C> {
             return Ok(());
         }
 
-        let is_got_relr = crate::elf::is_got_relr_eligible(res.flags, args, self.output_kind);
+        let is_got_relr = crate::elf::is_got_relr_eligible(
+            res.flags,
+            args,
+            self.output_kind,
+            is_linker_script_symbol,
+        );
         let got_entry = if is_got_relr {
             self.take_next_got_relr_entry()?
         } else {
             self.take_next_got_entry()?
         };
-        match elf::got_relocation_kind(flags, self.output_kind) {
+        match elf::got_relocation_kind(flags, self.output_kind, is_linker_script_symbol) {
             elf::GotRelocationKind::JumpSlot => {
                 *got_entry = elf::Word::<C>::from_u64(0)?;
                 self.write_jump_slot_relocation::<A>(got_address, res.dynamic_symbol_index()?)?;
@@ -854,6 +860,21 @@ impl<'layout, 'out, C: ElfClass> TableWriter<'layout, 'out, C> {
             elf::GotRelocationKind::Ifunc => {
                 *got_entry = elf::Word::<C>::from_u64(0)?;
                 self.write_ifunc_relocation::<A>(res)?;
+            }
+            elf::GotRelocationKind::LinkerScript => {
+                let value = if res.flags.is_absolute() {
+                    self.write_rela_dyn_general(0, 0, object::elf::RelocationType(0), 0)?;
+                    res.raw_value
+                } else {
+                    self.write_rela_dyn_general(
+                        got_address,
+                        0,
+                        A::get_dynamic_relocation_type(DynamicRelocationKind::Relative),
+                        res.raw_value as i64,
+                    )?;
+                    0
+                };
+                *got_entry = elf::Word::<C>::from_u64(value)?;
             }
             elf::GotRelocationKind::Relative => {
                 let value = if is_got_relr {
@@ -1964,7 +1985,7 @@ fn write_object<'data, C: ElfClass, A: Arch<Platform = elf::Elf<C>>>(
         let _span = tracing::trace_span!("Symbol", %symbol_id).entered();
         if let Some(res) = resolution {
             table_writer
-                .process_resolution::<A>(Some(layout), layout.args(), res)
+                .process_resolution::<A>(Some(layout), layout.args(), res, false)
                 .with_context(|| {
                     format!(
                         "Failed to process `{}` with resolution {res:?}",
@@ -3867,29 +3888,38 @@ fn apply_relocation<
     let rel_info;
     let output_kind = layout.symbol_db.output_kind;
 
-    let relaxation = A::new_relaxation(
-        r_type,
-        out,
-        offset_in_section,
-        flags,
-        output_kind,
-        section_info.section_flags,
-        relax_deltas,
-        resolution.raw_value,
-        section_address,
-        rel.addend(),
-        relocation_cache
-            .previous
-            .as_ref()
-            .filter(|r| r.symbol() == rel.symbol())
-            .map(|r| PreviousRelocationInfo {
-                kind: r.raw_type(),
-                offset: r.offset(),
-                symbol: r.symbol(),
-                addend: r.addend(),
-            }),
-    )
-    .filter(|relaxation| layout.args().relax || relaxation.is_mandatory());
+    let symbol_id = layout.symbol_db.definition(local_symbol_id);
+    let is_linker_script_symbol = layout.symbol_db.is_linker_script_symbol(symbol_id);
+    let can_relax =
+        !(is_linker_script_symbol && output_kind.is_position_independent() && !flags.is_absolute());
+
+    let relaxation = if can_relax {
+        A::new_relaxation(
+            r_type,
+            out,
+            offset_in_section,
+            flags,
+            output_kind,
+            section_info.section_flags,
+            relax_deltas,
+            resolution.raw_value,
+            section_address,
+            rel.addend(),
+            relocation_cache
+                .previous
+                .as_ref()
+                .filter(|r| r.symbol() == rel.symbol())
+                .map(|r| PreviousRelocationInfo {
+                    kind: r.raw_type(),
+                    offset: r.offset(),
+                    symbol: r.symbol(),
+                    addend: r.addend(),
+                }),
+        )
+        .filter(|relaxation| layout.args().relax || relaxation.is_mandatory())
+    } else {
+        None
+    };
 
     if let Some(relaxation) = &relaxation {
         rel_info = relaxation.rel_info();
@@ -4683,7 +4713,7 @@ fn write_absolute_relocation<'data, C: ElfClass, A: Arch<Platform = elf::Elf<C>>
         table_writer
             .write_ifunc_relocation_for_data::<A>(place, resolution.raw_value as i64 + addend)?;
         Ok(0)
-    } else if table_writer.output_kind.is_position_independent() && !resolution.is_absolute() {
+    } else if table_writer.output_kind.is_position_independent() {
         let address = resolution.value_with_addend(
             addend,
             symbol_index,
@@ -4692,7 +4722,26 @@ fn write_absolute_relocation<'data, C: ElfClass, A: Arch<Platform = elf::Elf<C>>
             &layout.merged_strings,
             &layout.merged_string_start_addresses,
         )?;
-        table_writer.write_address_relocation::<A>(place, address)
+        let local_symbol_id = object_layout.symbol_id_range.input_to_id(symbol_index);
+        let symbol_id = layout.symbol_db.definition(local_symbol_id);
+        if layout.symbol_db.is_linker_script_symbol(symbol_id) && section_info.is_writable {
+            if resolution.is_absolute() {
+                table_writer.write_rela_dyn_general(0, 0, object::elf::RelocationType(0), 0)?;
+                Ok(address)
+            } else {
+                table_writer.write_rela_dyn_general(
+                    place,
+                    0,
+                    A::get_dynamic_relocation_type(DynamicRelocationKind::Relative),
+                    address as i64,
+                )?;
+                Ok(0)
+            }
+        } else if resolution.is_absolute() {
+            Ok(address)
+        } else {
+            table_writer.write_address_relocation::<A>(place, address)
+        }
     } else {
         resolution.value_with_addend(
             addend,
@@ -4900,6 +4949,7 @@ fn write_plt_got_entries<'data, C: ElfClass, A: Arch<Platform = elf::Elf<C>>>(
                     },
                     flags: ValueFlags::GOT | ValueFlags::ABSOLUTE,
                 },
+                false,
             )?;
 
             raw_value = A::executable_tlsld_offset(layout);
@@ -4920,6 +4970,7 @@ fn write_plt_got_entries<'data, C: ElfClass, A: Arch<Platform = elf::Elf<C>>>(
                 },
                 flags: ValueFlags::GOT | ValueFlags::ABSOLUTE,
             },
+            false,
         )?;
     }
 
@@ -7001,7 +7052,12 @@ fn write_internal_symbols_plt_got_entries<'data, C: ElfClass, A: Arch<Platform =
         }
         if let Some(res) = layout.local_symbol_resolution(symbol_id) {
             table_writer
-                .process_resolution::<A>(Some(layout), layout.args(), res)
+                .process_resolution::<A>(
+                    Some(layout),
+                    layout.args(),
+                    res,
+                    layout.symbol_db.is_linker_script_symbol(symbol_id),
+                )
                 .with_context(|| {
                     format!("Failed to process `{}`", layout.symbol_debug(symbol_id))
                 })?;
@@ -7090,7 +7146,7 @@ fn write_dynamic_file<'data, C: ElfClass, A: Arch<Platform = elf::Elf<C>>>(
             }
 
             table_writer
-                .process_resolution::<A>(Some(layout), layout.args(), res)
+                .process_resolution::<A>(Some(layout), layout.args(), res, false)
                 .with_context(|| format!("Failed to write {}", layout.symbol_debug(symbol_id)))?;
         }
     }
@@ -7351,7 +7407,7 @@ pub(crate) fn verify_resolution_allocation<C: ElfClass, A: Arch<Platform = elf::
         0,
         args.is_relr_enabled(),
     );
-    table_writer.process_resolution::<A>(None, args, resolution)?;
+    table_writer.process_resolution::<A>(None, args, resolution, false)?;
     table_writer.validate_empty(mem_sizes)
 }
 

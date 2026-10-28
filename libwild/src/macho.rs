@@ -2262,6 +2262,7 @@ impl platform::Platform for MachO {
         mem_sizes: &mut crate::output_section_part_map::OutputSectionPartMap<u64>,
         _output_kind: crate::output_kind::OutputKind,
         _args: &Self::Args,
+        _is_linker_script_symbol: bool,
     ) {
         if flags.is_dynamic() && flags.needs_plt() {
             mem_sizes.increment(part_id::PLT_GOT, PLT_ENTRY_SIZE);
@@ -2347,6 +2348,7 @@ impl platform::Platform for MachO {
         memory_offsets: &mut crate::output_section_part_map::OutputSectionPartMap<u64>,
         _args: &<Self as crate::platform::Platform>::Args,
         _output_kind: crate::OutputKind,
+        _is_linker_script_symbol: bool,
     ) -> crate::layout::Resolution<Self> {
         let mut resolution: Resolution<MachO> = Resolution {
             raw_value,

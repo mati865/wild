@@ -699,6 +699,9 @@ fn update_internal_symbols_resolutions<'data, P: Platform>(
                 .as_mut()
                 .ok_or_else(|| redirect.missing_resolution(def_info.name))?;
             resolution.raw_value = evaluated.value;
+            if evaluated.is_absolute() {
+                resolution.flags |= ValueFlags::ABSOLUTE;
+            }
         }
     }
 
@@ -1296,6 +1299,7 @@ trait SymbolRequestHandler<'data, P: Platform>: std::fmt::Display + HandlerData 
                 &mut common.mem_sizes,
                 symbol_db.output_kind,
                 symbol_db.args,
+                symbol_db.is_linker_script_symbol(symbol_id),
             );
 
             if symbol_db.args.common().verify_allocation_consistency {
@@ -1341,7 +1345,7 @@ pub(crate) fn compute_allocations<P: Platform>(
 ) -> OutputSectionPartMap<u64> {
     let mut sizes =
         OutputSectionPartMap::with_dense_size(crate::part_id::regular_part_base::<P>().as_usize());
-    P::allocate_resolution(resolution.flags, &mut sizes, output_kind, args);
+    P::allocate_resolution(resolution.flags, &mut sizes, output_kind, args, false);
     sizes
 }
 
@@ -4254,6 +4258,7 @@ fn create_internal_symbol_resolution<'data, P: Platform>(
         memory_offsets,
         resources.symbol_db.args,
         resources.symbol_db.output_kind,
+        resources.symbol_db.is_linker_script_symbol(symbol_id),
     ))
 }
 
@@ -4914,6 +4919,7 @@ impl<'data, P: Platform> ObjectLayoutState<'data, P> {
                     &mut common.mem_sizes,
                     output_kind,
                     resources.symbol_db.args,
+                    false,
                 );
             }
         }
@@ -5168,6 +5174,7 @@ impl<'data, P: Platform> ObjectLayoutState<'data, P> {
             memory_offsets,
             resources.symbol_db.args,
             resources.symbol_db.output_kind,
+            false,
         )))
     }
 
@@ -5462,6 +5469,7 @@ pub(crate) fn default_create_resolutions<'data, P: Platform>(
                 memory_offsets,
                 resources.symbol_db.args,
                 resources.symbol_db.output_kind,
+                false,
             )))?;
         } else {
             resolutions_out.write(None)?;
@@ -7176,7 +7184,7 @@ fn verify_consistent_allocation_handling<P: Platform, A: Arch<Platform = P>>(
     let output_sections = OutputSections::with_base_address(0, output_kind);
     let (output_order, _program_segments) = output_sections.output_order(output_kind, &[], &[])?;
     let mut mem_sizes = output_sections.new_part_map();
-    P::allocate_resolution(flags, &mut mem_sizes, output_kind, args);
+    P::allocate_resolution(flags, &mut mem_sizes, output_kind, args, false);
     let mut memory_offsets = output_sections.new_part_map();
     if let Some(section_id) = P::GOT_SECTION_ID {
         *memory_offsets.get_mut(section_id.base_part_id::<P>()) = 0x10;
@@ -7198,6 +7206,7 @@ fn verify_consistent_allocation_handling<P: Platform, A: Arch<Platform = P>>(
         &mut memory_offsets,
         args,
         output_kind,
+        false,
     );
 
     P::verify_resolution_allocation::<A>(

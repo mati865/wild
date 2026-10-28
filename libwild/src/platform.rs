@@ -1032,6 +1032,7 @@ pub(crate) trait Platform:
         mem_sizes: &mut OutputSectionPartMap<u64>,
         output_kind: OutputKind,
         args: &Self::Args,
+        is_linker_script_symbol: bool,
     );
 
     fn allocate_object_symtab_space<'data>(
@@ -1070,6 +1071,7 @@ pub(crate) trait Platform:
         memory_offsets: &mut OutputSectionPartMap<u64>,
         args: &Self::Args,
         output_kind: OutputKind,
+        is_linker_script_symbol: bool,
     ) -> layout::Resolution<Self>;
 
     fn validate_resolution(

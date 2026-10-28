@@ -907,6 +907,11 @@ impl<'data, P: Platform> SymbolDb<'data, P> {
         is_mapping_symbol_name(name.bytes())
     }
 
+    pub(crate) fn is_linker_script_symbol(&self, symbol_id: SymbolId) -> bool {
+        let file_id = self.file_id_for_symbol(symbol_id);
+        matches!(self.file(file_id), SequencedInput::LinkerScript(_))
+    }
+
     pub(crate) fn get_unversioned(
         &self,
         prehashed: &PreHashed<UnversionedSymbolName>,
@@ -1646,7 +1651,7 @@ fn read_symbols_for_group<'data, P: Platform>(
         }
         Group::LinkerScripts(scripts) => {
             for script in scripts {
-                load_linker_script_symbols(script, shard, &mut outputs);
+                load_linker_script_symbols(script, shard, &mut outputs, output_kind);
             }
         }
         Group::SyntheticSymbols(_) => {
@@ -1741,6 +1746,7 @@ fn load_linker_script_symbols<'data, P: Platform>(
     script: &SequencedLinkerScript<'data, P>,
     symbols_out: &mut SymbolWriterShard<'_, '_, 'data, P>,
     outputs: &mut SymbolLoadOutputs<'data>,
+    output_kind: OutputKind,
 ) {
     for (offset, definition) in script.parsed.symbol_defs.iter().enumerate() {
         let symbol_id = script.symbol_id_range.offset_to_id(offset);
@@ -1755,11 +1761,16 @@ fn load_linker_script_symbols<'data, P: Platform>(
             ));
         }
 
-        let mut flags = ValueFlags::NON_INTERPOSABLE;
+        let mut flags = if output_kind.is_shared_object() {
+            ValueFlags::empty()
+        } else {
+            ValueFlags::NON_INTERPOSABLE
+        };
+
         // PROVIDE_HIDDEN symbols have hidden visibility, which means they should be
-        // non-interposable (already set) and not exported to dynamic symbol table.
+        // non-interposable and not exported to dynamic symbol table.
         if definition.symbol.is_hidden() {
-            flags |= ValueFlags::DOWNGRADE_TO_LOCAL;
+            flags |= ValueFlags::DOWNGRADE_TO_LOCAL | ValueFlags::NON_INTERPOSABLE;
         }
         symbols_out.set_next(flags, symbol_id, script.file_id);
     }

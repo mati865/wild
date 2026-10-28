@@ -1,0 +1,1 @@
+PROVIDE_HIDDEN(absolute_value = ABSOLUTE(0x1234));
