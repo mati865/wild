@@ -476,6 +476,9 @@ pub(crate) struct CustomSectionIds {
     pub(crate) nonalloc: Vec<OutputSectionId>,
     pub(crate) tdata: Vec<OutputSectionId>,
     pub(crate) tbss: Vec<OutputSectionId>,
+    // TODO: Merge with others?
+    pub(crate) xdata: Vec<OutputSectionId>,
+    pub(crate) pdata: Vec<OutputSectionId>,
 }
 
 impl<'data, P: Platform> OutputSections<'data, P> {
