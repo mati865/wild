@@ -10,6 +10,7 @@ use crate::args::Input;
 use crate::args::InputSpec;
 use crate::args::Modifiers;
 use crate::bail;
+use crate::ensure;
 use crate::error::Context as _;
 use crate::error::Error;
 use crate::error::Result;
@@ -726,6 +727,10 @@ impl<'data, P: Platform, F: FileSystem> TemporaryState<'data, P, F> {
             FileKind::Archive => process_archive(input_file, &input_ref, file.as_ref(), self),
             FileKind::ThinArchive => process_thin_archive(input_file, self),
             FileKind::Text => {
+                ensure!(
+                    P::SUPPORTS_LINKER_SCRIPTS,
+                    "Unsupported input file type (text): {input_ref}"
+                );
                 let script =
                     process_linker_script(input_file, self.args, self.file_system.as_ref())?;
 

@@ -410,6 +410,9 @@ pub(crate) trait Platform:
     const NUM_SINGLE_PART_SECTIONS: u32;
     const NUM_BUILT_IN_REGULAR_SECTIONS: usize;
 
+    /// Whether text inputs can be interpreted as GNU-style linker scripts.
+    const SUPPORTS_LINKER_SCRIPTS: bool = false;
+
     /// Whether weak definitions take precedence over common symbols (unlike ELF).
     const WEAK_SYMBOLS_OVERRIDE_COMMON: bool = false;
 
