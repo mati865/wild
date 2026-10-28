@@ -5524,6 +5524,7 @@ fn ensure_memory_covers(
     layout: &mut WasmLayout<'_>,
     stack_size: u32,
     stack_first: bool,
+    initial_heap: u64,
     initial_memory: Option<u64>,
     max_memory: Option<u64>,
     shared_memory: bool,
@@ -5535,6 +5536,19 @@ fn ensure_memory_covers(
             layout.data_end,
             stack_size,
         )?));
+    }
+
+    if initial_heap != 0 {
+        ensure!(
+            initial_heap.is_multiple_of(page),
+            "initial heap must be aligned to the page size ({page} bytes)"
+        );
+        let heap_base = u64::from(heap_base_address(layout.data_end, stack_size, stack_first)?);
+        bytes_needed = bytes_needed
+            .max(heap_base)
+            .checked_add(initial_heap)
+            .filter(|bytes| *bytes <= WASM32_MAX_INITIAL_MEMORY_BYTES)
+            .context("initial heap too large")?;
     }
 
     if let Some(requested) = initial_memory {
@@ -6413,6 +6427,7 @@ where
         .any(|input| !input.memory_imports.is_empty() || !input.memories.is_empty());
     let stack_size = symbol_db.args.z_stack_size;
     let stack_first = symbol_db.args.stack_first;
+    let initial_heap = symbol_db.args.initial_heap;
     let initial_memory = symbol_db.args.initial_memory;
     let max_memory = symbol_db.args.max_memory;
     let shared_memory = symbol_db.args.shared_memory;
@@ -6631,6 +6646,7 @@ where
             &mut layout,
             stack_size,
             stack_first,
+            initial_heap,
             initial_memory,
             max_memory,
             shared_memory,
@@ -9011,14 +9027,16 @@ mod tests {
         };
 
         let pages =
-            ensure_memory_covers(&mut layout, DEFAULT_STACK_SIZE, true, None, None, false).unwrap();
+            ensure_memory_covers(&mut layout, DEFAULT_STACK_SIZE, true, 0, None, None, false)
+                .unwrap();
         assert_eq!(pages, 1);
         assert_eq!(layout.memories[0].initial, 1);
         assert_eq!(layout.memories[0].maximum, None);
         assert!(!layout.memories[0].shared);
 
-        let pages = ensure_memory_covers(&mut layout, DEFAULT_STACK_SIZE, false, None, None, false)
-            .unwrap();
+        let pages =
+            ensure_memory_covers(&mut layout, DEFAULT_STACK_SIZE, false, 0, None, None, false)
+                .unwrap();
         let expected_pages = (u64::from(data_end) + u64::from(DEFAULT_STACK_SIZE))
             .div_ceil(wasm_page_size())
             .max(1);

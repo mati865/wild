@@ -51,8 +51,10 @@ pub struct WasmArgs {
     pub(crate) stack_first: bool,
     // Entry symbol name. Defaults to `DEFAULT_ENTRY`.
     pub(crate) entry: Option<String>,
+    // Bytes reserved after the aligned heap base, in addition to static data and the stack.
+    pub(crate) initial_heap: u64,
     // When set, the output `memory.initial` is raised to at least this many bytes (must be
-    // page-aligned). `None` means size is derived from data / stack layout only.
+    // page-aligned). `None` means size is derived from data / stack layout and the initial heap.
     pub(crate) initial_memory: Option<u64>,
     pub(crate) max_memory: Option<u64>,
     // Emit a shared linear memory (`memory.shared`). Requires the `atomics` and `bulk-memory`
@@ -110,6 +112,7 @@ impl Default for WasmArgs {
             z_stack_size: DEFAULT_STACK_SIZE,
             stack_first: true,
             entry: Some(DEFAULT_ENTRY.to_owned()),
+            initial_heap: 0,
             initial_memory: None,
             max_memory: None,
             shared_memory: false,
@@ -454,6 +457,15 @@ fn setup_argument_parser() -> ArgumentParser<WasmArgs> {
         .help("Place stack at the end of linear memory after data")
         .execute(|args, _modifier_stack| {
             args.stack_first = false;
+            Ok(())
+        });
+
+    parser
+        .declare_with_param()
+        .long("initial-heap")
+        .help("Initial heap size in bytes, in addition to static data and the stack")
+        .execute(|args, _modifier_stack, value| {
+            args.initial_heap = parse_number(value)?;
             Ok(())
         });
 
