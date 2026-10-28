@@ -30,6 +30,7 @@
 //#ReferenceLinkers:lld
 //#LinkArgs:-z cet-report=error
 //#ExpectError:.*: -z cet-report: file does not have GNU_PROPERTY_X86_FEATURE_1_IBT property
+//#ExpectError:.*: -z cet-report: file does not have GNU_PROPERTY_X86_FEATURE_1_SHSTK property
 
 //#Config:cet-report-none:default
 //#ReferenceLinkers:lld

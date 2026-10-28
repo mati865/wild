@@ -13,7 +13,9 @@ use crate::elf_writer;
 use crate::ensure;
 use crate::erratum843419::ErratumSectionInfo;
 use crate::erratum843419::erratum_section_info;
+use crate::error;
 use crate::error::Context as _;
+use crate::error::MultiErrorBuilder;
 use crate::error::Result;
 use crate::expression_eval;
 use crate::file_kind::FileKind;
@@ -4771,10 +4773,17 @@ impl LayoutExt {
         }
 
         if is_x86_64 && (args.force_ibt || args.cet_report != crate::args::elf::CetReport::None) {
+            let mut cet_errors = MultiErrorBuilder::new();
             for obj in objects_iter(groups) {
                 let filename = obj.input.file.filename.to_string_lossy();
-                check_cet_properties(&filename, &obj.format_specific.gnu_property_notes, args)?;
+                check_cet_properties(
+                    &filename,
+                    &obj.format_specific.gnu_property_notes,
+                    args,
+                    &mut cet_errors,
+                );
             }
+            cet_errors.emit_errors_if_any()?;
         }
         let riscv_attributes = merge_riscv_attributes::<C, A>(states)?;
         let eflags = merge_eflags::<C, A>(objects_iter(groups).map(|o| o.object))?;
@@ -4865,7 +4874,13 @@ fn warn_ignored_x86_cet_options(args: &ElfArgs) {
     }
 }
 
-fn check_cet_properties(filename: &str, props: &[GnuProperty], args: &ElfArgs) -> Result {
+/// Reports the CET properties that `filename` lacks, for `-z force-ibt` and `-z cet-report`.
+fn check_cet_properties(
+    filename: &str,
+    props: &[GnuProperty],
+    args: &ElfArgs,
+    errors: &mut MultiErrorBuilder,
+) {
     let feature_bits = props
         .iter()
         .find(|p| p.ptype == object::elf::GNU_PROPERTY_X86_FEATURE_1_AND)
@@ -4897,13 +4912,12 @@ fn check_cet_properties(filename: &str, props: &[GnuProperty], args: &ElfArgs) -
                 let msg = format!("{filename}: -z cet-report: file does not have {name} property");
                 match args.cet_report {
                     CetReport::Warning => args.warning(msg),
-                    CetReport::Error => bail!("{msg}"),
+                    CetReport::Error => errors.add_error(error!("{msg}")),
                     CetReport::None => unreachable!(),
                 }
             }
         }
     }
-    Ok(())
 }
 
 fn merge_gnu_property_notes<'states, 'data: 'states, C: ElfClass, A: Arch>(

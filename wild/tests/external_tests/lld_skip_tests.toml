@@ -54,6 +54,7 @@ tests = [
   "basic-aarch64.s",
   "relocation-b-aarch64.test",
   "emulation-aarch64.s",
+  "x86-64-feature-cet.s",
 ]
 
 [skipped_groups.error_message_wording]
@@ -87,7 +88,6 @@ tests = ["x86-64-tls-le-undef.s", "aarch64-reloc-gotpcrel32.s"]
 [skipped_groups.unsupported_features]
 reason = "Feature not yet implemented in Wild"
 tests = [
-  "x86-64-feature-cet.s",
   "x86-64-reloc-size.s",
   "x86-64-reloc-size-shared.s",
   "x86-64-split-stack-prologue-adjust-shared.s",
