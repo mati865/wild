@@ -1327,13 +1327,14 @@ impl<'layout, 'out, C: ElfClass> TableWriter<'layout, 'out, C> {
         &mut self,
         place: u64,
         relative_address: u64,
+        relr_eligible: bool,
     ) -> Result<u64> {
         debug_assert_bail!(
             self.output_kind.is_position_independent(),
             "write_address_relocation called when output is not position-independent"
         );
         if let Some(relr_writer) = &mut self.relr_dyn
-            && elf::can_encode_relr_address(place)
+            && relr_eligible
         {
             self.relr_writer.encode(place, |encoded, encoding| {
                 match encoding {
@@ -2797,6 +2798,7 @@ fn apply_relocations<
     let mut modifier = RelocationModifier::Normal;
     let section_info = SectionInfo {
         section_address,
+        alignment: object_section.sh_addralign(LittleEndian).into(),
         is_writable: object_section.is_writable(),
         section_flags,
         part_id: object.section_part_id(section_index, &layout.symbol_db.section_part_ids),
@@ -3476,6 +3478,7 @@ fn write_eh_frame_relocations<
                     rel,
                     SectionInfo {
                         section_address: output_pos as u64 + table_writer.eh_frame_start_address,
+                        alignment: 1,
                         is_writable: false,
                         section_flags,
                         // .eh_frame relocations never need thunks; use the eh_frame section's
@@ -3578,6 +3581,7 @@ impl<'a, 'data, C: ElfClass, A: Arch<Platform = elf::Elf<C>>, R: Relocation<Plat
 #[derive(Clone, Copy)]
 struct SectionInfo<S: platform::SectionFlags> {
     section_address: u64,
+    alignment: u64,
     is_writable: bool,
     section_flags: S,
     part_id: PartId,
@@ -4749,7 +4753,14 @@ fn write_absolute_relocation<'data, C: ElfClass, A: Arch<Platform = elf::Elf<C>>
         } else if resolution.is_absolute() {
             Ok(address)
         } else {
-            table_writer.write_address_relocation::<A>(place, address)
+            table_writer.write_address_relocation::<A>(
+                place,
+                address,
+                elf::can_pack_relative_relocation(
+                    section_info.alignment,
+                    place - section_info.section_address,
+                ),
+            )
         }
     } else {
         resolution.value_with_addend(
