@@ -284,6 +284,7 @@ impl<'data> LayoutRulesBuilder<'data> {
                                         _ => crate::bail!("Illegal use of /DISCARD/ section"),
                                     }
                                 }
+                                continue;
                             }
                             let min_alignment = sec
                                 .alignment

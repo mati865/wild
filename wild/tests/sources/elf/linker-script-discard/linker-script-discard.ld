@@ -1,5 +1,7 @@
 SECTIONS {
-	/DISCARD/ : {
-		*(.text)
+    /DISCARD/ : {
+        *(.text)
+        *(.discard_before)
+        *(.discard_after)
     }
 }
