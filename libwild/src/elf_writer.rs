@@ -3853,15 +3853,22 @@ fn apply_relocation<
                 .write_to_buffer(value, &mut out[offset_in_section as usize..])?;
             return Ok(RelocationModifier::Normal);
         }
-        RelocationKind::Absolute | RelocationKind::TpOff
+        RelocationKind::Absolute | RelocationKind::TpOff => {
             if layout.symbol_db.output_kind.is_shared_object()
-                && A::is_disallowed_in_shared_object(r_type) =>
-        {
-            bail!(
-                "relocation type {} cannot be used when making a shared object; \
+                && A::is_disallowed_in_shared_object(r_type)
+            {
+                bail!(
+                    "relocation type {} cannot be used when making a shared object; \
                  recompile with -fPIC",
-                A::rel_type_to_string(r_type)
-            );
+                    A::rel_type_to_string(r_type)
+                );
+            } else if rel.symbol().is_none() {
+                let rel_info = A::relocation_from_raw(r_type)?;
+                let bias = rel_info.bias.map_or(0, Bias::value);
+                let value = (addend as u64).wrapping_add(bias);
+                rel_info.write_to_buffer(value, &mut out[offset_in_section as usize..])?;
+                return Ok(RelocationModifier::Normal);
+            }
         }
         _ => {}
     }
