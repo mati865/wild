@@ -76,6 +76,7 @@ mod version;
 pub use version::DEFAULT_LINKER_NAME;
 pub use version::WildVersionInfo;
 mod coff;
+mod coff_writer;
 mod coff_x86_64;
 pub(crate) mod version_script;
 pub(crate) mod wasm;

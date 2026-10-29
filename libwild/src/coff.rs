@@ -6,6 +6,7 @@ use crate::alignment::Alignment;
 use crate::arch::Architecture;
 use crate::args::coff::CoffArgs;
 use crate::bail;
+use crate::coff_writer;
 use crate::error::Result;
 use crate::input_data::InputBytes;
 use crate::input_data::InputRef;
@@ -184,7 +185,7 @@ impl Platform for Coff {
         output: &crate::file_writer::Output<F>,
         layout: &layout::Layout<'data, Self>,
     ) -> Result {
-        todo!("file writer is not implemented yet")
+        output.write(layout, coff_writer::write::<A>)
     }
 
     fn is_allowed_in_archive(kind: crate::file_kind::FileKind) -> bool {
