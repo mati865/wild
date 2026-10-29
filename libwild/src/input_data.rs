@@ -49,6 +49,9 @@ pub(crate) struct FileLoader<'data, F: FileSystem> {
     /// Whether we have at least one input file that is a dynamic object.
     pub(crate) has_dynamic: bool,
 
+    /// Effective framework directories, shared by input lookup and reproducer generation.
+    pub(crate) resolved_framework_search_path: Vec<Box<Path>>,
+
     inputs_arena: &'data Arena<InputFile<F::Input>>,
 
     // File system used for reading and writing of the data.
@@ -169,8 +172,9 @@ pub(crate) struct InputLinkerScript<'data> {
     pub(crate) script_bytes: &'data [u8],
 }
 
-struct TemporaryState<'data, P: Platform, F: FileSystem> {
+struct TemporaryState<'data, 'paths, P: Platform, F: FileSystem> {
     args: &'data P::Args,
+    framework_search_path: &'paths [Box<Path>],
     has_plugin: bool,
 
     inputs_by_path: Mutex<HashMap<PathBuf, InputLoadInfo>>,
@@ -309,6 +313,7 @@ impl<'data, F: FileSystem> FileLoader<'data, F> {
             inputs_arena,
             file_system,
             has_dynamic: false,
+            resolved_framework_search_path: Vec::new(),
         }
     }
 
@@ -320,13 +325,16 @@ impl<'data, F: FileSystem> FileLoader<'data, F> {
     ) -> Result<LoadedInputs<'data, P>> {
         timing_phase!("Open input files");
 
+        self.resolved_framework_search_path =
+            args.resolve_framework_search_path(self.file_system.as_ref());
+
         let mut inputs_by_path: HashMap<PathBuf, InputLoadInfo> = HashMap::new();
 
         let mut initial_work = Vec::with_capacity(inputs.len());
         for input in inputs {
             let path = input.path(
                 args.lib_search_path(),
-                args.framework_search_path(),
+                &self.resolved_framework_search_path,
                 self.file_system.as_ref(),
             )?;
             inputs_by_path
@@ -351,6 +359,7 @@ impl<'data, F: FileSystem> FileLoader<'data, F> {
 
         let temporary_state = TemporaryState {
             args,
+            framework_search_path: &self.resolved_framework_search_path,
             has_plugin: plugin.is_some(),
             inputs_by_path: Mutex::new(inputs_by_path),
             next_file_load_index: AtomicUsize::new(initial_work.len()),
@@ -541,7 +550,7 @@ fn process_archive<'data, P: Platform, F: FileSystem>(
     opened: &'data InputFile<F::Input>,
     input_ref: &InputRef<'data>,
     file: Option<&Arc<std::fs::File>>,
-    state: &TemporaryState<'data, P, F>,
+    state: &TemporaryState<'data, '_, P, F>,
 ) -> Result<LoadedFileState<'data, P, F::Input>> {
     let archive_data = input_ref.data();
     let parent_file = input_ref.file;
@@ -589,7 +598,7 @@ fn process_archive<'data, P: Platform, F: FileSystem>(
 
 fn process_thin_archive<'data, P: Platform, F: FileSystem>(
     input_file: &'data InputFile<F::Input>,
-    state: &TemporaryState<'data, P, F>,
+    state: &TemporaryState<'data, '_, P, F>,
 ) -> Result<LoadedFileState<'data, P, F::Input>> {
     let input_path = &input_file.filename;
     let parent_path = input_path.parent().unwrap();
@@ -657,7 +666,7 @@ fn process_fat_macho_object<'data, P: Platform, F: FileSystem>(
     file: &'data InputFile<F::Input>,
     input_ref: InputRef<'data>,
     native_file: Option<&Arc<std::fs::File>>,
-    state: &TemporaryState<'data, P, F>,
+    state: &TemporaryState<'data, '_, P, F>,
 ) -> Result<LoadedFileState<'data, P, F::Input>> {
     let data = select_fat_entry_for_cpu_type(input_ref.data(), object::macho::CPU_TYPE_ARM64)
         .with_context(|| format!("Failed to parse FAT object {input_ref}"))?;
@@ -681,7 +690,7 @@ fn process_fat_macho_object<'data, P: Platform, F: FileSystem>(
     }
 }
 
-impl<'data, P: Platform, F: FileSystem> TemporaryState<'data, P, F> {
+impl<'data, P: Platform, F: FileSystem> TemporaryState<'data, '_, P, F> {
     fn process_and_record_open_file_request<'scope>(
         &'scope self,
         request: OpenFileRequest,
@@ -793,7 +802,7 @@ impl<'data, P: Platform, F: FileSystem> TemporaryState<'data, P, F> {
     ) -> Result<FileLoadIndex> {
         let paths = input.path(
             self.args.lib_search_path(),
-            self.args.framework_search_path(),
+            self.framework_search_path,
             self.file_system.as_ref(),
         )?;
 
@@ -1201,20 +1210,25 @@ impl<'data, P: Platform> InputRecord<'data, P> {
 
 #[cfg(test)]
 mod tests {
+    use super::FileLoader;
     use super::Input;
     use super::InputSpec;
+    use crate::args::macho::MachOArgs;
     use crate::error::Result;
     use crate::fs::FileSystem;
     use crate::fs::FileType;
     use crate::fs::OsInputFile;
     use crate::fs::OsOutputFile;
     use crate::fs::OutputOptions;
+    use crate::platform::Args as _;
+    use colosseum::sync::Arena;
+    use hashbrown::HashMap;
     use std::path::Path;
     use std::path::PathBuf;
     use std::sync::Arc;
 
     struct MemoryFileSystem {
-        path: PathBuf,
+        entries: HashMap<PathBuf, FileType>,
     }
 
     impl FileSystem for MemoryFileSystem {
@@ -1230,11 +1244,10 @@ mod tests {
         }
 
         fn file_type(&self, path: &Path) -> Result<FileType> {
-            if path == self.path {
-                Ok(FileType::File)
-            } else {
-                Err(std::io::Error::from(std::io::ErrorKind::NotFound).into())
-            }
+            self.entries
+                .get(path)
+                .copied()
+                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound).into())
         }
 
         fn canonicalize(&self, _path: &Path) -> Result<PathBuf> {
@@ -1272,8 +1285,9 @@ mod tests {
             (InputSpec::Lib("foo".into()), None, "libfoo.tbd"),
             (InputSpec::Search("foo.o".into()), None, "foo.o"),
         ] {
+            let path = Path::new("libs").join(filename);
             let file_system = MemoryFileSystem {
-                path: Path::new("libs").join(filename),
+                entries: [(path.clone(), FileType::File)].into(),
             };
 
             let input = Input {
@@ -1283,11 +1297,11 @@ mod tests {
             };
 
             let resolved = input.path(&lib_search_path, &[], &file_system).unwrap();
-            assert_eq!(resolved.absolute, file_system.path, "{input:?}");
+            assert_eq!(resolved.absolute, path, "{input:?}");
             assert_eq!(resolved.original, Path::new(filename));
 
             let direct = Input {
-                spec: InputSpec::File(file_system.path.clone().into()),
+                spec: InputSpec::File(path.clone().into()),
                 search_first: None,
                 modifiers: Default::default(),
             };
@@ -1304,10 +1318,7 @@ mod tests {
                 .path(&lib_search_path, &[], &crate::fs::OsFileSystem)
                 .unwrap();
 
-            assert_eq!(
-                os_path.absolute,
-                std::path::absolute(&file_system.path).unwrap()
-            );
+            assert_eq!(os_path.absolute, std::path::absolute(&path).unwrap());
 
             let absolute = Input {
                 spec: InputSpec::File(os_path.absolute.clone().into()),
@@ -1329,8 +1340,9 @@ mod tests {
     fn resolves_framework_inputs() {
         let framework_search_path = [Path::new("Frameworks").into()];
         for filename in ["Foo.framework/Foo.tbd", "Foo.framework/Foo"] {
+            let path = Path::new("Frameworks").join(filename);
             let file_system = MemoryFileSystem {
-                path: Path::new("Frameworks").join(filename),
+                entries: [(path.clone(), FileType::File)].into(),
             };
             let input = Input {
                 spec: InputSpec::Framework("Foo".into()),
@@ -1341,8 +1353,36 @@ mod tests {
             let resolved = input
                 .path(&[], &framework_search_path, &file_system)
                 .unwrap();
-            assert_eq!(resolved.absolute, file_system.path);
+            assert_eq!(resolved.absolute, path);
             assert_eq!(resolved.original, Path::new(filename));
         }
+    }
+
+    #[test]
+    fn input_loading_uses_custom_file_system_for_framework_directories() {
+        let file_system = MemoryFileSystem {
+            entries: [
+                (PathBuf::from("/sdk/vendor"), FileType::Directory),
+                (PathBuf::from("/vendor/Foo.framework/Foo"), FileType::File),
+            ]
+            .into(),
+        };
+        let mut args = MachOArgs {
+            sysroot: Some(Path::new("/sdk").into()),
+            ..Default::default()
+        };
+        args.parse(["-F/vendor", "-framework", "Foo"].into_iter())
+            .unwrap();
+        let arena = Arena::new();
+        let mut loader = FileLoader::new(&arena, Arc::new(file_system));
+        let result =
+            loader.load_inputs::<crate::macho::MachO>(&args.common.inputs, &args, &mut None);
+        assert!(
+            result
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("Couldn't find framework `Foo`")
+        );
     }
 }
