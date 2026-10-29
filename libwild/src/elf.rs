@@ -7770,23 +7770,8 @@ fn allocate_for_copy_relocations<'data, C: ElfClass>(
     for value in state.format_specific.copy_relocations.values() {
         let symbol_id = value.symbol_id;
 
-        let symbol_index = state.symbol_id_range().id_to_input(symbol_id);
-        let symbol = state.object.symbol(symbol_index)?;
-
-        let section_index = state
-            .object
-            .symbol_section(symbol, symbol_index)?
-            .context("Copy relocation for undefined symbol")?;
-        let section = state.object.section(section_index)?;
-
-        let alignment = Alignment::new(state.object.section_alignment(section)?)?;
-
-        // Allocate space in BSS for the copy of the symbol.
-        let size = symbol.size();
-        common.allocate(
-            output_section_id::BSS.part_id_with_alignment::<Elf<C>>(alignment),
-            alignment.align_up(size),
-        );
+        let storage = copy_relocation_storage(state, symbol_id)?;
+        common.allocate(storage.part_id, storage.allocation_size);
 
         // Allocate space required for the copy relocation itself.
         common.allocate(part_id::RELA_DYN_GENERAL, C::RELA_ENTRY_SIZE);
@@ -7803,37 +7788,39 @@ fn assign_copy_relocation_addresses<'data, C: ElfClass>(
     copy_relocation_symbols
         .iter()
         .map(|symbol_id| {
-            let symbol_index = state.symbol_id_range.id_to_input(*symbol_id);
-            let symbol = state.object.symbol(symbol_index)?;
+            let storage = copy_relocation_storage(state, *symbol_id)?;
+            let output_address = memory_offsets.get(storage.part_id);
+            memory_offsets.increment(storage.part_id, storage.allocation_size);
 
-            let section_index = state
-                .object
-                .symbol_section(symbol, symbol_index)?
-                .context("Copy relocation for undefined symbol")?;
-            let section = state.object.section(section_index)?;
-
-            let alignment = Alignment::new(state.object.section_alignment(section)?)?;
-
-            let input_address = symbol.value();
-            let output_address =
-                assign_copy_relocation_address::<C>(alignment, symbol.size(), memory_offsets);
-
-            Ok((input_address, output_address))
+            Ok((storage.input_address, output_address))
         })
         .try_collect()
 }
 
-/// Assigns the address in BSS for the copy relocation of a symbol.
-fn assign_copy_relocation_address<C: ElfClass>(
-    alignment: Alignment,
-    size: u64,
-    memory_offsets: &mut OutputSectionPartMap<u64>,
-) -> u64 {
-    let bss =
-        memory_offsets.get_mut(output_section_id::BSS.part_id_with_alignment::<Elf<C>>(alignment));
-    let a = *bss;
-    *bss += alignment.align_up(size);
-    a
+struct CopyRelocationStorage {
+    input_address: u64,
+    part_id: PartId,
+    allocation_size: u64,
+}
+
+fn copy_relocation_storage<C: ElfClass>(
+    state: &layout::DynamicLayoutState<'_, Elf<C>>,
+    symbol_id: SymbolId,
+) -> Result<CopyRelocationStorage> {
+    let symbol_index = state.symbol_id_range.id_to_input(symbol_id);
+    let symbol = state.object.symbol(symbol_index)?;
+    let section_index = state
+        .object
+        .symbol_section(symbol, symbol_index)?
+        .context("Copy relocation for undefined symbol")?;
+    let section = state.object.section(section_index)?;
+    let alignment = Alignment::new(state.object.section_alignment(section)?)?;
+
+    Ok(CopyRelocationStorage {
+        input_address: symbol.value(),
+        part_id: output_section_id::BSS.part_id_with_alignment::<Elf<C>>(alignment),
+        allocation_size: alignment.align_up(symbol.size()),
+    })
 }
 
 impl CopyRelocationInfo {
