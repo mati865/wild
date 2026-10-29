@@ -1,7 +1,6 @@
 #![allow(dead_code, unused_variables)]
 
 use crate::coff::Coff;
-use crate::coff::RelocationType;
 use crate::platform::PreviousRelocationInfo;
 use linker_utils::elf::RelocationKindInfo;
 use linker_utils::relaxation::RelocationModifier;
@@ -17,7 +16,7 @@ impl crate::platform::Arch for CoffX86_64 {
 
     fn get_dynamic_relocation_type(
         _relocation: linker_utils::elf::DynamicRelocationKind,
-    ) -> RelocationType {
+    ) -> object::pe::RelocationType {
         todo!()
     }
 
@@ -35,7 +34,7 @@ impl crate::platform::Arch for CoffX86_64 {
         todo!()
     }
 
-    fn rel_type_to_string(r_type: RelocationType) -> std::borrow::Cow<'static, str> {
+    fn rel_type_to_string(r_type: object::pe::RelocationType) -> std::borrow::Cow<'static, str> {
         todo!()
     }
 
@@ -51,7 +50,7 @@ impl crate::platform::Arch for CoffX86_64 {
         Ok(0)
     }
 
-    fn high_part_relocations() -> &'static [RelocationType] {
+    fn high_part_relocations() -> &'static [object::pe::RelocationType] {
         &[]
     }
 
@@ -65,7 +64,7 @@ impl crate::platform::Arch for CoffX86_64 {
     }
 
     fn new_relaxation(
-        _relocation_kind: RelocationType,
+        _relocation_kind: object::pe::RelocationType,
         _section_bytes: &[u8],
         _offset_in_section: u64,
         _flags: crate::value_flags::ValueFlags,
@@ -75,7 +74,7 @@ impl crate::platform::Arch for CoffX86_64 {
         _sym_addr: u64,
         _section_address: u64,
         _rel_addend: i64,
-        _previous_relocation: Option<PreviousRelocationInfo<RelocationType>>,
+        _previous_relocation: Option<PreviousRelocationInfo<object::pe::RelocationType>>,
     ) -> Option<Self::Relaxation> {
         None
     }
