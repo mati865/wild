@@ -90,10 +90,10 @@ enum RegularSectionId {
     Count,
 }
 
-const PE_NUM_SINGLE_PART_SECTIONS: u32 = SinglePartSectionId::Count as u32;
-const PE_NUM_BUILT_IN_REGULAR_SECTIONS: usize = RegularSectionId::Count as usize;
-const PE_NUM_BUILT_IN_SECTIONS: usize =
-    PE_NUM_SINGLE_PART_SECTIONS as usize + PE_NUM_BUILT_IN_REGULAR_SECTIONS;
+const COFF_NUM_SINGLE_PART_SECTIONS: u32 = SinglePartSectionId::Count as u32;
+const COFF_NUM_BUILT_IN_REGULAR_SECTIONS: usize = RegularSectionId::Count as usize;
+const COFF_NUM_BUILT_IN_SECTIONS: usize =
+    COFF_NUM_SINGLE_PART_SECTIONS as usize + COFF_NUM_BUILT_IN_REGULAR_SECTIONS;
 
 pub(crate) mod part_id {
     use super::SinglePartSectionId;
@@ -129,8 +129,8 @@ impl<'data> platform::RelocationList<'data> for RelocationList<'data> {
 }
 
 impl Platform for Coff {
-    const NUM_SINGLE_PART_SECTIONS: u32 = PE_NUM_SINGLE_PART_SECTIONS;
-    const NUM_BUILT_IN_REGULAR_SECTIONS: usize = PE_NUM_BUILT_IN_REGULAR_SECTIONS;
+    const NUM_SINGLE_PART_SECTIONS: u32 = COFF_NUM_SINGLE_PART_SECTIONS;
+    const NUM_BUILT_IN_REGULAR_SECTIONS: usize = COFF_NUM_BUILT_IN_REGULAR_SECTIONS;
 
     const VERIFY_IGNORE_SECTION_IDS: &'static [OutputSectionId] =
         &[crate::output_section_id::FILE_HEADER];
@@ -188,7 +188,7 @@ impl Platform for Coff {
     }
 
     fn is_allowed_in_archive(kind: crate::file_kind::FileKind) -> bool {
-        kind == crate::file_kind::FileKind::Amd64PeObject
+        kind == crate::file_kind::FileKind::CoffObject
     }
 
     fn section_attributes(_header: &Self::SectionHeader) -> Self::SectionAttributes {
@@ -1349,8 +1349,8 @@ impl Coff {
         SectionKind::Primary(SectionIdentity::new(SectionName(name), ()))
     }
 
-    pub(crate) const SECTION_DEFINITIONS: [BuiltInSectionDetails; PE_NUM_BUILT_IN_SECTIONS] = {
-        let mut defs = [Self::DEFAULT_DEFS; PE_NUM_BUILT_IN_SECTIONS];
+    pub(crate) const SECTION_DEFINITIONS: [BuiltInSectionDetails; COFF_NUM_BUILT_IN_SECTIONS] = {
+        let mut defs = [Self::DEFAULT_DEFS; COFF_NUM_BUILT_IN_SECTIONS];
 
         defs[crate::output_section_id::FILE_HEADER.as_usize()] = BuiltInSectionDetails {
             kind: Self::primary_section(b""),
@@ -1380,6 +1380,6 @@ impl SinglePartSectionId {
 
 impl RegularSectionId {
     const fn output_section_id(self) -> OutputSectionId {
-        OutputSectionId::from_u32(PE_NUM_SINGLE_PART_SECTIONS).offset(self as usize)
+        OutputSectionId::from_u32(COFF_NUM_SINGLE_PART_SECTIONS).offset(self as usize)
     }
 }
