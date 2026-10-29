@@ -10,6 +10,7 @@ use crate::error::Result;
 use crate::fs::FileSystem;
 use crate::platform;
 use std::path::Path;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CoffMachine {
@@ -78,9 +79,13 @@ impl CoffArgs {
 
 impl Default for CoffArgs {
     fn default() -> Self {
+        let common = CommonArgs {
+            output: Arc::from(Path::new("a.exe")),
+            ..Default::default()
+        };
         Self {
             is_mingw: false,
-            common: CommonArgs::default(),
+            common,
             entry: None,
             subsystem: None,
             is_dll: false,
