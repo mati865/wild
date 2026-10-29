@@ -971,21 +971,6 @@ fn setup_argument_parser() -> ArgumentParser<ElfArgs> {
 
     parser
         .declare_with_param()
-        .prefix("R")
-        .help("Add runtime library search path")
-        .execute(|args, _modifier_stack, value| {
-            if Path::new(value).is_file() {
-                args.common_mut()
-                    .unrecognized_options
-                    .push(format!("-R,{value}(filename)"));
-            } else {
-                args.rpath_set.insert(value.to_string());
-            }
-            Ok(())
-        });
-
-    parser
-        .declare_with_param()
         .prefix("O")
         .execute(|_args, _modifier_stack, _value|
         // We don't use opt-level for now.
@@ -1378,6 +1363,9 @@ fn setup_argument_parser() -> ArgumentParser<ElfArgs> {
     parser
         .declare_with_param()
         .long("rpath")
+        // BFD treats -R as having two different meanings and switches between them based on whether
+        // the subsequent argument is a file or not. LLD doesn't do this and neither do we.
+        .prefix("R")
         .help("Add directory to runtime library search path")
         .execute(|args, _modifier_stack, value| {
             args.rpath_set.insert(value.to_string());
