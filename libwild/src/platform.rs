@@ -1714,10 +1714,8 @@ pub(crate) trait Args: std::fmt::Debug + Send + Sync + 'static {
 
     fn should_strip_all(&self) -> bool;
 
-    /// Returns whether a symbol with the specified name should be stripped. Should return false if
-    /// name-based stripping is not being applied.
-    fn should_strip_symbol_named(&self, _name: &[u8]) -> bool {
-        false
+    fn retain_symbols_path(&self) -> Option<&Path> {
+        None
     }
 
     /// Returns a list of symbol names that should be treated as undefined.

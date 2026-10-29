@@ -57,6 +57,7 @@ use crate::version_script::RustVersionScript;
 use crate::version_script::VersionScript;
 use crossbeam_queue::SegQueue;
 use hashbrown::HashMap;
+use hashbrown::HashSet;
 use hashbrown::hash_map;
 use itertools::Itertools;
 use rayon::iter::IndexedParallelIterator as _;
@@ -91,6 +92,9 @@ pub struct SymbolDb<'data, P: Platform> {
 
     pub(crate) version_script: VersionScript<'data>,
     pub(crate) export_list: Option<ExportList<'data>>,
+
+    /// When present, only these names are retained by name-based symbol stripping.
+    retain_symbols: Option<HashSet<&'data [u8]>>,
 
     /// The name of the entry symbol if overridden by a linker script.
     entry: Option<&'data [u8]>,
@@ -349,6 +353,8 @@ impl<'data, P: Platform> SymbolDb<'data, P> {
             export_list.get_or_insert_default().merge(parsed);
         }
 
+        let retain_symbols = parse_retain_symbols_file(auxiliary);
+
         let num_buckets = num_symbol_hash_buckets(args);
         let mut buckets = Vec::new();
         buckets.resize_with(num_buckets, || SymbolBucket {
@@ -367,6 +373,7 @@ impl<'data, P: Platform> SymbolDb<'data, P> {
             start_stop_symbol_names: Default::default(),
             version_script,
             export_list,
+            retain_symbols,
             entry: None,
             output_kind,
             herd,
@@ -382,6 +389,12 @@ impl<'data, P: Platform> SymbolDb<'data, P> {
         }
 
         Ok(symbol_db)
+    }
+
+    pub(crate) fn should_strip_symbol_named(&self, name: &[u8]) -> bool {
+        self.retain_symbols
+            .as_ref()
+            .is_some_and(|retain| !retain.contains(name))
     }
 
     pub(crate) fn add_inputs(
@@ -1140,6 +1153,16 @@ impl<'data, P: Platform> SymbolDb<'data, P> {
         };
         self.section_part_ids[input_section_id.as_usize()]
     }
+}
+
+fn parse_retain_symbols_file<'data>(aux: &AuxiliaryFiles<'data>) -> Option<HashSet<&'data [u8]>> {
+    aux.retain_symbols_data.map(|contents| {
+        contents
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(str::as_bytes)
+            .collect()
+    })
 }
 
 pub(crate) fn linker_plugin_disabled_error() -> Error {

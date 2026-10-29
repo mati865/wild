@@ -251,6 +251,7 @@ struct LoadedLinkerScript<'data> {
 pub(crate) struct AuxiliaryFiles<'data> {
     pub(crate) version_script_data: Option<ScriptData<'data>>,
     pub(crate) export_list_data: Vec<(PathBuf, ScriptData<'data>)>,
+    pub(crate) retain_symbols_data: Option<&'data str>,
 }
 
 impl<'data> AuxiliaryFiles<'data> {
@@ -274,19 +275,26 @@ impl<'data> AuxiliaryFiles<'data> {
         Ok(Self {
             version_script_data: args
                 .version_script_path()
-                .map(|path| read_script_data(&resolve_script_path(path), inputs_arena, file_system))
+                .map(|path| {
+                    read_auxiliary_data(&resolve_script_path(path), inputs_arena, file_system)
+                })
                 .transpose()?,
             export_list_data: args
                 .export_list_paths()
                 .map(|path| {
                     let path = resolve_script_path(path);
-                    let data =
-                        read_script_data(&path, inputs_arena, file_system).with_context(|| {
-                            format!("Failed to read export list `{}`", path.display())
-                        })?;
+                    let data = read_auxiliary_data(&path, inputs_arena, file_system)?;
                     Ok((path, data))
                 })
                 .collect::<Result<_>>()?,
+            retain_symbols_data: args
+                .retain_symbols_path()
+                .map(|path| {
+                    let data = read_auxiliary_data(path, inputs_arena, file_system)?;
+                    std::str::from_utf8(data.raw)
+                        .with_context(|| format!("Invalid UTF-8 in `{}`", path.display()))
+                })
+                .transpose()?,
         })
     }
 }
@@ -910,14 +918,14 @@ fn select_fat_entry_for_cpu_type_arch<A: object::read::macho::FatArch>(
     Ok(&data[offset..offset + size])
 }
 
-fn read_script_data<'data, F: FileSystem>(
+fn read_auxiliary_data<'data, F: FileSystem>(
     path: &Path,
     inputs_arena: &'data Arena<InputFile<F::Input>>,
     file_system: &F,
 ) -> Result<ScriptData<'data>> {
     let (input, _) = file_system
         .open_input(path, false)
-        .context("Failed to read script")?;
+        .with_context(|| format!("Failed to read {}", path.display()))?;
 
     let file = inputs_arena.alloc(InputFile {
         filename: path.to_owned(),

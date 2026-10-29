@@ -80,7 +80,6 @@ pub struct ElfArgs {
     pub(crate) needs_nodelete_handling: bool,
     pub(crate) copy_relocations: CopyRelocations,
     pub(crate) sysroot: Option<Box<Path>>,
-    retain_symbols_path: Option<PathBuf>,
     pub(crate) undefined: Vec<String>,
     pub(crate) relro: bool,
     pub(crate) entry: Option<String>,
@@ -181,7 +180,7 @@ pub(crate) enum Strip {
     Nothing,
     Debug,
     All,
-    Retain(HashSet<Vec<u8>>),
+    Retain(PathBuf),
     OnlyKeepDebug,
 }
 
@@ -397,7 +396,6 @@ impl Default for ElfArgs {
             no_undefined: None,
             allow_shlib_undefined: false,
             sysroot: None,
-            retain_symbols_path: None,
             dependency_file: None,
             undefined: Vec::new(),
             relro: true,
@@ -589,18 +587,6 @@ pub(crate) fn parse<S: AsRef<str>, I: Iterator<Item = S>>(
         {
             *path = new_path;
         }
-    }
-
-    if let Some(path) = args.retain_symbols_path.take() {
-        let contents = std::fs::read_to_string(&path)
-            .with_context(|| format!("Failed to read `{}`", path.display()))?;
-        args.strip = Strip::Retain(
-            contents
-                .lines()
-                .filter(|line| !line.is_empty())
-                .map(|line| line.as_bytes().to_owned())
-                .collect(),
-        );
     }
 
     if let Some(error) = args.emulation_error.take() {
@@ -1022,7 +1008,6 @@ fn setup_argument_parser() -> ArgumentParser<ElfArgs> {
         .execute(|args, _modifier_stack| {
             args.strip_requested = true;
             args.strip = Strip::All;
-            args.retain_symbols_path = None;
             Ok(())
         });
 
@@ -1034,7 +1019,6 @@ fn setup_argument_parser() -> ArgumentParser<ElfArgs> {
         .execute(|args, _modifier_stack| {
             args.strip_requested = true;
             args.strip = Strip::Debug;
-            args.retain_symbols_path = None;
             Ok(())
         });
 
@@ -1045,7 +1029,6 @@ fn setup_argument_parser() -> ArgumentParser<ElfArgs> {
         .execute(|args, _modifier_stack| {
             args.only_keep_debug_requested = true;
             args.strip = Strip::OnlyKeepDebug;
-            args.retain_symbols_path = None;
             Ok(())
         });
 
@@ -1774,7 +1757,7 @@ fn setup_argument_parser() -> ArgumentParser<ElfArgs> {
             One symbol per line.",
         )
         .execute(|args, _modifier_stack, value| {
-            args.retain_symbols_path = Some(PathBuf::from(value));
+            args.strip = Strip::Retain(PathBuf::from(value));
             Ok(())
         });
 
@@ -2277,11 +2260,11 @@ impl platform::Args for ElfArgs {
         !self.should_output_partial_object() && matches!(self.strip, Strip::All)
     }
 
-    fn should_strip_symbol_named(&self, name: &[u8]) -> bool {
-        let Strip::Retain(retain) = &self.strip else {
-            return false;
-        };
-        !retain.contains(name)
+    fn retain_symbols_path(&self) -> Option<&Path> {
+        match &self.strip {
+            Strip::Retain(path) => Some(path),
+            _ => None,
+        }
     }
 
     fn force_undefined_symbol_names(&self) -> &[String] {
