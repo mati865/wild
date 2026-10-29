@@ -53,7 +53,6 @@ pub(crate) fn link_for_arch<'data, F: FileSystem>(
     }
 }
 
-pub(crate) type SectionHeader = object::pe::ImageSectionHeader;
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SymtabEntry {
     pub(crate) raw: object::pe::ImageSymbol,
@@ -61,6 +60,11 @@ pub(crate) struct SymtabEntry {
     pub(crate) is_aux: bool,
 }
 
+// TODO: Figure out naming
+pub(crate) type DosHeader = object::pe::ImageDosHeader;
+pub(crate) type NtHeader = object::pe::ImageNtHeaders64;
+pub(crate) type CoffFileHeader = object::pe::ImageFileHeader;
+pub(crate) type SectionHeader = object::pe::ImageSectionHeader;
 pub(crate) type SymbolTable<'data> = object::read::coff::SymbolTable<'data>;
 
 #[derive(Debug, Copy, Clone, Default)]
@@ -69,7 +73,8 @@ pub(crate) struct Coff;
 #[repr(u32)]
 #[derive(Clone, Copy)]
 enum SinglePartSectionId {
-    SectionHeaders = crate::output_section_id::NUM_COMMON_SINGLE_PART_SECTIONS,
+    NtHeader = crate::output_section_id::NUM_COMMON_SINGLE_PART_SECTIONS,
+    SectionHeaders,
     RelaDynRelative,
 
     // Must be last.
@@ -100,6 +105,7 @@ pub(crate) mod part_id {
     use super::SinglePartSectionId;
     use crate::part_id::PartId;
 
+    pub(crate) const NT_HEADER: PartId = SinglePartSectionId::NtHeader.part_id();
     pub(crate) const SECTION_HEADERS: PartId = SinglePartSectionId::SectionHeaders.part_id();
     pub(crate) const RELA_DYN_RELATIVE: PartId = SinglePartSectionId::RelaDynRelative.part_id();
 }
@@ -109,6 +115,7 @@ pub(crate) mod output_section_id {
     use super::SinglePartSectionId;
     use crate::output_section_id::OutputSectionId;
 
+    pub(crate) const NT_HEADER: OutputSectionId = SinglePartSectionId::NtHeader.output_section_id();
     pub(crate) const RELA_DYN_RELATIVE: OutputSectionId =
         SinglePartSectionId::RelaDynRelative.output_section_id();
 
@@ -151,8 +158,8 @@ impl Platform for Coff {
     const RODATA_SECTION_ID: Option<OutputSectionId> = Some(output_section_id::RODATA);
 
     const VERIFY_IGNORE_SECTION_IDS: &'static [OutputSectionId] = &[
-        output_section_id::RELA_DYN_RELATIVE,
         crate::output_section_id::FILE_HEADER,
+        output_section_id::NT_HEADER,
     ];
 
     type File<'data> = File<'data>;
@@ -538,10 +545,8 @@ impl Platform for Coff {
         _resources: &layout::FinaliseSizesResources<'data, '_, Self>,
         _args: &Self::Args,
     ) {
-        sizes.increment(
-            crate::part_id::FILE_HEADER,
-            object::pe::IMAGE_SIZEOF_FILE_HEADER as u64,
-        );
+        sizes.increment(crate::part_id::FILE_HEADER, size_of::<DosHeader>() as u64);
+        sizes.increment(part_id::NT_HEADER, size_of::<NtHeader>() as u64);
     }
 
     fn finalise_sizes_for_symbol<'data>(
@@ -645,6 +650,7 @@ impl Platform for Coff {
         );
 
         builder.add_section(crate::output_section_id::FILE_HEADER);
+        builder.add_section(output_section_id::NT_HEADER);
         builder.add_section(output_section_id::RELA_DYN_RELATIVE);
         builder.add_section(output_section_id::RODATA);
         builder.add_sections(&custom.ro);
@@ -713,7 +719,7 @@ impl Platform for Coff {
 impl<'data> File<'data> {
     fn parse_coff_bytes(data: &'data [u8], is_dynamic: bool) -> Result<Self> {
         let mut offset = 0;
-        let header = object::pe::ImageFileHeader::parse(data, &mut offset)?;
+        let header = CoffFileHeader::parse(data, &mut offset)?;
         let arch = match header.machine() {
             object::pe::IMAGE_FILE_MACHINE_AMD64 => Architecture::X86_64,
             _ => bail!("Unsupported architecture: {:?}", header.machine()),
@@ -1387,11 +1393,16 @@ impl Coff {
     pub(crate) const SECTION_DEFINITIONS: [BuiltInSectionDetails; COFF_NUM_BUILT_IN_SECTIONS] = {
         let mut defs = [Self::DEFAULT_DEFS; COFF_NUM_BUILT_IN_SECTIONS];
 
-        // A section into which we write headers.
+        // Sections into which we write headers.
         defs[crate::output_section_id::FILE_HEADER.as_usize()] = BuiltInSectionDetails {
             kind: Self::primary_section(b""),
             ..Self::DEFAULT_DEFS
         };
+        defs[output_section_id::NT_HEADER.as_usize()] = BuiltInSectionDetails {
+            kind: Self::primary_section(b""),
+            ..Self::DEFAULT_DEFS
+        };
+
         defs[output_section_id::RELA_DYN_RELATIVE.as_usize()] = BuiltInSectionDetails {
             kind: Self::primary_section(".reloc".as_bytes()),
             link: &[output_section_id::RELA_DYN_RELATIVE],

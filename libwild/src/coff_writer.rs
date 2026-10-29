@@ -2,13 +2,16 @@
 
 use crate::OutputFileData;
 use crate::coff;
+use crate::coff::output_section_id;
 use crate::error::Context;
 use crate::file_writer::SizedOutput;
 use crate::file_writer::split_buffers_by_alignment;
 use crate::file_writer::split_output_by_group;
 use crate::file_writer::split_output_into_sections;
 use crate::layout::FileLayout;
+use crate::layout::HeaderInfo;
 use crate::layout::Layout;
+use crate::layout::PreludeLayout;
 use crate::output_kind::OutputKind;
 use crate::output_section_id::SectionOutputInfo;
 use crate::output_section_map::OutputSectionMap;
@@ -17,6 +20,8 @@ use crate::output_trace::TraceOutput;
 use crate::platform::Arch;
 use crate::timing::timing_phase;
 use crate::timing::verbose_timing_phase;
+use object::LittleEndian;
+use object::from_bytes_mut;
 use rayon::iter::IndexedParallelIterator;
 use rayon::iter::IntoParallelIterator as _;
 use rayon::iter::ParallelIterator as _;
@@ -153,6 +158,58 @@ fn fill_padding(mut section_buffers: OutputSectionMap<&mut [u8]>) {
     });
 }
 
+fn populate_dos_header<A: Arch<Platform = coff::Coff>>(
+    layout: &CoffLayout,
+    header: &mut coff::DosHeader,
+) -> crate::error::Result {
+    let e = LittleEndian;
+    header.e_magic.set(e, object::pe::IMAGE_DOS_SIGNATURE);
+    header.e_lfanew.set(
+        e,
+        layout
+            .section_layouts
+            .get(output_section_id::NT_HEADER)
+            .file_offset
+            .try_into()?,
+    );
+    // TODO: other fields
+
+    Ok(())
+}
+fn populate_nt_header<A: Arch<Platform = coff::Coff>>(
+    layout: &CoffLayout,
+    header_info: &HeaderInfo,
+    header: &mut coff::NtHeader,
+) -> crate::error::Result {
+    let output_kind = layout.symbol_db.output_kind;
+    let ty = if output_kind.is_shared_object() {
+        object::pe::IMAGE_FILE_DLL
+    } else {
+        object::pe::IMAGE_FILE_EXECUTABLE_IMAGE
+    };
+
+    let e = LittleEndian;
+    header.signature.set(e, object::pe::IMAGE_NT_SIGNATURE);
+    header
+        .file_header
+        .machine
+        .set(e, object::pe::IMAGE_FILE_MACHINE_AMD64);
+    // TODO
+    // header.file_header.number_of_sections.set(e, 0);
+    header.file_header.size_of_optional_header.set(
+        e,
+        size_of::<object::pe::ImageOptionalHeader64>().try_into()?,
+    );
+    header.file_header.characteristics.set(e, ty);
+    header
+        .optional_header
+        .magic
+        .set(e, object::pe::IMAGE_NT_OPTIONAL_HDR64_MAGIC);
+    // TODO: other fields
+
+    Ok(())
+}
+
 fn write_file<'data, A: Arch<Platform = coff::Coff>>(
     file: &FileLayout<'data, coff::Coff>,
     buffers: &mut OutputSectionPartMap<&mut [u8]>,
@@ -161,22 +218,50 @@ fn write_file<'data, A: Arch<Platform = coff::Coff>>(
     trace: &TraceOutput,
     sym_index_map: &[Option<u32>],
 ) -> crate::error::Result {
-    /*    match file {
-            FileLayout::Object(s) => {
-                write_object::<A>(s, buffers, table_writer, layout, trace, sym_index_map)?;
-            }
-            FileLayout::Prelude(s) => {
-                write_prelude::<A>(s, buffers, table_writer, layout, sym_index_map)?;
-            }
-            FileLayout::Epilogue(s) => write_epilogue::<A>(s, buffers, table_writer, layout, trace)?,
-            FileLayout::SyntheticSymbols(s) => {
-                write_synthetic_symbols::<A>(s, table_writer, layout)?;
-            }
-            FileLayout::LinkerScript(s) => write_linker_script_state::<A>(s, table_writer, layout)?,
-            FileLayout::NotLoaded | FileLayout::StubLibrary(_) => {}
-            FileLayout::Dynamic(s) => write_dynamic_file::<A>(s, table_writer, layout)?,
+    match file {
+        FileLayout::Object(s) => {
+            // write_object::<A>(s, buffers, table_writer, layout, trace, sym_index_map)?;
         }
-    */
+        FileLayout::Prelude(s) => {
+            write_prelude::<A>(s, buffers, layout, sym_index_map)?;
+        }
+        FileLayout::Epilogue(s) => {
+            // write_epilogue::<A>(s, buffers, table_writer, layout, trace)?
+        }
+        FileLayout::SyntheticSymbols(s) => {
+            // write_synthetic_symbols::<A>(s, table_writer, layout)?;
+        }
+        FileLayout::LinkerScript(s) => todo!("Wild's coff doesn't support linker scripts yet"),
+        FileLayout::NotLoaded | FileLayout::StubLibrary(_) => {}
+        FileLayout::Dynamic(s) => {
+            // write_dynamic_file::<A>(s, table_writer, layout)?
+        }
+    }
+
+    Ok(())
+}
+
+fn write_prelude<A: Arch<Platform = coff::Coff>>(
+    prelude: &PreludeLayout<coff::Coff>,
+    buffers: &mut OutputSectionPartMap<&mut [u8]>,
+    layout: &CoffLayout,
+    sym_index_map: &[Option<u32>],
+) -> crate::error::Result {
+    verbose_timing_phase!("Write prelude");
+
+    let dos_header: &mut coff::DosHeader =
+        from_bytes_mut(buffers.get_mut(crate::part_id::FILE_HEADER))
+            .ok()
+            .context("Invalid DOS header allocation")?
+            .0;
+    populate_dos_header::<A>(layout, dos_header)?;
+
+    let nt_header: &mut coff::NtHeader = from_bytes_mut(buffers.get_mut(coff::part_id::NT_HEADER))
+        .ok()
+        .context("Invalid NT header allocation")?
+        .0;
+    populate_nt_header::<A>(layout, &prelude.header_info, nt_header)?;
+
     Ok(())
 }
 
