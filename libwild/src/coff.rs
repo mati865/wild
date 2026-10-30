@@ -29,6 +29,7 @@ use crate::platform::Arch;
 use crate::platform::Args;
 use crate::platform::CommonSymbol;
 use crate::platform::Platform;
+use crate::platform::SectionFlags as _;
 use crate::resolution::LoadedMetrics;
 use crate::symbol_db::SymbolDb;
 use crate::symbol_db::Visibility;
@@ -127,6 +128,8 @@ pub(crate) mod output_section_id {
 
     pub(crate) const DOS_STUB: OutputSectionId = SinglePartSectionId::DosStub.output_section_id();
     pub(crate) const NT_HEADER: OutputSectionId = SinglePartSectionId::NtHeader.output_section_id();
+    pub(crate) const SECTION_HEADERS: OutputSectionId =
+        SinglePartSectionId::SectionHeaders.output_section_id();
     pub(crate) const RELA_DYN_RELATIVE: OutputSectionId =
         SinglePartSectionId::RelaDynRelative.output_section_id();
 
@@ -172,6 +175,7 @@ impl Platform for Coff {
         crate::output_section_id::FILE_HEADER,
         output_section_id::DOS_STUB,
         output_section_id::NT_HEADER,
+        output_section_id::SECTION_HEADERS,
     ];
 
     type File<'data> = File<'data>;
@@ -230,8 +234,10 @@ impl Platform for Coff {
         kind == crate::file_kind::FileKind::CoffObject
     }
 
-    fn section_attributes(_header: &Self::SectionHeader) -> Self::SectionAttributes {
-        SectionAttributes::default()
+    fn section_attributes(header: &Self::SectionHeader) -> Self::SectionAttributes {
+        SectionAttributes {
+            flags: header.characteristics.get(LittleEndian),
+        }
     }
 
     fn apply_force_keep_sections(
@@ -551,7 +557,7 @@ impl Platform for Coff {
     fn allocate_header_sizes<'data>(
         _prelude: &mut layout::PreludeLayoutState<'data, Self>,
         sizes: &mut OutputSectionPartMap<u64>,
-        _header_info: &layout::HeaderInfo,
+        header_info: &layout::HeaderInfo,
         _program_segments: &crate::program_segments::ProgramSegments<Self::ProgramSegmentDef>,
         _output_sections: &crate::output_section_id::OutputSections<Self>,
         _resources: &layout::FinaliseSizesResources<'data, '_, Self>,
@@ -560,6 +566,11 @@ impl Platform for Coff {
         sizes.increment(crate::part_id::FILE_HEADER, size_of::<DosHeader>() as u64);
         sizes.increment(part_id::DOS_STUB, DOS_STUB.len() as u64);
         sizes.increment(part_id::NT_HEADER, SIZE_OF_NT_HEADERS64 as u64);
+        sizes.increment(
+            part_id::SECTION_HEADERS,
+            u64::from(header_info.num_output_sections_with_content)
+                * size_of::<SectionHeader>() as u64,
+        );
     }
 
     fn finalise_sizes_for_symbol<'data>(
@@ -665,6 +676,7 @@ impl Platform for Coff {
         builder.add_section(crate::output_section_id::FILE_HEADER);
         builder.add_section(output_section_id::DOS_STUB);
         builder.add_section(output_section_id::NT_HEADER);
+        builder.add_section(output_section_id::SECTION_HEADERS);
         builder.add_section(output_section_id::RELA_DYN_RELATIVE);
         builder.add_section(output_section_id::RODATA);
         builder.add_sections(&custom.ro);
@@ -700,6 +712,15 @@ impl Platform for Coff {
             index: 0,
             is_aux: false,
         }
+    }
+
+    // TODO: duplicates `allocate_header_sizes`
+    fn get_sizeof_headers(header_info: &layout::HeaderInfo) -> u64 {
+        size_of::<DosHeader>() as u64
+            + DOS_STUB.len() as u64
+            + SIZE_OF_NT_HEADERS64 as u64
+            + u64::from(header_info.num_output_sections_with_content)
+                * size_of::<SectionHeader>() as u64
     }
 
     type GdbIndexScanResult<'data> = ();
@@ -820,7 +841,7 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
     }
 
     fn section_size(&self, section: &SectionHeader) -> Result<u64> {
-        Ok(section.size_of_raw_data.get(LittleEndian).into())
+        Ok(section.virtual_size.get(LittleEndian).into())
     }
 
     fn symbol_name(&self, symbol: &SymtabEntry) -> Result<&'data [u8]> {
@@ -863,7 +884,9 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
     }
 
     fn section_by_name(&self, name: &str) -> Option<(SectionIndex, &SectionHeader)> {
-        todo!()
+        self.sections
+            .section_by_name(self.symbol_table.strings(), name.as_bytes())
+            .map(|(i, section)| (SectionIndex(i.0 - 1), section))
     }
 
     fn symbol_section(
@@ -920,24 +943,32 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
     }
 
     fn raw_section_data(&self, section: &SectionHeader) -> Result<&'data [u8]> {
-        todo!()
+        let e = LittleEndian;
+        let ptr = section.pointer_to_raw_data.get(e) as usize;
+        let mut size = section.size_of_raw_data.get(e) as usize;
+        if size == 0 {
+            size = section.virtual_size.get(e) as usize;
+        }
+        Ok(&self.data[ptr..ptr + size])
     }
 
     fn section_data(
         &self,
         section: &SectionHeader,
-        member: &bumpalo_herd::Member<'data>,
-        loaded_metrics: &LoadedMetrics,
+        _member: &bumpalo_herd::Member<'data>,
+        _loaded_metrics: &LoadedMetrics,
     ) -> Result<&'data [u8]> {
-        todo!()
+        self.raw_section_data(section)
     }
 
     fn copy_section_data(&self, section: &SectionHeader, out: &mut [u8]) -> Result {
-        todo!()
+        let bytes = self.raw_section_data(section)?;
+        out.copy_from_slice(bytes);
+        Ok(())
     }
 
     fn section_data_cow(&self, section: &SectionHeader) -> Result<Cow<'data, [u8]>> {
-        todo!()
+        Ok(Cow::Borrowed(self.raw_section_data(section)?))
     }
 
     fn section_alignment(&self, section: &SectionHeader) -> Result<u64> {
@@ -1006,18 +1037,22 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
     }
 }
 
-// TODO
+// TODO: This duplicates a lot of `platform::SectionAttributes`.
 impl platform::SectionHeader for SectionHeader {
     fn is_alloc(&self) -> bool {
-        false
+        self.characteristics.get(LittleEndian).is_alloc()
     }
 
     fn is_writable(&self) -> bool {
-        false
+        self.characteristics
+            .get(LittleEndian)
+            .contains(object::pe::IMAGE_SCN_MEM_WRITE)
     }
 
     fn is_executable(&self) -> bool {
-        false
+        self.characteristics
+            .get(LittleEndian)
+            .contains(object::pe::IMAGE_SCN_MEM_EXECUTE)
     }
 
     fn is_tls(&self) -> bool {
@@ -1033,7 +1068,10 @@ impl platform::SectionHeader for SectionHeader {
     }
 
     fn should_retain(&self) -> bool {
-        false
+        !self
+            .characteristics
+            .get(LittleEndian)
+            .contains(object::pe::IMAGE_SCN_LNK_REMOVE)
     }
 
     fn should_exclude(&self) -> bool {
@@ -1053,7 +1091,9 @@ impl platform::SectionHeader for SectionHeader {
     }
 
     fn is_no_bits(&self) -> bool {
-        false
+        self.characteristics
+            .get(LittleEndian)
+            .contains(object::pe::IMAGE_SCN_CNT_UNINITIALIZED_DATA)
     }
 
     fn is_null(&self) -> bool {
@@ -1066,7 +1106,6 @@ pub(crate) struct SectionType {}
 
 impl platform::SectionType for SectionType {
     fn is_rela(&self) -> bool {
-        // TODO: this one might be relevant
         false
     }
 
@@ -1085,8 +1124,8 @@ impl platform::SectionType for SectionType {
 
 impl platform::SectionFlags for SectionFlags {
     fn is_alloc(self) -> bool {
-        // TODO
-        false
+        !self.contains(object::pe::IMAGE_SCN_MEM_DISCARDABLE)
+            && self.contains(object::pe::IMAGE_SCN_MEM_READ)
     }
 }
 
@@ -1243,16 +1282,18 @@ pub(crate) struct SectionAttributes {
 impl platform::SectionAttributes for SectionAttributes {
     type Platform = Coff;
 
-    fn merge(&mut self, _rhs: Self) {
-        // TODO
+    fn merge(&mut self, rhs: Self) {
+        self.flags |= rhs.flags;
     }
 
     fn apply(
         &self,
-        _output_sections: &mut crate::output_section_id::OutputSections<Self::Platform>,
-        _section_id: OutputSectionId,
+        output_sections: &mut crate::output_section_id::OutputSections<Self::Platform>,
+        section_id: OutputSectionId,
     ) {
-        // TODO
+        let info = output_sections.section_infos.get_mut(section_id);
+
+        info.section_attributes.flags |= self.flags;
     }
 
     fn is_null(&self) -> bool {
@@ -1260,11 +1301,11 @@ impl platform::SectionAttributes for SectionAttributes {
     }
 
     fn is_alloc(&self) -> bool {
-        false
+        self.flags.is_alloc()
     }
 
     fn is_executable(&self) -> bool {
-        false
+        self.flags.contains(object::pe::IMAGE_SCN_MEM_EXECUTE)
     }
 
     fn is_tls(&self) -> bool {
@@ -1276,15 +1317,16 @@ impl platform::SectionAttributes for SectionAttributes {
     }
 
     fn is_writable(&self) -> bool {
-        false
+        self.flags.contains(object::pe::IMAGE_SCN_MEM_WRITE)
     }
 
     fn is_no_bits(&self) -> bool {
-        false
+        self.flags
+            .contains(object::pe::IMAGE_SCN_CNT_UNINITIALIZED_DATA)
     }
 
     fn flags(&self) -> <Self::Platform as Platform>::SectionFlags {
-        SectionFlags::default()
+        self.flags
     }
 
     fn ty(&self) -> <Self::Platform as Platform>::SectionType {
@@ -1416,6 +1458,10 @@ impl Coff {
             ..Self::DEFAULT_DEFS
         };
         defs[output_section_id::NT_HEADER.as_usize()] = BuiltInSectionDetails {
+            kind: Self::primary_section(b""),
+            ..Self::DEFAULT_DEFS
+        };
+        defs[output_section_id::SECTION_HEADERS.as_usize()] = BuiltInSectionDetails {
             kind: Self::primary_section(b""),
             ..Self::DEFAULT_DEFS
         };
