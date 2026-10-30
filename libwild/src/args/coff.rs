@@ -121,6 +121,10 @@ impl platform::Args for CoffArgs {
         &'a self,
         _linker_script_entry: Option<&'a [u8]>,
     ) -> platform::EntryPoint<'a> {
+        // TODO: it's not that easy, but should work for now
+        if self.is_mingw {
+            return platform::EntryPoint::Symbol(b"mainCRTStartup");
+        }
         self.entry
             .as_deref()
             .map_or(platform::EntryPoint::None, |entry| {

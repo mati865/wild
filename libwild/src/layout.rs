@@ -1899,10 +1899,10 @@ impl<'data, P: Platform> Layout<'data, P> {
     }
 
     pub(crate) fn resolved_entry_symbol_address(&self) -> Result<Option<u64>> {
-        let Some(symbol_id) = self.prelude().entry_symbol_id else {
+        let Some(symbol_id) = dbg!(self.prelude().entry_symbol_id) else {
             return Ok(None);
         };
-        let resolution = self.local_symbol_resolution(symbol_id).with_context(|| {
+        let resolution = dbg!(self.local_symbol_resolution(symbol_id)).with_context(|| {
             format!(
                 "Entry point symbol was defined, but didn't get loaded. {}",
                 self.symbol_debug(symbol_id)
