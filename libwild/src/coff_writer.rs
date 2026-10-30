@@ -182,10 +182,10 @@ fn populate_nt_header<A: Arch<Platform = coff::Coff>>(
     header: &mut coff::NtHeader,
 ) -> crate::error::Result {
     let output_kind = layout.symbol_db.output_kind;
-    let ty = if output_kind.is_shared_object() {
-        object::pe::IMAGE_FILE_DLL
-    } else {
-        object::pe::IMAGE_FILE_EXECUTABLE_IMAGE
+    let mut ty =
+        object::pe::IMAGE_FILE_EXECUTABLE_IMAGE | object::pe::IMAGE_FILE_LARGE_ADDRESS_AWARE;
+    if output_kind.is_shared_object() {
+        ty |= object::pe::IMAGE_FILE_DLL;
     };
 
     let e = LittleEndian;
@@ -205,6 +205,33 @@ fn populate_nt_header<A: Arch<Platform = coff::Coff>>(
         .optional_header
         .magic
         .set(e, object::pe::IMAGE_NT_OPTIONAL_HDR64_MAGIC);
+
+    // TODO: hardcoded based LLD for sane defaults for now
+    header.optional_header.major_linker_version = 14;
+    header.optional_header.minor_linker_version = 0;
+    header.optional_header.image_base.set(e, 0x140000000);
+    header.optional_header.section_alignment.set(e, 0x1000);
+    header.optional_header.file_alignment.set(e, 0x200);
+    header
+        .optional_header
+        .major_operating_system_version
+        .set(e, 6);
+    header
+        .optional_header
+        .minor_operating_system_version
+        .set(e, 0);
+    header.optional_header.major_image_version.set(e, 0);
+    header.optional_header.minor_image_version.set(e, 0);
+    header.optional_header.major_subsystem_version.set(e, 6);
+    header.optional_header.minor_subsystem_version.set(e, 0);
+    header
+        .optional_header
+        .subsystem
+        .set(e, object::pe::IMAGE_SUBSYSTEM_WINDOWS_CUI);
+    header
+        .optional_header
+        .number_of_rva_and_sizes
+        .set(e, object::pe::IMAGE_NUMBEROF_DIRECTORY_ENTRIES.try_into()?);
     // TODO: other fields
 
     Ok(())
