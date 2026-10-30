@@ -8,7 +8,7 @@
 //#CompArgs:-DSHARED
 //#Mode:unspecified
 //#RunEnabled:false
-//#ExpectDynamic:DT_FLAGS_1
+//#ExpectDynamic:DT_GNU_FLAGS_1
 
 //#Config:exec:common
 //#CompSoArgs:-fno-pie
@@ -17,19 +17,19 @@
 //#DiffIgnore:.dynamic.DT_RELAENT
 //#Shared:runtime.c
 //#LinkArgs:-no-pie -z unique
-//#ExpectDynamic:DT_FLAGS_1
+//#ExpectDynamic:DT_GNU_FLAGS_1
 
 //#Config:pie:common
 //#Object:runtime.c
 //#LinkArgs:-pie -z unique
-//#ExpectDynamic:DT_FLAGS_1
+//#ExpectDynamic:DT_GNU_FLAGS_1
 
 //#Config:static-pie:common
 //#CompArgs:-fPIC
 //#Object:runtime.c
 //#LinkArgs:-pie --no-dynamic-linker -z unique
 //#Mode:static
-//#ExpectDynamic:DT_FLAGS_1
+//#ExpectDynamic:DT_GNU_FLAGS_1
 
 //#Config:static
 //#CompArgs:-fno-pie
