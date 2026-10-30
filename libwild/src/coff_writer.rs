@@ -196,10 +196,10 @@ fn populate_nt_header<A: Arch<Platform = coff::Coff>>(
         .set(e, object::pe::IMAGE_FILE_MACHINE_AMD64);
     // TODO
     // header.file_header.number_of_sections.set(e, 0);
-    header.file_header.size_of_optional_header.set(
-        e,
-        size_of::<object::pe::ImageOptionalHeader64>().try_into()?,
-    );
+    header
+        .file_header
+        .size_of_optional_header
+        .set(e, coff::SIZE_OF_OPTIONAL_HEADER64);
     header.file_header.characteristics.set(e, ty);
     header
         .optional_header
