@@ -2,7 +2,9 @@
 
 use crate::OutputFileData;
 use crate::coff;
+use crate::coff::DosHeader;
 use crate::coff::output_section_id;
+use crate::coff::part_id;
 use crate::error::Context;
 use crate::file_writer::SizedOutput;
 use crate::file_writer::split_buffers_by_alignment;
@@ -22,6 +24,7 @@ use crate::timing::timing_phase;
 use crate::timing::verbose_timing_phase;
 use object::LittleEndian;
 use object::from_bytes_mut;
+use object::write::WritableBuffer;
 use rayon::iter::IndexedParallelIterator;
 use rayon::iter::IntoParallelIterator as _;
 use rayon::iter::ParallelIterator as _;
@@ -62,13 +65,12 @@ fn write_file_contents<'data, A: Arch<Platform = coff::Coff>>(
         .try_for_each(|(group, mut buffers)| -> crate::error::Result {
             verbose_timing_phase!("Write group");
 
-            let mut table_writer = TableWriter::from_layout(layout, &mut buffers);
+            let table_writer = TableWriter::from_layout(layout, &mut buffers);
 
             for file in &group.files {
                 write_file::<A>(
                     file,
                     &mut buffers,
-                    &mut table_writer,
                     layout,
                     &sized_output.trace,
                     &sym_index_map,
@@ -164,6 +166,9 @@ fn populate_dos_header<A: Arch<Platform = coff::Coff>>(
 ) -> crate::error::Result {
     let e = LittleEndian;
     header.e_magic.set(e, object::pe::IMAGE_DOS_SIGNATURE);
+    header
+        .e_cparhdr
+        .set(e, (size_of::<DosHeader>() / u16::BITS as usize).try_into()?);
     header.e_lfanew.set(
         e,
         layout
@@ -172,10 +177,22 @@ fn populate_dos_header<A: Arch<Platform = coff::Coff>>(
             .file_offset
             .try_into()?,
     );
-    // TODO: other fields
+    header.e_lfarlc.set(
+        e,
+        layout
+            .section_layouts
+            .get(output_section_id::DOS_STUB)
+            .file_offset
+            .try_into()?,
+    );
 
     Ok(())
 }
+
+fn write_dos_stub<A: Arch<Platform = coff::Coff>>(layout: &CoffLayout, mut bytes: &mut [u8]) {
+    bytes.write_bytes(coff::DOS_STUB);
+}
+
 fn populate_nt_header<A: Arch<Platform = coff::Coff>>(
     layout: &CoffLayout,
     header_info: &HeaderInfo,
@@ -240,7 +257,6 @@ fn populate_nt_header<A: Arch<Platform = coff::Coff>>(
 fn write_file<'data, A: Arch<Platform = coff::Coff>>(
     file: &FileLayout<'data, coff::Coff>,
     buffers: &mut OutputSectionPartMap<&mut [u8]>,
-    table_writer: &mut TableWriter<'_, '_>,
     layout: &CoffLayout<'data>,
     trace: &TraceOutput,
     sym_index_map: &[Option<u32>],
@@ -282,6 +298,13 @@ fn write_prelude<A: Arch<Platform = coff::Coff>>(
             .context("Invalid DOS header allocation")?
             .0;
     populate_dos_header::<A>(layout, dos_header)?;
+
+    let dos_stub: &mut [u8; coff::DOS_STUB.len()] =
+        from_bytes_mut(buffers.get_mut(part_id::DOS_STUB))
+            .ok()
+            .context("Invalid DOS header allocation")?
+            .0;
+    write_dos_stub::<A>(layout, dos_stub);
 
     let nt_header: &mut coff::NtHeader = from_bytes_mut(buffers.get_mut(coff::part_id::NT_HEADER))
         .ok()
