@@ -1,6 +1,7 @@
 #![allow(dead_code, unused_variables)]
 
 use crate::OutputFileData;
+use crate::bail;
 use crate::coff;
 use crate::coff::DosHeader;
 use crate::coff::output_section_id;
@@ -25,9 +26,11 @@ use crate::output_trace::TraceOutput;
 use crate::platform::Arch;
 use crate::platform::Args;
 use crate::platform::ObjectFile;
+use crate::platform::SectionHeader;
 use crate::resolution::SectionSlot;
 use crate::timing::timing_phase;
 use crate::timing::verbose_timing_phase;
+use hashbrown::HashMap;
 use object::LittleEndian;
 use object::from_bytes_mut;
 use object::write::WritableBuffer;
@@ -232,6 +235,9 @@ fn populate_nt_header<A: Arch<Platform = coff::Coff>>(
         .optional_header
         .magic
         .set(e, object::pe::IMAGE_NT_OPTIONAL_HDR64_MAGIC);
+    // TODO: Skips a lot of logic compared to ELF one
+    // header.optional_header.address_of_entry_point =
+    //     u32::try_from(layout.resolved_entry_symbol_address()?.unwrap())?.into();
 
     // TODO: hardcoded based LLD for sane defaults for now
     header.optional_header.major_linker_version = 14;
@@ -413,8 +419,8 @@ fn write_object_section<'data, A: Arch<Platform = coff::Coff>>(
     //     }
     // }
 
-    // let (out, instruction_mapping) =
-    //     write_section_raw::<A>(object, layout, section, section_index, buffers)?;
+    let (out, instruction_mapping) =
+        write_section_raw::<A>(object, layout, section, section_index, buffers)?;
 
     // We need to reverse the contents and adjust relocations because .ctors/.dtors are executed in
     // reverse order while .init_array/.fini_array are executed in forward order.
@@ -467,6 +473,49 @@ fn write_object_section<'data, A: Arch<Platform = coff::Coff>>(
     Ok(())
 }
 
+fn write_section_raw<'out, 'data, A: Arch<Platform = coff::Coff>>(
+    object: &ObjectLayout<'data, coff::Coff>,
+    layout: &CoffLayout,
+    sec: Section,
+    section_index: object::SectionIndex,
+    buffers: &'out mut OutputSectionPartMap<&mut [u8]>,
+) -> crate::error::Result<(&'out mut [u8], HashMap<u64, u64>)> {
+    let part_id = object.section_part_id(section_index, &layout.symbol_db.section_part_ids);
+    if layout
+        .output_sections
+        .has_data_in_file(part_id.output_section_id::<coff::Coff>())
+    {
+        let section_buffer = buffers.get_mut(part_id);
+        let allocation_size = sec.capacity(part_id, &layout.output_sections) as usize;
+        if section_buffer.len() < allocation_size {
+            bail!(
+                "Insufficient space allocated to section `{}`. Tried to take {} bytes, but only {} remain",
+                object.object.section_display_name(section_index),
+                allocation_size,
+                section_buffer.len()
+            );
+        }
+        let out = section_buffer.split_off_mut(..allocation_size).unwrap();
+        let object_section = object.object.section(section_index)?;
+        if object_section.is_no_bits() {
+            return Ok((out, HashMap::new()));
+        }
+
+        let section_info = layout
+            .output_sections
+            .output_info(part_id.output_section_id::<coff::Coff>());
+        let section_size = object.object.section_size(object_section)?;
+        let section_size = section_size as usize;
+        object
+            .object
+            .copy_section_data(object_section, &mut out[..section_size])?;
+        fill_section_padding::<A>(&mut out[section_size..], section_info);
+
+        Ok((&mut out[..section_size], HashMap::new()))
+    } else {
+        Ok((&mut [], HashMap::new()))
+    }
+}
 fn write_prelude<A: Arch<Platform = coff::Coff>>(
     prelude: &PreludeLayout<coff::Coff>,
     buffers: &mut OutputSectionPartMap<&mut [u8]>,
@@ -509,7 +558,8 @@ fn fill_section_padding<A: Arch<Platform = coff::Coff>>(
             chunk.copy_from_slice(&pattern[..len]);
         }
     } else {
-        todo!("fill_section_padding uses elf flags")
+        // TODO: fill_section_padding uses ELF flags
         // A::fill_section_padding(padding, section_info.section_attributes.flags);
+        padding.fill(0);
     }
 }
