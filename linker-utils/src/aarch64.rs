@@ -403,7 +403,7 @@ pub const fn relocation_type_from_raw(
             RelocationKind::Relative,
             RelocationSize::bit_mask_aarch64(0, 16, AArch64Instruction::Movnz),
             None,
-            AllowedRange::no_check(),
+            AllowedRange::from_bit_size(17, Sign::Signed),
             1,
         ),
         object::elf::R_AARCH64_MOVW_PREL_G0_NC => (
@@ -417,7 +417,7 @@ pub const fn relocation_type_from_raw(
             RelocationKind::Relative,
             RelocationSize::bit_mask_aarch64(16, 32, AArch64Instruction::Movnz),
             None,
-            AllowedRange::no_check(),
+            AllowedRange::from_bit_size(33, Sign::Signed),
             1,
         ),
         object::elf::R_AARCH64_MOVW_PREL_G1_NC => (
@@ -431,7 +431,7 @@ pub const fn relocation_type_from_raw(
             RelocationKind::Relative,
             RelocationSize::bit_mask_aarch64(32, 48, AArch64Instruction::Movnz),
             None,
-            AllowedRange::no_check(),
+            AllowedRange::from_bit_size(49, Sign::Signed),
             1,
         ),
         object::elf::R_AARCH64_MOVW_PREL_G2_NC => (
@@ -642,14 +642,14 @@ pub const fn relocation_type_from_raw(
             RelocationKind::DtpOff,
             RelocationSize::bit_mask_aarch64(32, 48, AArch64Instruction::Movnz),
             None,
-            AllowedRange::no_check(),
+            AllowedRange::from_bit_size(49, Sign::Signed),
             1,
         ),
         object::elf::R_AARCH64_TLSLD_MOVW_DTPREL_G1 => (
             RelocationKind::DtpOff,
             RelocationSize::bit_mask_aarch64(16, 32, AArch64Instruction::Movnz),
             None,
-            AllowedRange::no_check(),
+            AllowedRange::from_bit_size(33, Sign::Signed),
             1,
         ),
         object::elf::R_AARCH64_TLSLD_MOVW_DTPREL_G1_NC => (
@@ -663,7 +663,7 @@ pub const fn relocation_type_from_raw(
             RelocationKind::DtpOff,
             RelocationSize::bit_mask_aarch64(0, 16, AArch64Instruction::Movnz),
             None,
-            AllowedRange::no_check(),
+            AllowedRange::from_bit_size(17, Sign::Signed),
             1,
         ),
         object::elf::R_AARCH64_TLSLD_MOVW_DTPREL_G0_NC => (
@@ -808,14 +808,14 @@ pub const fn relocation_type_from_raw(
             RelocationKind::TpOff,
             RelocationSize::bit_mask_aarch64(32, 48, AArch64Instruction::Movnz),
             None,
-            AllowedRange::no_check(),
+            AllowedRange::from_bit_size(49, Sign::Signed),
             1,
         ),
         object::elf::R_AARCH64_TLSLE_MOVW_TPREL_G1 => (
             RelocationKind::TpOff,
             RelocationSize::bit_mask_aarch64(16, 32, AArch64Instruction::Movnz),
             None,
-            AllowedRange::no_check(),
+            AllowedRange::from_bit_size(33, Sign::Signed),
             1,
         ),
         object::elf::R_AARCH64_TLSLE_MOVW_TPREL_G1_NC => (
@@ -829,7 +829,7 @@ pub const fn relocation_type_from_raw(
             RelocationKind::TpOff,
             RelocationSize::bit_mask_aarch64(0, 16, AArch64Instruction::Movnz),
             None,
-            AllowedRange::no_check(),
+            AllowedRange::from_bit_size(17, Sign::Signed),
             1,
         ),
         object::elf::R_AARCH64_TLSLE_MOVW_TPREL_G0_NC => (
