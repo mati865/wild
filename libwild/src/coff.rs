@@ -32,6 +32,8 @@ use crate::platform::CommonSymbol;
 use crate::platform::ObjectFile as _;
 use crate::platform::Platform;
 use crate::platform::SectionFlags as _;
+use crate::platform::SectionHeader as _;
+use crate::platform::Symbol as _;
 use crate::resolution::LoadedMetrics;
 use crate::symbol_db::SymbolDb;
 use crate::symbol_db::Visibility;
@@ -251,6 +253,7 @@ impl Platform for Coff {
     fn section_attributes(header: &Self::SectionHeader) -> Self::SectionAttributes {
         SectionAttributes {
             flags: header.characteristics.get(LittleEndian),
+            is_null: header.is_null(),
         }
     }
 
@@ -455,6 +458,8 @@ impl Platform for Coff {
             .map(|d| SectionOutputInfo {
                 section_attributes: SectionAttributes {
                     flags: d.section_flags,
+                    // TODO: it works, but does that count as trying too hard?
+                    is_null: matches!(d.kind, SectionKind::Primary(ident) if ident.section_name().len() == 0),
                 },
                 kind: d.kind,
                 min_alignment: d.min_alignment,
@@ -886,7 +891,7 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
         symbol: &SymtabEntry,
         _section_index: SectionIndex,
     ) -> Result<u64> {
-        todo!()
+        Ok(symbol.value())
     }
 
     fn num_sections(&self) -> usize {
@@ -1124,7 +1129,7 @@ impl platform::SectionHeader for SectionHeader {
     }
 
     fn is_null(&self) -> bool {
-        false
+        self.name == [0; 8]
     }
 }
 
@@ -1304,6 +1309,7 @@ pub(crate) struct ObjectLayoutStateExt<'data> {
 #[derive(Debug, Copy, Clone, Default)]
 pub(crate) struct SectionAttributes {
     pub(crate) flags: SectionFlags,
+    pub(crate) is_null: bool,
 }
 
 impl platform::SectionAttributes for SectionAttributes {
@@ -1311,6 +1317,7 @@ impl platform::SectionAttributes for SectionAttributes {
 
     fn merge(&mut self, rhs: Self) {
         self.flags |= rhs.flags;
+        self.is_null |= rhs.is_null;
     }
 
     fn apply(
@@ -1324,7 +1331,7 @@ impl platform::SectionAttributes for SectionAttributes {
     }
 
     fn is_null(&self) -> bool {
-        false
+        self.is_null
     }
 
     fn is_alloc(&self) -> bool {
