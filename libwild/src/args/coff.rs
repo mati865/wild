@@ -181,6 +181,11 @@ impl platform::Args for CoffArgs {
             unimplemented!()
         }
     }
+
+    fn image_base(&self) -> Option<u64> {
+        // TODO: needs to be configurable
+        Some(0x1_4000_0000)
+    }
 }
 
 // Parse the supplied input arguments, which should not include the program name.

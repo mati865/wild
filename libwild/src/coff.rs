@@ -11,6 +11,7 @@ use crate::error::Result;
 use crate::input_data::InputBytes;
 use crate::input_data::InputRef;
 use crate::layout;
+use crate::layout::SectionGcUnit;
 use crate::layout_rules;
 use crate::layout_rules::SectionKind;
 use crate::layout_rules::SectionRule;
@@ -28,6 +29,7 @@ use crate::platform;
 use crate::platform::Arch;
 use crate::platform::Args;
 use crate::platform::CommonSymbol;
+use crate::platform::ObjectFile as _;
 use crate::platform::Platform;
 use crate::platform::SectionFlags as _;
 use crate::resolution::LoadedMetrics;
@@ -171,6 +173,12 @@ impl Platform for Coff {
     const DATA_SECTION_ID: Option<OutputSectionId> = Some(output_section_id::DATA);
     const RODATA_SECTION_ID: Option<OutputSectionId> = Some(output_section_id::RODATA);
 
+    const CUSTOM_PHDR_EXCLUDED_SECTION_IDS: &'static [OutputSectionId] = &[
+        output_section_id::DOS_STUB,
+        output_section_id::NT_HEADER,
+        output_section_id::SECTION_HEADERS,
+    ];
+
     const VERIFY_IGNORE_SECTION_IDS: &'static [OutputSectionId] = &[
         crate::output_section_id::FILE_HEADER,
         output_section_id::DOS_STUB,
@@ -206,7 +214,7 @@ impl Platform for Coff {
     type SymtabShndxEntry = ();
     type ResolvedObjectExt<'data> = ();
     type FinaliseSizesExt<'data> = ();
-    type GcUnit = ();
+    type GcUnit = SectionGcUnit;
     type SectionIdentityExt = ();
     type SymbolVersionIndex = ();
     type LayoutExt<'data> = ();
@@ -340,33 +348,38 @@ impl Platform for Coff {
     fn gc_unit_for_symbol<'data>(
         object: &Self::File<'data>,
         symbol: &Self::SymtabEntry,
-        _symbol_index: SymbolIndex,
+        symbol_index: object::SymbolIndex,
     ) -> Result<Option<Self::GcUnit>> {
-        // TODO
-        Ok(None)
+        Ok(object
+            .symbol_section(symbol, symbol_index)?
+            .map(SectionGcUnit::new))
     }
 
     fn activate_object_gc<'data, 'scope, A: Arch<Platform = Self>>(
         object: &mut layout::ObjectLayoutState<'data, Self>,
-        _common: &mut layout::CommonGroupState<'data, Self>,
+        common: &mut layout::CommonGroupState<'data, Self>,
         resources: &'scope layout::GraphResources<'data, 'scope, Self>,
         queue: &mut layout::LocalWorkQueue<Self>,
         scope: &rayon::Scope<'scope>,
     ) -> Result {
-        // TODO
-        Ok(())
+        object.activate_section_gc::<A>(common, resources, queue, scope)
     }
 
     fn load_gc_unit<'data, 'scope, A: Arch<Platform = Self>>(
         object: &mut layout::ObjectLayoutState<'data, Self>,
-        _common: &mut layout::CommonGroupState<'data, Self>,
+        common: &mut layout::CommonGroupState<'data, Self>,
         resources: &'scope layout::GraphResources<'data, 'scope, Self>,
         queue: &mut layout::LocalWorkQueue<Self>,
         unit: Self::GcUnit,
         scope: &rayon::Scope<'scope>,
     ) -> Result {
-        // TODO
-        Ok(())
+        object.handle_section_load_request::<A>(
+            common,
+            resources,
+            queue,
+            unit.section_index(),
+            scope,
+        )
     }
 
     fn load_object_section_relocations<'data, 'scope, A: Arch<Platform = Self>>(
@@ -396,8 +409,8 @@ impl Platform for Coff {
     }
 
     fn program_segment_defs() -> &'static [Self::ProgramSegmentDef] {
-        // TODO
-        &[]
+        // TODO: hack? somehow necessary for now
+        &[ProgramSegmentDef {}]
     }
 
     fn unconditional_segment_defs() -> &'static [Self::ProgramSegmentDef] {
@@ -841,7 +854,11 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
     }
 
     fn section_size(&self, section: &SectionHeader) -> Result<u64> {
-        Ok(section.virtual_size.get(LittleEndian).into())
+        let size = u64::from(section.virtual_size.get(LittleEndian));
+        if size == 0 {
+            return Ok(u64::from(section.size_of_raw_data.get(LittleEndian)));
+        }
+        Ok(size)
     }
 
     fn symbol_name(&self, symbol: &SymtabEntry) -> Result<&'data [u8]> {
@@ -1404,7 +1421,7 @@ impl platform::ProgramSegmentDef for ProgramSegmentDef {
     }
 
     fn is_loadable(self) -> bool {
-        false
+        true
     }
 
     fn is_stack(self) -> bool {
