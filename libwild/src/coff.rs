@@ -81,7 +81,8 @@ pub(crate) struct Coff;
 #[repr(u32)]
 #[derive(Clone, Copy)]
 enum SinglePartSectionId {
-    NtHeader = crate::output_section_id::NUM_COMMON_SINGLE_PART_SECTIONS,
+    DosStub = crate::output_section_id::NUM_COMMON_SINGLE_PART_SECTIONS,
+    NtHeader,
     SectionHeaders,
     RelaDynRelative,
 
@@ -113,6 +114,7 @@ pub(crate) mod part_id {
     use super::SinglePartSectionId;
     use crate::part_id::PartId;
 
+    pub(crate) const DOS_STUB: PartId = SinglePartSectionId::DosStub.part_id();
     pub(crate) const NT_HEADER: PartId = SinglePartSectionId::NtHeader.part_id();
     pub(crate) const SECTION_HEADERS: PartId = SinglePartSectionId::SectionHeaders.part_id();
     pub(crate) const RELA_DYN_RELATIVE: PartId = SinglePartSectionId::RelaDynRelative.part_id();
@@ -123,6 +125,7 @@ pub(crate) mod output_section_id {
     use super::SinglePartSectionId;
     use crate::output_section_id::OutputSectionId;
 
+    pub(crate) const DOS_STUB: OutputSectionId = SinglePartSectionId::DosStub.output_section_id();
     pub(crate) const NT_HEADER: OutputSectionId = SinglePartSectionId::NtHeader.output_section_id();
     pub(crate) const RELA_DYN_RELATIVE: OutputSectionId =
         SinglePartSectionId::RelaDynRelative.output_section_id();
@@ -167,6 +170,7 @@ impl Platform for Coff {
 
     const VERIFY_IGNORE_SECTION_IDS: &'static [OutputSectionId] = &[
         crate::output_section_id::FILE_HEADER,
+        output_section_id::DOS_STUB,
         output_section_id::NT_HEADER,
     ];
 
@@ -554,6 +558,7 @@ impl Platform for Coff {
         _args: &Self::Args,
     ) {
         sizes.increment(crate::part_id::FILE_HEADER, size_of::<DosHeader>() as u64);
+        sizes.increment(part_id::DOS_STUB, DOS_STUB.len() as u64);
         sizes.increment(part_id::NT_HEADER, SIZE_OF_NT_HEADERS64 as u64);
     }
 
@@ -658,6 +663,7 @@ impl Platform for Coff {
         );
 
         builder.add_section(crate::output_section_id::FILE_HEADER);
+        builder.add_section(output_section_id::DOS_STUB);
         builder.add_section(output_section_id::NT_HEADER);
         builder.add_section(output_section_id::RELA_DYN_RELATIVE);
         builder.add_section(output_section_id::RODATA);
@@ -1401,8 +1407,11 @@ impl Coff {
     pub(crate) const SECTION_DEFINITIONS: [BuiltInSectionDetails; COFF_NUM_BUILT_IN_SECTIONS] = {
         let mut defs = [Self::DEFAULT_DEFS; COFF_NUM_BUILT_IN_SECTIONS];
 
-        // Sections into which we write headers.
         defs[crate::output_section_id::FILE_HEADER.as_usize()] = BuiltInSectionDetails {
+            kind: Self::primary_section(b""),
+            ..Self::DEFAULT_DEFS
+        };
+        defs[output_section_id::DOS_STUB.as_usize()] = BuiltInSectionDetails {
             kind: Self::primary_section(b""),
             ..Self::DEFAULT_DEFS
         };
@@ -1476,3 +1485,12 @@ impl RegularSectionId {
         OutputSectionId::from_u32(COFF_NUM_SINGLE_PART_SECTIONS).offset(self as usize)
     }
 }
+
+// The `This program cannot be run in MS-DOS mode.` but there is no good way to combine raw bytes
+// (assembly) with text.
+pub(crate) const DOS_STUB: &[u8] = &[
+    0x0e, 0x1f, 0xba, 0x0e, 0x00, 0xb4, 0x09, 0xcd, 0x21, 0xb8, 0x01, 0x4c, 0xcd, 0x21, 0x54, 0x68,
+    0x69, 0x73, 0x20, 0x70, 0x72, 0x6f, 0x67, 0x72, 0x61, 0x6d, 0x20, 0x63, 0x61, 0x6e, 0x6e, 0x6f,
+    0x74, 0x20, 0x62, 0x65, 0x20, 0x72, 0x75, 0x6e, 0x20, 0x69, 0x6e, 0x20, 0x44, 0x4f, 0x53, 0x20,
+    0x6d, 0x6f, 0x64, 0x65, 0x2e, 0x24, 0x00, 0x00,
+];
