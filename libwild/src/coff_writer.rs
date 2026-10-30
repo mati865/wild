@@ -13,13 +13,19 @@ use crate::file_writer::split_output_into_sections;
 use crate::layout::FileLayout;
 use crate::layout::HeaderInfo;
 use crate::layout::Layout;
+use crate::layout::ObjectLayout;
+use crate::layout::PartialLinkSingleton;
 use crate::layout::PreludeLayout;
+use crate::layout::Section;
 use crate::output_kind::OutputKind;
 use crate::output_section_id::SectionOutputInfo;
 use crate::output_section_map::OutputSectionMap;
 use crate::output_section_part_map::OutputSectionPartMap;
 use crate::output_trace::TraceOutput;
 use crate::platform::Arch;
+use crate::platform::Args;
+use crate::platform::ObjectFile;
+use crate::resolution::SectionSlot;
 use crate::timing::timing_phase;
 use crate::timing::verbose_timing_phase;
 use object::LittleEndian;
@@ -30,6 +36,7 @@ use rayon::iter::IntoParallelIterator as _;
 use rayon::iter::ParallelIterator as _;
 use std::ops::Range;
 use std::sync::atomic::Ordering::Relaxed;
+use tracing::debug_span;
 
 type CoffLayout<'data> = Layout<'data, coff::Coff>;
 
@@ -65,12 +72,13 @@ fn write_file_contents<'data, A: Arch<Platform = coff::Coff>>(
         .try_for_each(|(group, mut buffers)| -> crate::error::Result {
             verbose_timing_phase!("Write group");
 
-            let table_writer = TableWriter::from_layout(layout, &mut buffers);
+            let mut table_writer = TableWriter::from_layout(layout, &mut buffers);
 
             for file in &group.files {
                 write_file::<A>(
                     file,
                     &mut buffers,
+                    &mut table_writer,
                     layout,
                     &sized_output.trace,
                     &sym_index_map,
@@ -228,7 +236,9 @@ fn populate_nt_header<A: Arch<Platform = coff::Coff>>(
     header.optional_header.minor_linker_version = 0;
     header.optional_header.image_base.set(e, 0x140000000);
     header.optional_header.section_alignment.set(e, 0x1000);
-    header.optional_header.file_alignment.set(e, 0x200);
+    // TODO: temp hack
+    header.optional_header.file_alignment.set(e, 0x1000);
+    // header.optional_header.file_alignment.set(e, 0x200);
     header
         .optional_header
         .major_operating_system_version
@@ -257,13 +267,14 @@ fn populate_nt_header<A: Arch<Platform = coff::Coff>>(
 fn write_file<'data, A: Arch<Platform = coff::Coff>>(
     file: &FileLayout<'data, coff::Coff>,
     buffers: &mut OutputSectionPartMap<&mut [u8]>,
+    table_writer: &mut TableWriter<'_, '_>,
     layout: &CoffLayout<'data>,
     trace: &TraceOutput,
     sym_index_map: &[Option<u32>],
 ) -> crate::error::Result {
     match file {
         FileLayout::Object(s) => {
-            // write_object::<A>(s, buffers, table_writer, layout, trace, sym_index_map)?;
+            write_object::<A>(s, buffers, table_writer, layout, trace, sym_index_map)?;
         }
         FileLayout::Prelude(s) => {
             write_prelude::<A>(s, buffers, layout, sym_index_map)?;
@@ -281,6 +292,176 @@ fn write_file<'data, A: Arch<Platform = coff::Coff>>(
         }
     }
 
+    Ok(())
+}
+
+fn write_object<'data, A: Arch<Platform = coff::Coff>>(
+    object: &ObjectLayout<'data, coff::Coff>,
+    buffers: &mut OutputSectionPartMap<&mut [u8]>,
+    table_writer: &mut TableWriter<'_, '_>,
+    layout: &CoffLayout<'data>,
+    trace: &TraceOutput,
+    sym_index_map: &[Option<u32>],
+) -> crate::error::Result {
+    verbose_timing_phase!("Write object", file_id = object.file_id.as_u32());
+
+    let _span = debug_span!("write_file", filename = %object.input).entered();
+    let _file_span = layout.args().common().trace_span_for_file(object.file_id);
+
+    for (i, sec) in object.sections.iter().enumerate() {
+        let section_index = object::SectionIndex(i);
+
+        match sec {
+            SectionSlot::Loaded(sec)
+            | SectionSlot::PartialLinkSingleton(PartialLinkSingleton { section: sec, .. }) => {
+                let part_id =
+                    object.section_part_id(section_index, &layout.symbol_db.section_part_ids);
+                let input_header = object.object.section(section_index)?;
+
+                write_object_section::<A>(
+                    object,
+                    layout,
+                    *sec,
+                    section_index,
+                    buffers,
+                    table_writer,
+                    trace,
+                )?;
+            }
+            SectionSlot::LoadedDebugInfo(sec) => {
+                // write_debug_section::<C, A>(
+                //     object,
+                //     layout,
+                //     *sec,
+                //     section_index,
+                //     buffers,
+                // )?;
+            }
+            SectionSlot::FrameData(section_index) => {
+                // write_eh_frame_data::<C, A>(
+                //     object,
+                //     *section_index,
+                //     layout,
+                //     table_writer,
+                //     trace,
+                // )?;
+            }
+            _ => (),
+        }
+    }
+
+    // for (symbol_id, resolution) in layout.resolutions_in_range(object.symbol_id_range) {
+    //     let _span = tracing::trace_span!("Symbol", %symbol_id).entered();
+    //     if let Some(res) = resolution {
+    //         table_writer
+    //             .process_resolution::<A>(Some(layout), layout.args(), res)
+    //             .with_context(|| {
+    //                 format!(
+    //                     "Failed to process `{}` with resolution {res:?}",
+    //                     layout.symbol_debug(symbol_id)
+    //                 )
+    //             })?;
+    //
+    //         // Dynamic symbols that we define are handled by the epilogue so that they can be
+    //         // written in the correct order. Here, we only need to handle weak symbols that we
+    //         // reference that aren't defined by any shared objects we're linking against.
+    //         if res.flags.is_dynamic() && !layout.args().only_keep_debug() {
+    //             let symbol = object
+    //                 .object
+    //                 .symbol(object.symbol_id_range.id_to_input(symbol_id))?;
+    //             let name = object.object.symbol_name(symbol)?;
+    //             table_writer.dynsym_writer.copy_symbol_shndx(
+    //                 symbol,
+    //                 name,
+    //                 0,
+    //                 0,
+    //                 ValueFlags::empty(),
+    //             )?;
+    //         }
+    //     }
+    // }
+
+    // if !layout.args().should_strip_all() || layout.args().should_output_partial_object() {
+    //     write_symbols(object, &mut table_writer.debug_symbol_writer, layout)?;
+    // }
+
+    Ok(())
+}
+
+fn write_object_section<'data, A: Arch<Platform = coff::Coff>>(
+    object: &ObjectLayout<'data, coff::Coff>,
+    layout: &CoffLayout<'data>,
+    section: Section,
+    section_index: object::SectionIndex,
+    buffers: &mut OutputSectionPartMap<&mut [u8]>,
+    table_writer: &mut TableWriter<'_, '_>,
+    trace: &TraceOutput,
+) -> crate::error::Result {
+    let part_id = object.section_part_id(section_index, &layout.symbol_db.section_part_ids);
+
+    // For --only-keep-debug, alloc non-NOTE sections are NOBITS.
+    // if layout.args().only_keep_debug() {
+    //     let primary_id = layout
+    //         .output_sections
+    //         .primary_output_section(part_id.output_section_id::<coff::Coff>());
+    //     let section_info = layout.output_sections.output_info(primary_id);
+    //     let attrs = &section_info.section_attributes;
+    //     if crate::only_keep_debug::should_hollow_section(attrs.flags.is_alloc(), attrs.ty) {
+    //         return Ok(());
+    //     }
+    // }
+
+    // let (out, instruction_mapping) =
+    //     write_section_raw::<A>(object, layout, section, section_index, buffers)?;
+
+    // We need to reverse the contents and adjust relocations because .ctors/.dtors are executed in
+    // reverse order while .init_array/.fini_array are executed in forward order.
+    // if should_reverse_contents(
+    //     section_index,
+    //     part_id,
+    //     object.object,
+    //     &layout.output_sections,
+    // ) {
+    //     return write_section_reversed::<C, A>(
+    //         object,
+    //         layout,
+    //         section_index,
+    //         table_writer,
+    //         trace,
+    //         out,
+    //     );
+    // }
+
+    // let relocations = object.relocations(section_index)?;
+    // let result = match relocations {
+    //     elf::RelocationList::Rela(rela) => apply_relocations::<C, A, elf::ElfRela<C>, _>(
+    //         object,
+    //         out,
+    //         section_index,
+    //         rela.iter().map(|rela| Ok(elf::ElfRela::new(*rela))),
+    //         &instruction_mapping,
+    //         layout,
+    //         table_writer,
+    //         trace,
+    //     ),
+    //     elf::RelocationList::Crel(crel_iter) => apply_relocations::<C, A, elf::ElfCrel<C>, _>(
+    //         object,
+    //         out,
+    //         section_index,
+    //         crel_iter.map(|r| r.map(elf::ElfCrel::new)),
+    //         &instruction_mapping,
+    //         layout,
+    //         table_writer,
+    //         trace,
+    //     ),
+    // };
+    // result.with_context(|| {
+    //     format!(
+    //         "Failed to apply relocations in section `{}` of {}",
+    //         object.object.section_display_name(section_index),
+    //         object.input
+    //     )
+    // })?;
     Ok(())
 }
 
