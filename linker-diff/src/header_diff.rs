@@ -719,6 +719,10 @@ fn read_dynamic_fields(obj: &Binary) -> Result<FieldValues> {
             DT_RELCOUNT => (Cow::Borrowed("DT_RELCOUNT"), Converter::None),
             DT_AUXILIARY => (Cow::Borrowed("DT_AUXILIARY"), Converter::DynStrOffset),
             // TODO: DT_GNU_FLAGS_1 once added to `object`
+            object::elf::DynamicTag(0x6ffffdf4) => (
+                Cow::Borrowed("DT_GNU_FLAGS_1"),
+                Converter::BitFlags(&[Some("UNIQUE")]),
+            ),
             other => (
                 Cow::Owned(format!("Unknown (0x{other:x})")),
                 Converter::None,
