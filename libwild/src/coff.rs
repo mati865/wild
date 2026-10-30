@@ -67,6 +67,14 @@ pub(crate) type CoffFileHeader = object::pe::ImageFileHeader;
 pub(crate) type SectionHeader = object::pe::ImageSectionHeader;
 pub(crate) type SymbolTable<'data> = object::read::coff::SymbolTable<'data>;
 
+// `object` currently skips directory entries, so the sizes are off. This might change in the
+// future.
+pub(crate) const SIZE_OF_NT_HEADERS64: usize = size_of::<NtHeader>()
+    + object::pe::IMAGE_NUMBEROF_DIRECTORY_ENTRIES * size_of::<object::pe::ImageDataDirectory>();
+const _: () = assert!(SIZE_OF_NT_HEADERS64 == 264);
+pub(crate) const SIZE_OF_OPTIONAL_HEADER64: u16 = 240;
+const _: () = assert!(SIZE_OF_NT_HEADERS64 != size_of::<object::pe::ImageOptionalHeader64>());
+
 #[derive(Debug, Copy, Clone, Default)]
 pub(crate) struct Coff;
 
@@ -546,7 +554,7 @@ impl Platform for Coff {
         _args: &Self::Args,
     ) {
         sizes.increment(crate::part_id::FILE_HEADER, size_of::<DosHeader>() as u64);
-        sizes.increment(part_id::NT_HEADER, size_of::<NtHeader>() as u64);
+        sizes.increment(part_id::NT_HEADER, SIZE_OF_NT_HEADERS64 as u64);
     }
 
     fn finalise_sizes_for_symbol<'data>(
