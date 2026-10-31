@@ -95,7 +95,6 @@ enum SinglePartSectionId {
     DosStub = crate::output_section_id::NUM_COMMON_SINGLE_PART_SECTIONS,
     NtHeader,
     SectionHeaders,
-    RelaDynRelative,
 
     // Must be last.
     Count,
@@ -104,13 +103,14 @@ enum SinglePartSectionId {
 #[repr(u32)]
 #[derive(Clone, Copy)]
 enum RegularSectionId {
-    Bss,
-    Rdata,
     Text,
-    Pdata,
-    Tls,
-    Xdata,
+    Rdata,
     Data,
+    Pdata,
+    Xdata,
+    Bss,
+    Tls,
+    Reloc,
 
     // Must be last.
     Count,
@@ -128,7 +128,6 @@ pub(crate) mod part_id {
     pub(crate) const DOS_STUB: PartId = SinglePartSectionId::DosStub.part_id();
     pub(crate) const NT_HEADER: PartId = SinglePartSectionId::NtHeader.part_id();
     pub(crate) const SECTION_HEADERS: PartId = SinglePartSectionId::SectionHeaders.part_id();
-    pub(crate) const RELA_DYN_RELATIVE: PartId = SinglePartSectionId::RelaDynRelative.part_id();
 }
 
 pub(crate) mod output_section_id {
@@ -140,16 +139,15 @@ pub(crate) mod output_section_id {
     pub(crate) const NT_HEADER: OutputSectionId = SinglePartSectionId::NtHeader.output_section_id();
     pub(crate) const SECTION_HEADERS: OutputSectionId =
         SinglePartSectionId::SectionHeaders.output_section_id();
-    pub(crate) const RELA_DYN_RELATIVE: OutputSectionId =
-        SinglePartSectionId::RelaDynRelative.output_section_id();
 
-    pub(crate) const RODATA: OutputSectionId = RegularSectionId::Rdata.output_section_id();
     pub(crate) const TEXT: OutputSectionId = RegularSectionId::Text.output_section_id();
-    pub(crate) const PDATA: OutputSectionId = RegularSectionId::Pdata.output_section_id();
-    pub(crate) const TLS: OutputSectionId = RegularSectionId::Tls.output_section_id();
-    pub(crate) const XDATA: OutputSectionId = RegularSectionId::Xdata.output_section_id();
+    pub(crate) const RODATA: OutputSectionId = RegularSectionId::Rdata.output_section_id();
     pub(crate) const DATA: OutputSectionId = RegularSectionId::Data.output_section_id();
+    pub(crate) const PDATA: OutputSectionId = RegularSectionId::Pdata.output_section_id();
+    pub(crate) const XDATA: OutputSectionId = RegularSectionId::Xdata.output_section_id();
     pub(crate) const BSS: OutputSectionId = RegularSectionId::Bss.output_section_id();
+    pub(crate) const TLS: OutputSectionId = RegularSectionId::Tls.output_section_id();
+    pub(crate) const RELOC: OutputSectionId = RegularSectionId::Reloc.output_section_id();
 }
 
 #[derive(derive_more::Debug)]
@@ -704,12 +702,11 @@ impl Platform for Coff {
         builder.add_section(output_section_id::DOS_STUB);
         builder.add_section(output_section_id::NT_HEADER);
         builder.add_section(output_section_id::SECTION_HEADERS);
-        builder.add_section(output_section_id::RELA_DYN_RELATIVE);
+        builder.add_section(output_section_id::TEXT);
         builder.add_section(output_section_id::RODATA);
         builder.add_sections(&custom.ro);
 
         builder.add_sections(&custom.exec);
-        builder.add_section(output_section_id::TEXT);
 
         builder.add_section(output_section_id::DATA);
         builder.add_sections(&custom.data);
@@ -719,6 +716,8 @@ impl Platform for Coff {
         builder.add_sections(&custom.pdata);
         builder.add_section(output_section_id::BSS);
         builder.add_sections(&custom.bss);
+
+        builder.add_section(output_section_id::RELOC);
 
         builder.add_sections(&custom.nonalloc);
 
@@ -1317,7 +1316,7 @@ impl platform::SectionAttributes for SectionAttributes {
 
     fn merge(&mut self, rhs: Self) {
         self.flags |= rhs.flags;
-        self.is_null |= rhs.is_null;
+        self.is_null &= rhs.is_null;
     }
 
     fn apply(
@@ -1493,6 +1492,7 @@ impl Coff {
         };
         defs[output_section_id::NT_HEADER.as_usize()] = BuiltInSectionDetails {
             kind: Self::primary_section(b""),
+            min_alignment: alignment::USIZE,
             ..Self::DEFAULT_DEFS
         };
         defs[output_section_id::SECTION_HEADERS.as_usize()] = BuiltInSectionDetails {
@@ -1500,26 +1500,17 @@ impl Coff {
             ..Self::DEFAULT_DEFS
         };
 
-        defs[output_section_id::RELA_DYN_RELATIVE.as_usize()] = BuiltInSectionDetails {
-            kind: Self::primary_section(".reloc".as_bytes()),
-            link: &[output_section_id::RELA_DYN_RELATIVE],
-            ..Self::DEFAULT_DEFS
-        };
         // Start of regular sections
-        defs[output_section_id::RODATA.as_usize()] = BuiltInSectionDetails {
-            kind: Self::primary_section(".rdata".as_bytes()),
-            ..Self::DEFAULT_DEFS
-        };
         defs[output_section_id::TEXT.as_usize()] = BuiltInSectionDetails {
             kind: Self::primary_section(".text".as_bytes()),
             ..Self::DEFAULT_DEFS
         };
-        defs[output_section_id::DATA.as_usize()] = BuiltInSectionDetails {
-            kind: Self::primary_section(".data".as_bytes()),
+        defs[output_section_id::RODATA.as_usize()] = BuiltInSectionDetails {
+            kind: Self::primary_section(".rdata".as_bytes()),
             ..Self::DEFAULT_DEFS
         };
-        defs[output_section_id::BSS.as_usize()] = BuiltInSectionDetails {
-            kind: Self::primary_section(".bss".as_bytes()),
+        defs[output_section_id::DATA.as_usize()] = BuiltInSectionDetails {
+            kind: Self::primary_section(".data".as_bytes()),
             ..Self::DEFAULT_DEFS
         };
         defs[output_section_id::XDATA.as_usize()] = BuiltInSectionDetails {
@@ -1528,6 +1519,20 @@ impl Coff {
         };
         defs[output_section_id::PDATA.as_usize()] = BuiltInSectionDetails {
             kind: Self::primary_section(".pdata".as_bytes()),
+            ..Self::DEFAULT_DEFS
+        };
+        defs[output_section_id::BSS.as_usize()] = BuiltInSectionDetails {
+            kind: Self::primary_section(".bss".as_bytes()),
+            ..Self::DEFAULT_DEFS
+        };
+        defs[output_section_id::TLS.as_usize()] = BuiltInSectionDetails {
+            kind: Self::primary_section(".tls".as_bytes()),
+            link: &[output_section_id::TLS],
+            ..Self::DEFAULT_DEFS
+        };
+        defs[output_section_id::RELOC.as_usize()] = BuiltInSectionDetails {
+            kind: Self::primary_section(".reloc".as_bytes()),
+            link: &[output_section_id::RELOC],
             ..Self::DEFAULT_DEFS
         };
 
@@ -1540,7 +1545,7 @@ impl platform::BuiltInSectionDetails for BuiltInSectionDetails {}
 const DEFAULT_SECTION_PLACEMENT_RULES: &[SectionRule<'static>] = &[
     SectionRule::prefix_section(".rdata".as_bytes(), output_section_id::RODATA),
     SectionRule::prefix_section(".text".as_bytes(), output_section_id::TEXT),
-    SectionRule::prefix_section(".reloc".as_bytes(), output_section_id::RELA_DYN_RELATIVE),
+    SectionRule::prefix_section(".reloc".as_bytes(), output_section_id::RELOC),
     SectionRule::prefix_section(".data".as_bytes(), output_section_id::DATA),
     SectionRule::prefix_section(".xdata".as_bytes(), output_section_id::XDATA),
     SectionRule::prefix_section(".pdata".as_bytes(), output_section_id::PDATA),

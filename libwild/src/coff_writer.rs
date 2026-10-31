@@ -7,6 +7,7 @@ use crate::coff::DosHeader;
 use crate::coff::output_section_id;
 use crate::coff::part_id;
 use crate::error::Context;
+use crate::error::Result;
 use crate::file_writer::SizedOutput;
 use crate::file_writer::split_buffers_by_alignment;
 use crate::file_writer::split_output_by_group;
@@ -46,7 +47,7 @@ type CoffLayout<'data> = Layout<'data, coff::Coff>;
 pub(crate) fn write<'data, A: Arch<Platform = coff::Coff>>(
     sized_output: &mut SizedOutput<impl OutputFileData>,
     layout: &CoffLayout<'data>,
-) -> crate::error::Result {
+) -> Result {
     write_file_contents::<A>(sized_output, layout)?;
     // TODO: elf specific right now
     // if layout.args().common().validate_output {
@@ -59,7 +60,7 @@ pub(crate) fn write<'data, A: Arch<Platform = coff::Coff>>(
 fn write_file_contents<'data, A: Arch<Platform = coff::Coff>>(
     sized_output: &mut SizedOutput<impl OutputFileData>,
     layout: &CoffLayout<'data>,
-) -> crate::error::Result {
+) -> Result {
     timing_phase!("Write data to file");
     let (mut section_buffers, padding) = split_output_into_sections(layout, &mut sized_output.out);
 
@@ -72,7 +73,7 @@ fn write_file_contents<'data, A: Arch<Platform = coff::Coff>>(
     groups_and_buffers
         .into_par_iter()
         .with_max_len(1)
-        .try_for_each(|(group, mut buffers)| -> crate::error::Result {
+        .try_for_each(|(group, mut buffers)| -> Result {
             verbose_timing_phase!("Write group");
 
             let mut table_writer = TableWriter::from_layout(layout, &mut buffers);
@@ -174,7 +175,7 @@ fn fill_padding(mut section_buffers: OutputSectionMap<&mut [u8]>) {
 fn populate_dos_header<A: Arch<Platform = coff::Coff>>(
     layout: &CoffLayout,
     header: &mut coff::DosHeader,
-) -> crate::error::Result {
+) -> Result {
     let e = LittleEndian;
     header.e_magic.set(e, object::pe::IMAGE_DOS_SIGNATURE);
     header
@@ -208,13 +209,13 @@ fn populate_nt_header<A: Arch<Platform = coff::Coff>>(
     layout: &CoffLayout,
     header_info: &HeaderInfo,
     header: &mut coff::NtHeader,
-) -> crate::error::Result {
+) -> Result {
     let output_kind = layout.symbol_db.output_kind;
     let mut ty =
         object::pe::IMAGE_FILE_EXECUTABLE_IMAGE | object::pe::IMAGE_FILE_LARGE_ADDRESS_AWARE;
     if output_kind.is_shared_object() {
         ty |= object::pe::IMAGE_FILE_DLL;
-    };
+    }
 
     let e = LittleEndian;
     header.signature.set(e, object::pe::IMAGE_NT_SIGNATURE);
@@ -236,14 +237,54 @@ fn populate_nt_header<A: Arch<Platform = coff::Coff>>(
         .magic
         .set(e, object::pe::IMAGE_NT_OPTIONAL_HDR64_MAGIC);
     // TODO: Skips a lot of logic compared to ELF one
-    // TODO2: need to subtract image base, so hardcoding is really suboptimal even for now
-    let rva = layout.resolved_entry_symbol_address()?.unwrap() - 0x140000000;
-    header.optional_header.address_of_entry_point = u32::try_from(rva)?.into();
+    header.optional_header.address_of_entry_point = u32::try_from(rva(
+        layout.resolved_entry_symbol_address()?.unwrap(),
+        layout,
+    ))?
+    .into();
+    header.optional_header.base_of_code.set(
+        e,
+        u32::try_from(rva(
+            layout
+                .section_layouts
+                .get(output_section_id::TEXT)
+                .mem_offset,
+            layout,
+        ))?,
+    );
+    header
+        .optional_header
+        .image_base
+        .set(e, layout.args().image_base().unwrap());
+    header.optional_header.size_of_image.set(
+        e,
+        u32::try_from(rva(
+            layout.section_layouts.iter().last().unwrap().1.mem_end(),
+            layout,
+        ))?,
+    );
+    // TODO: Rounding
+    header.optional_header.size_of_headers.set(
+        e,
+        u32::try_from(
+            layout
+                .section_layouts
+                .get(output_section_id::DOS_STUB)
+                .mem_size
+                + layout
+                    .section_layouts
+                    .get(output_section_id::NT_HEADER)
+                    .mem_size
+                + layout
+                    .section_layouts
+                    .get(output_section_id::SECTION_HEADERS)
+                    .mem_size,
+        )?,
+    );
 
     // TODO: hardcoded based LLD for sane defaults for now
     header.optional_header.major_linker_version = 14;
     header.optional_header.minor_linker_version = 0;
-    header.optional_header.image_base.set(e, 0x140000000);
     header.optional_header.section_alignment.set(e, 0x1000);
     // TODO: temp hack
     header.optional_header.file_alignment.set(e, 0x1000);
@@ -280,7 +321,7 @@ fn write_file<'data, A: Arch<Platform = coff::Coff>>(
     layout: &CoffLayout<'data>,
     trace: &TraceOutput,
     sym_index_map: &[Option<u32>],
-) -> crate::error::Result {
+) -> Result {
     match file {
         FileLayout::Object(s) => {
             write_object::<A>(s, buffers, table_writer, layout, trace, sym_index_map)?;
@@ -311,7 +352,7 @@ fn write_object<'data, A: Arch<Platform = coff::Coff>>(
     layout: &CoffLayout<'data>,
     trace: &TraceOutput,
     sym_index_map: &[Option<u32>],
-) -> crate::error::Result {
+) -> Result {
     verbose_timing_phase!("Write object", file_id = object.file_id.as_u32());
 
     let _span = debug_span!("write_file", filename = %object.input).entered();
@@ -405,7 +446,7 @@ fn write_object_section<'data, A: Arch<Platform = coff::Coff>>(
     buffers: &mut OutputSectionPartMap<&mut [u8]>,
     table_writer: &mut TableWriter<'_, '_>,
     trace: &TraceOutput,
-) -> crate::error::Result {
+) -> Result {
     let part_id = object.section_part_id(section_index, &layout.symbol_db.section_part_ids);
 
     // For --only-keep-debug, alloc non-NOTE sections are NOBITS.
@@ -480,7 +521,7 @@ fn write_section_raw<'out, 'data, A: Arch<Platform = coff::Coff>>(
     sec: Section,
     section_index: object::SectionIndex,
     buffers: &'out mut OutputSectionPartMap<&mut [u8]>,
-) -> crate::error::Result<(&'out mut [u8], HashMap<u64, u64>)> {
+) -> Result<(&'out mut [u8], HashMap<u64, u64>)> {
     let part_id = object.section_part_id(section_index, &layout.symbol_db.section_part_ids);
     if layout
         .output_sections
@@ -522,7 +563,7 @@ fn write_prelude<A: Arch<Platform = coff::Coff>>(
     buffers: &mut OutputSectionPartMap<&mut [u8]>,
     layout: &CoffLayout,
     sym_index_map: &[Option<u32>],
-) -> crate::error::Result {
+) -> Result {
     verbose_timing_phase!("Write prelude");
 
     let dos_header: &mut coff::DosHeader =
@@ -563,4 +604,8 @@ fn fill_section_padding<A: Arch<Platform = coff::Coff>>(
         // A::fill_section_padding(padding, section_info.section_attributes.flags);
         padding.fill(0);
     }
+}
+
+fn rva(address: u64, layout: &CoffLayout) -> u64 {
+    address - layout.args().image_base().unwrap()
 }
