@@ -236,8 +236,9 @@ fn populate_nt_header<A: Arch<Platform = coff::Coff>>(
         .magic
         .set(e, object::pe::IMAGE_NT_OPTIONAL_HDR64_MAGIC);
     // TODO: Skips a lot of logic compared to ELF one
-    // header.optional_header.address_of_entry_point =
-    //     u32::try_from(layout.resolved_entry_symbol_address()?.unwrap())?.into();
+    // TODO2: need to subtract image base, so hardcoding is really suboptimal even for now
+    let rva = layout.resolved_entry_symbol_address()?.unwrap() - 0x140000000;
+    header.optional_header.address_of_entry_point = u32::try_from(rva)?.into();
 
     // TODO: hardcoded based LLD for sane defaults for now
     header.optional_header.major_linker_version = 14;
