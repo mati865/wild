@@ -4,6 +4,7 @@ use crate::OutputFileData;
 use crate::bail;
 use crate::coff;
 use crate::coff::DosHeader;
+use crate::coff::SectionHeader;
 use crate::coff::output_section_id;
 use crate::coff::part_id;
 use crate::error::Context;
@@ -27,13 +28,14 @@ use crate::output_trace::TraceOutput;
 use crate::platform::Arch;
 use crate::platform::Args;
 use crate::platform::ObjectFile;
-use crate::platform::SectionHeader;
+use crate::platform::SectionHeader as _;
 use crate::resolution::SectionSlot;
 use crate::timing::timing_phase;
 use crate::timing::verbose_timing_phase;
 use hashbrown::HashMap;
 use object::LittleEndian;
 use object::from_bytes_mut;
+use object::slice_from_bytes_mut;
 use object::write::WritableBuffer;
 use rayon::iter::IndexedParallelIterator;
 use rayon::iter::IntoParallelIterator as _;
@@ -254,10 +256,10 @@ fn populate_nt_header<A: Arch<Platform = coff::Coff>>(
         .set(e, layout.args().image_base().unwrap());
     header.optional_header.size_of_image.set(
         e,
-        u32::try_from(rva(
+        u32::try_from(first_regular_section.alignment.align_up(rva(
             layout.section_layouts.iter().last().unwrap().1.mem_end(),
             layout,
-        ))?,
+        )))?,
     );
     header.optional_header.size_of_headers.set(
         e,
@@ -287,6 +289,30 @@ fn populate_nt_header<A: Arch<Platform = coff::Coff>>(
         .optional_header
         .file_alignment
         .set(e, first_regular_section.alignment.value().try_into()?);
+    // TODO: filter only sections with CODE characteristics
+    // header.optional_header.size_of_initialized_data.set(
+    //     e,
+    //     u32::try_from(
+    //         layout
+    //             .section_layouts
+    //             .iter()
+    //             .map(|(_, sec)| sec.file_size)
+    //             .sum::<usize>(),
+    //     )?,
+    // );
+    header.optional_header.size_of_initialized_data.set(
+        e,
+        u32::try_from(
+            layout
+                .section_layouts
+                .get(output_section_id::TEXT)
+                .file_size,
+        )?,
+    );
+    header.optional_header.size_of_uninitialized_data.set(
+        e,
+        u32::try_from(layout.section_layouts.get(output_section_id::BSS).mem_size)?,
+    );
 
     // TODO: hardcoded based LLD for sane defaults for now
     header.optional_header.major_linker_version = 14;
@@ -312,6 +338,51 @@ fn populate_nt_header<A: Arch<Platform = coff::Coff>>(
         .number_of_rva_and_sizes
         .set(e, object::pe::IMAGE_NUMBEROF_DIRECTORY_ENTRIES.try_into()?);
     // TODO: other fields
+
+    Ok(())
+}
+
+fn populate_section_headers<A: Arch<Platform = coff::Coff>>(
+    layout: &CoffLayout,
+    header_info: &HeaderInfo,
+    headers: &mut [SectionHeader],
+) -> Result {
+    let e = LittleEndian;
+
+    let mut sections_iter = layout.section_layouts.iter().skip_while(|(idx, _)| {
+        layout
+            .output_sections
+            .output_info(*idx)
+            .section_attributes
+            .is_null
+    });
+    for header in headers {
+        let (sec_idx, sec) = sections_iter.next().unwrap();
+        let sec_name = layout.output_sections.name(sec_idx).unwrap();
+        // debug_assert!(
+        //     sec_name.len() <= 8,
+        //     "long section names are not supported yet"
+        // );
+        let mut name = [0u8; 8];
+        for (name_idx, byte) in sec_name.0.iter().enumerate() {
+            // TODO: hack
+            if name_idx < 8 {
+                name[name_idx] = *byte;
+            }
+        }
+        *header = SectionHeader {
+            name,
+            virtual_size: u32::try_from(sec.mem_size)?.into(),
+            virtual_address: u32::try_from(rva(sec.mem_offset, layout))?.into(),
+            size_of_raw_data: u32::try_from(sec.alignment.align_up(sec.file_size as u64))?.into(),
+            pointer_to_raw_data: u32::try_from(sec.file_offset)?.into(),
+            pointer_to_relocations: Default::default(),
+            pointer_to_linenumbers: Default::default(),
+            number_of_relocations: Default::default(),
+            number_of_linenumbers: Default::default(),
+            characteristics: layout.output_sections.section_flags(sec_idx).into(),
+        };
+    }
 
     Ok(())
 }
@@ -587,6 +658,15 @@ fn write_prelude<A: Arch<Platform = coff::Coff>>(
         .context("Invalid NT header allocation")?
         .0;
     populate_nt_header::<A>(layout, &prelude.header_info, nt_header)?;
+
+    let sections_headers: &mut [coff::SectionHeader] = slice_from_bytes_mut(
+        buffers.get_mut(coff::part_id::SECTION_HEADERS),
+        prelude.header_info.num_output_sections_with_content as usize,
+    )
+    .ok()
+    .context("Invalid section headers allocation")?
+    .0;
+    populate_section_headers::<A>(layout, &prelude.header_info, sections_headers)?;
 
     Ok(())
 }

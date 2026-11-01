@@ -709,6 +709,7 @@ impl Platform for Coff {
         builder.add_sections(&custom.bss);
 
         builder.add_section(output_section_id::RELOC);
+        builder.add_section(output_section_id::TLS);
 
         builder.add_sections(&custom.nonalloc);
 
@@ -1543,6 +1544,7 @@ const DEFAULT_SECTION_PLACEMENT_RULES: &[SectionRule<'static>] = &[
     SectionRule::prefix_section(".xdata".as_bytes(), output_section_id::XDATA),
     SectionRule::prefix_section(".pdata".as_bytes(), output_section_id::PDATA),
     SectionRule::prefix_section(".bss".as_bytes(), output_section_id::BSS),
+    SectionRule::prefix_section(".tls".as_bytes(), output_section_id::TLS),
 ];
 
 const LINKER_MANAGED_SECTION_RULES: &[SectionRule<'static>] =
