@@ -47,7 +47,12 @@ impl CoffArgs {
     pub(crate) fn new(is_mingw: bool) -> Result<Self> {
         let args = Self {
             is_mingw,
-            common: CommonArgs::from_env()?,
+            common: {
+                CommonArgs {
+                    output: Arc::from(Path::new("a.exe")),
+                    ..CommonArgs::from_env()?
+                }
+            },
             ..Default::default()
         };
 
