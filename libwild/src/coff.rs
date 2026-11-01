@@ -1460,9 +1460,9 @@ pub(crate) struct BuiltInSectionDetails {
 impl Coff {
     const DEFAULT_DEFS: BuiltInSectionDetails = BuiltInSectionDetails {
         kind: Self::primary_section(&[]),
-        section_flags: SectionFlags(0),
+        section_flags: object::pe::IMAGE_SCN_MEM_READ,
         link: &[],
-        min_alignment: alignment::MIN,
+        min_alignment: Alignment { exponent: 12 },
     };
 
     const fn primary_section(name: &'static [u8]) -> SectionKind<'static, Coff> {
@@ -1474,10 +1474,12 @@ impl Coff {
 
         defs[crate::output_section_id::FILE_HEADER.as_usize()] = BuiltInSectionDetails {
             kind: Self::primary_section(b""),
+            min_alignment: alignment::MIN,
             ..Self::DEFAULT_DEFS
         };
         defs[output_section_id::DOS_STUB.as_usize()] = BuiltInSectionDetails {
             kind: Self::primary_section(b""),
+            min_alignment: alignment::MIN,
             ..Self::DEFAULT_DEFS
         };
         defs[output_section_id::NT_HEADER.as_usize()] = BuiltInSectionDetails {
@@ -1487,6 +1489,7 @@ impl Coff {
         };
         defs[output_section_id::SECTION_HEADERS.as_usize()] = BuiltInSectionDetails {
             kind: Self::primary_section(b""),
+            min_alignment: alignment::MIN,
             ..Self::DEFAULT_DEFS
         };
 

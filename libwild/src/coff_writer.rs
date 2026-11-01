@@ -218,6 +218,8 @@ fn populate_nt_header<A: Arch<Platform = coff::Coff>>(
     }
 
     let e = LittleEndian;
+    let first_regular_section = layout.section_layouts.get(output_section_id::TEXT);
+
     header.signature.set(e, object::pe::IMAGE_NT_SIGNATURE);
     header
         .file_header
@@ -244,13 +246,7 @@ fn populate_nt_header<A: Arch<Platform = coff::Coff>>(
     .into();
     header.optional_header.base_of_code.set(
         e,
-        u32::try_from(rva(
-            layout
-                .section_layouts
-                .get(output_section_id::TEXT)
-                .mem_offset,
-            layout,
-        ))?,
+        u32::try_from(rva(first_regular_section.mem_offset, layout))?,
     );
     header
         .optional_header
@@ -263,32 +259,38 @@ fn populate_nt_header<A: Arch<Platform = coff::Coff>>(
             layout,
         ))?,
     );
-    // TODO: Rounding
     header.optional_header.size_of_headers.set(
         e,
         u32::try_from(
-            layout
-                .section_layouts
-                .get(output_section_id::DOS_STUB)
-                .mem_size
-                + layout
+            first_regular_section.alignment.align_up(
+                layout
                     .section_layouts
-                    .get(output_section_id::NT_HEADER)
+                    .get(output_section_id::DOS_STUB)
                     .mem_size
-                + layout
-                    .section_layouts
-                    .get(output_section_id::SECTION_HEADERS)
-                    .mem_size,
+                    + layout
+                        .section_layouts
+                        .get(output_section_id::NT_HEADER)
+                        .mem_size
+                    + layout
+                        .section_layouts
+                        .get(output_section_id::SECTION_HEADERS)
+                        .mem_size,
+            ),
         )?,
     );
+    header
+        .optional_header
+        .section_alignment
+        .set(e, first_regular_section.alignment.value().try_into()?);
+    // Wild doesn't support different memory and file alignment
+    header
+        .optional_header
+        .file_alignment
+        .set(e, first_regular_section.alignment.value().try_into()?);
 
     // TODO: hardcoded based LLD for sane defaults for now
     header.optional_header.major_linker_version = 14;
     header.optional_header.minor_linker_version = 0;
-    header.optional_header.section_alignment.set(e, 0x1000);
-    // TODO: temp hack
-    header.optional_header.file_alignment.set(e, 0x1000);
-    // header.optional_header.file_alignment.set(e, 0x200);
     header
         .optional_header
         .major_operating_system_version
