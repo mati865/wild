@@ -1004,7 +1004,11 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
     }
 
     fn section_alignment(&self, section: &SectionHeader) -> Result<u64> {
-        Ok(section.coff_alignment())
+        if section.is_null() {
+            Ok(0)
+        } else {
+            Ok(Alignment::from_exponent(12)?.value())
+        }
     }
 
     fn relocations(&self, index: SectionIndex, relocations: &()) -> Result<RelocationList<'data>> {

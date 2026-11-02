@@ -189,6 +189,16 @@ pub(super) fn setup_argument_parser() -> ArgumentParser<CoffArgs> {
             Ok(())
         });
 
+    parser
+        .declare_with_param()
+        .long("entry")
+        .short("e")
+        .help("Set the entry point")
+        .execute(|args, _modifier_stack, value| {
+            args.entry = Some(value.to_owned());
+            Ok(())
+        });
+
     super::declare_common_args(&mut parser);
 
     add_silently_ignored_flags(&mut parser);

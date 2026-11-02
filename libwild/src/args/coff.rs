@@ -128,14 +128,14 @@ impl platform::Args for CoffArgs {
         _linker_script_entry: Option<&'a [u8]>,
     ) -> platform::EntryPoint<'a> {
         // TODO: it's not that easy, but should work for now
-        if self.is_mingw {
-            return platform::EntryPoint::Symbol(b"mainCRTStartup");
-        }
-        self.entry
-            .as_deref()
-            .map_or(platform::EntryPoint::None, |entry| {
-                platform::EntryPoint::Symbol(entry.as_bytes())
-            })
+        let default = if self.is_mingw {
+            platform::EntryPoint::Symbol(b"mainCRTStartup")
+        } else {
+            platform::EntryPoint::None
+        };
+        self.entry.as_deref().map_or(default, |entry| {
+            platform::EntryPoint::Symbol(entry.as_bytes())
+        })
     }
 
     fn lib_search_path(&self) -> &[Box<Path>] {
