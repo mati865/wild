@@ -3787,6 +3787,8 @@ impl LinkOutput {
             c.arg(&self.binary);
             c
         } else if self.command.config.platform == PlatformKind::MinGW {
+            // TODO: move this away to avoid harming single test run time
+            prepare_wine();
             let mut c = Command::new("wine");
             c.arg(&self.binary);
             c
@@ -10223,4 +10225,27 @@ fn default_llvm_tools_dir() -> PathBuf {
 fn path_to_str(path: &Path) -> Result<&str> {
     path.to_str()
         .with_context(|| format!("Path must be UTF-8: `{}`", path.display()))
+}
+
+// We kill two birds with one stone here: keep wine warm between tests and most importantly, avoid
+// ~4s waits on each individual test exit due to Wine's forked process delayed shutdown
+fn prepare_wine() {
+    static PREPARED: OnceLock<()> = OnceLock::new();
+    PREPARED.get_or_init(|| {
+        for cmd in [
+            // keep wine running/warm between tests
+            Command::new("wineserver").arg("--persistent=5"),
+            // create/update prefix; blocks until boot completes
+            &mut Command::new("wineboot"),
+        ] {
+            let _ = cmd
+                // skip Gecko/Mono prompts
+                .env("WINEDLLOVERRIDES", "mscoree,mshtml=")
+                .env("WINEDEBUG", "-all")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+    });
 }
