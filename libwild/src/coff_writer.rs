@@ -256,10 +256,17 @@ fn populate_nt_header<A: Arch<Platform = coff::Coff>>(
         .set(e, layout.args().image_base().unwrap());
     header.optional_header.size_of_image.set(
         e,
-        u32::try_from(first_regular_section.alignment.align_up(rva(
-            layout.section_layouts.iter().last().unwrap().1.mem_end(),
-            layout,
-        )))?,
+        u32::try_from(
+            first_regular_section.alignment.align_up(rva(
+                layout
+                    .section_layouts
+                    .iter()
+                    .map(|(_, sec)| sec.mem_end())
+                    .max()
+                    .unwrap(),
+                layout,
+            )),
+        )?,
     );
     header.optional_header.size_of_headers.set(
         e,
