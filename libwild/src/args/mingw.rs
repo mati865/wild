@@ -199,6 +199,24 @@ pub(super) fn setup_argument_parser() -> ArgumentParser<CoffArgs> {
             Ok(())
         });
 
+    parser
+        .declare()
+        .long("gc-sections")
+        .help("Enable removal of unused sections")
+        .execute(|args, _modifier_stack| {
+            args.gc_sections = true;
+            Ok(())
+        });
+
+    parser
+        .declare()
+        .long("no-gc-sections")
+        .help("Disable removal of unused sections")
+        .execute(|args, _modifier_stack| {
+            args.gc_sections = false;
+            Ok(())
+        });
+
     super::declare_common_args(&mut parser);
 
     add_silently_ignored_flags(&mut parser);

@@ -480,7 +480,12 @@ fn main() -> Result<std::process::ExitCode> {
 fn collect_tests(tests: &mut Vec<Trial>, filter: &Filter, test_config: &TestConfig) -> Result {
     let host_arch = get_host_architecture();
 
-    for platform in [PlatformKind::Elf, PlatformKind::MachO, PlatformKind::Wasm] {
+    for platform in [
+        PlatformKind::Elf,
+        PlatformKind::MachO,
+        PlatformKind::MinGW,
+        PlatformKind::Wasm,
+    ] {
         // Right now, the Mach-O provided Clang and the ld linker do not support the ELF format.
         if platform == PlatformKind::Elf && cfg!(target_os = "macos") {
             continue;
@@ -1350,6 +1355,7 @@ impl Architecture {
                 }
             }
             PlatformKind::MachO => format!("{}-apple-darwin", self.darwin_arch_name()),
+            PlatformKind::MinGW => "x86_64-w64-mingw32".to_owned(),
             PlatformKind::Wasm => "wasm32".to_owned(),
         }
     }
@@ -1620,6 +1626,7 @@ enum Mode {
 enum PlatformKind {
     Elf,
     MachO,
+    MinGW,
     Wasm,
 }
 
@@ -3529,6 +3536,10 @@ impl LinkOutput {
 
             c.arg(&self.binary);
             c
+        } else if self.command.config.platform == PlatformKind::MinGW {
+            let mut c = Command::new("wine");
+            c.arg(&self.binary);
+            c
         } else {
             Command::new(&self.binary)
         };
@@ -3970,6 +3981,10 @@ fn get_c_compiler(
             "gcc" | "g++",
             CLanguage::Cpp,
         ) => Ok(format!("{}-g++", arch.cross_triplet())),
+        (_, "x86_64-w64-mingw32-gcc", lang) => Ok(match lang {
+            CLanguage::C => "x86_64-w64-mingw32-gcc".to_string(),
+            CLanguage::Cpp => "x86_64-w64-mingw32-g++".to_string(),
+        }),
         _ => bail!("Unsupported compiler and or architecture `{compiler}` / {cross_arch:?}"),
     }
 }
@@ -4867,6 +4882,14 @@ impl LinkCommand {
                                 command.arg("11.0");
                             }
                         }
+                        PlatformKind::MinGW => {
+                            // if let Some(arch) = cross_arch {
+                            //     command.arg("-m").arg(arch.emulation_name());
+                            // }
+                            command.arg("-m").arg("i386pep");
+
+                            command.arg("--gc-sections");
+                        }
                         PlatformKind::Wasm => {
                             let primary_wat = config
                                 .test_src_dir
@@ -5515,6 +5538,7 @@ impl Assertions {
                 self.verify_program_headers(&elf_obj)?;
                 self.verify_section_max_entries(&elf_obj)?;
             }
+            object::File::Pe64(_pe_obj) => {}
             _ => bail!("Unsupported object file format"),
         }
 
@@ -7786,7 +7810,8 @@ impl Display for LinkCommand {
         let build_features = match self.config.platform {
             PlatformKind::MachO => "--features macho",
             PlatformKind::Wasm => "--features wasm",
-            PlatformKind::Elf => "",
+            // TODO
+            PlatformKind::Elf | PlatformKind::MinGW => "",
         };
 
         if let Some(save_dir) = self.opt_save_dir.as_ref()
@@ -8371,6 +8396,34 @@ fn available_linkers_for_mac() -> Result<LinkerCatalog> {
         available: linkers,
         unavailable: Vec::new(),
     })
+}
+
+fn available_linkers_for_mingw() -> Result<Vec<Linker>> {
+    let mut linkers = vec![Linker::ThirdParty(ThirdPartyLinker {
+        // TODO: Rename to "bfd" and get rid of gcc_name.
+        name: "ld",
+        gcc_name: "bfd",
+        path: find_bin(&["x86_64-w64-mingw32-ld.bfd", "x86_64-w64-mingw32-ld"])?,
+        // cross_paths: find_cross_paths("ld"),
+        cross_paths: HashMap::new(),
+        direct_args: Vec::new(),
+        enabled_by_default: true,
+    })];
+
+    if let Ok(path) = find_bin(&["ld.lld"]) {
+        linkers.push(Linker::ThirdParty(ThirdPartyLinker {
+            name: "lld",
+            gcc_name: "lld",
+            path,
+            cross_paths: find_cross_paths("ld.lld"),
+            direct_args: Vec::new(),
+            enabled_by_default: false,
+        }));
+    }
+
+    linkers.push(Linker::Wild);
+
+    Ok(linkers)
 }
 
 fn available_linkers_for_wasm() -> Vec<Linker> {
@@ -9051,13 +9104,14 @@ impl PlatformKind {
         match self {
             PlatformKind::Elf => "elf",
             PlatformKind::MachO => "macho",
+            PlatformKind::MinGW => "mingw",
             PlatformKind::Wasm => "wasm",
         }
     }
 
     fn flavor(self) -> &'static str {
         match self {
-            PlatformKind::Elf => "gnu",
+            PlatformKind::Elf | PlatformKind::MinGW => "gnu",
             PlatformKind::MachO => "darwin",
             PlatformKind::Wasm => "wasm",
         }
@@ -9068,7 +9122,7 @@ impl PlatformKind {
     }
 
     fn can_execute_on_host(self) -> bool {
-        self.is_host() || self == PlatformKind::Wasm
+        self.is_host() || self == PlatformKind::Wasm || self == PlatformKind::MinGW
     }
 
     fn diff_supported(self) -> bool {
@@ -9082,6 +9136,10 @@ impl PlatformKind {
                 unavailable: Vec::new(),
             }),
             PlatformKind::MachO => available_linkers_for_mac(),
+            PlatformKind::MinGW => Ok(LinkerCatalog {
+                available: available_linkers_for_mingw()?,
+                unavailable: Vec::new(),
+            }),
             PlatformKind::Wasm => Ok(LinkerCatalog {
                 available: available_linkers_for_wasm(),
                 unavailable: Vec::new(),
@@ -9093,6 +9151,7 @@ impl PlatformKind {
         match self {
             PlatformKind::Elf => ALL_ARCHITECTURES,
             PlatformKind::MachO => &[Architecture::AArch64],
+            PlatformKind::MinGW => &[Architecture::X86_64],
             PlatformKind::Wasm => &[Architecture::Wasm32],
         }
     }
@@ -9103,7 +9162,7 @@ impl PlatformKind {
                 // Wild linker uses -znow by default!
                 args: vec!["-z".to_owned(), "now".to_owned()],
             },
-            PlatformKind::MachO | PlatformKind::Wasm => ArgumentSet::empty(),
+            PlatformKind::MachO | PlatformKind::Wasm | PlatformKind::MinGW => ArgumentSet::empty(),
         }
     }
 
@@ -9111,6 +9170,7 @@ impl PlatformKind {
         match self {
             PlatformKind::Elf => "gcc",
             PlatformKind::MachO | PlatformKind::Wasm => "clang",
+            PlatformKind::MinGW => "x86_64-w64-mingw32-gcc",
         }
     }
 
