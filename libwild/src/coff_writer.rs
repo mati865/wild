@@ -35,6 +35,8 @@ use crate::timing::verbose_timing_phase;
 use hashbrown::HashMap;
 use object::LittleEndian;
 use object::from_bytes_mut;
+use object::pe::ImageFileHeader;
+use object::pe::ImageOptionalHeader64;
 use object::slice_from_bytes_mut;
 use object::write::WritableBuffer;
 use rayon::iter::IndexedParallelIterator;
@@ -178,27 +180,33 @@ fn populate_dos_header<A: Arch<Platform = coff::Coff>>(
     layout: &CoffLayout,
     header: &mut coff::DosHeader,
 ) -> Result {
-    let e = LittleEndian;
-    header.e_magic.set(e, object::pe::IMAGE_DOS_SIGNATURE);
-    header
-        .e_cparhdr
-        .set(e, (size_of::<DosHeader>() / u16::BITS as usize).try_into()?);
-    header.e_lfanew.set(
-        e,
-        layout
-            .section_layouts
-            .get(output_section_id::NT_HEADER)
-            .file_offset
-            .try_into()?,
-    );
-    header.e_lfarlc.set(
-        e,
-        layout
-            .section_layouts
-            .get(output_section_id::DOS_STUB)
-            .file_offset
-            .try_into()?,
-    );
+    *header = DosHeader {
+        e_magic: object::pe::IMAGE_DOS_SIGNATURE.into(),
+        e_cblp: Default::default(),
+        e_cp: Default::default(),
+        e_crlc: Default::default(),
+        e_cparhdr: u16::try_from(size_of::<DosHeader>() / u16::BITS as usize)?.into(),
+        e_minalloc: Default::default(),
+        e_maxalloc: Default::default(),
+        e_ss: Default::default(),
+        e_sp: Default::default(),
+        e_csum: Default::default(),
+        e_ip: Default::default(),
+        e_cs: Default::default(),
+        e_lfarlc: Default::default(),
+        e_ovno: Default::default(),
+        e_res: [0.into(); 4],
+        e_oemid: Default::default(),
+        e_oeminfo: Default::default(),
+        e_res2: [0.into(); 10],
+        e_lfanew: u32::try_from(
+            layout
+                .section_layouts
+                .get(output_section_id::NT_HEADER)
+                .file_offset,
+        )?
+        .into(),
+    };
 
     Ok(())
 }
@@ -213,50 +221,64 @@ fn populate_nt_header<A: Arch<Platform = coff::Coff>>(
     header: &mut coff::NtHeader,
 ) -> Result {
     let output_kind = layout.symbol_db.output_kind;
-    let mut ty =
+    let mut characteristics =
         object::pe::IMAGE_FILE_EXECUTABLE_IMAGE | object::pe::IMAGE_FILE_LARGE_ADDRESS_AWARE;
     if output_kind.is_shared_object() {
-        ty |= object::pe::IMAGE_FILE_DLL;
+        characteristics |= object::pe::IMAGE_FILE_DLL;
     }
 
     let e = LittleEndian;
     let first_regular_section = layout.section_layouts.get(output_section_id::TEXT);
 
-    header.signature.set(e, object::pe::IMAGE_NT_SIGNATURE);
-    header
-        .file_header
-        .machine
-        .set(e, object::pe::IMAGE_FILE_MACHINE_AMD64);
-    header
-        .file_header
-        .number_of_sections
-        .set(e, header_info.num_output_sections_with_content.try_into()?);
-    header
-        .file_header
-        .size_of_optional_header
-        .set(e, coff::SIZE_OF_OPTIONAL_HEADER64);
-    header.file_header.characteristics.set(e, ty);
-    header
-        .optional_header
-        .magic
-        .set(e, object::pe::IMAGE_NT_OPTIONAL_HDR64_MAGIC);
+    let file_header = ImageFileHeader {
+        machine: object::pe::IMAGE_FILE_MACHINE_AMD64.into(),
+        number_of_sections: u16::try_from(header_info.num_output_sections_with_content)?.into(),
+        time_date_stamp: Default::default(),
+        pointer_to_symbol_table: Default::default(),
+        number_of_symbols: Default::default(),
+        size_of_optional_header: coff::SIZE_OF_OPTIONAL_HEADER64.into(),
+        characteristics: characteristics.into(),
+    };
     // TODO: Skips a lot of logic compared to ELF one
-    header.optional_header.address_of_entry_point = u32::try_from(rva(
+    let entry_point_address = u32::try_from(rva(
         layout.resolved_entry_symbol_address()?.unwrap(),
         layout,
-    ))?
-    .into();
-    header.optional_header.base_of_code.set(
-        e,
-        u32::try_from(rva(first_regular_section.mem_offset, layout))?,
-    );
-    header
-        .optional_header
-        .image_base
-        .set(e, layout.args().image_base().unwrap());
-    header.optional_header.size_of_image.set(
-        e,
-        u32::try_from(
+    ))?;
+    let optional_header = ImageOptionalHeader64 {
+        magic: object::pe::IMAGE_NT_OPTIONAL_HDR64_MAGIC.into(),
+        major_linker_version: 14,
+        minor_linker_version: 0,
+        size_of_code: Default::default(),
+        // TODO: filter only sections with CODE characteristics
+        size_of_initialized_data: u32::try_from(
+            layout
+                .section_layouts
+                .iter()
+                .map(|(_, sec)| sec.file_size)
+                .sum::<usize>(),
+        )?
+        .into(),
+        size_of_uninitialized_data: u32::try_from(
+            layout
+                .section_layouts
+                .get(output_section_id::TEXT)
+                .file_size,
+        )?
+        .into(),
+        address_of_entry_point: entry_point_address.into(),
+        base_of_code: u32::try_from(rva(first_regular_section.mem_offset, layout))?.into(),
+        image_base: layout.args().image_base().unwrap().into(),
+        section_alignment: u32::try_from(first_regular_section.alignment.value())?.into(),
+        // Wild doesn't support separate memory and file alignment
+        file_alignment: u32::try_from(first_regular_section.alignment.value())?.into(),
+        major_operating_system_version: 6.into(),
+        minor_operating_system_version: Default::default(),
+        major_image_version: Default::default(),
+        minor_image_version: Default::default(),
+        major_subsystem_version: 6.into(),
+        minor_subsystem_version: Default::default(),
+        win32_version_value: Default::default(),
+        size_of_image: u32::try_from(
             first_regular_section.alignment.align_up(rva(
                 layout
                     .section_layouts
@@ -266,11 +288,9 @@ fn populate_nt_header<A: Arch<Platform = coff::Coff>>(
                     .unwrap(),
                 layout,
             )),
-        )?,
-    );
-    header.optional_header.size_of_headers.set(
-        e,
-        u32::try_from(
+        )?
+        .into(),
+        size_of_headers: u32::try_from(
             first_regular_section.alignment.align_up(
                 layout
                     .section_layouts
@@ -285,66 +305,23 @@ fn populate_nt_header<A: Arch<Platform = coff::Coff>>(
                         .get(output_section_id::SECTION_HEADERS)
                         .mem_size,
             ),
-        )?,
-    );
-    header
-        .optional_header
-        .section_alignment
-        .set(e, first_regular_section.alignment.value().try_into()?);
-    // Wild doesn't support different memory and file alignment
-    header
-        .optional_header
-        .file_alignment
-        .set(e, first_regular_section.alignment.value().try_into()?);
-    // TODO: filter only sections with CODE characteristics
-    // header.optional_header.size_of_initialized_data.set(
-    //     e,
-    //     u32::try_from(
-    //         layout
-    //             .section_layouts
-    //             .iter()
-    //             .map(|(_, sec)| sec.file_size)
-    //             .sum::<usize>(),
-    //     )?,
-    // );
-    header.optional_header.size_of_initialized_data.set(
-        e,
-        u32::try_from(
-            layout
-                .section_layouts
-                .get(output_section_id::TEXT)
-                .file_size,
-        )?,
-    );
-    header.optional_header.size_of_uninitialized_data.set(
-        e,
-        u32::try_from(layout.section_layouts.get(output_section_id::BSS).mem_size)?,
-    );
+        )?
+        .into(),
+        check_sum: Default::default(),
+        subsystem: object::pe::IMAGE_SUBSYSTEM_WINDOWS_CUI.into(),
+        dll_characteristics: Default::default(),
+        size_of_stack_reserve: Default::default(),
+        size_of_stack_commit: Default::default(),
+        size_of_heap_reserve: Default::default(),
+        size_of_heap_commit: Default::default(),
+        loader_flags: Default::default(),
+        number_of_rva_and_sizes: u32::try_from(object::pe::IMAGE_NUMBEROF_DIRECTORY_ENTRIES)?
+            .into(),
+    };
 
-    // TODO: hardcoded based LLD for sane defaults for now
-    header.optional_header.major_linker_version = 14;
-    header.optional_header.minor_linker_version = 0;
-    header
-        .optional_header
-        .major_operating_system_version
-        .set(e, 6);
-    header
-        .optional_header
-        .minor_operating_system_version
-        .set(e, 0);
-    header.optional_header.major_image_version.set(e, 0);
-    header.optional_header.minor_image_version.set(e, 0);
-    header.optional_header.major_subsystem_version.set(e, 6);
-    header.optional_header.minor_subsystem_version.set(e, 0);
-    header
-        .optional_header
-        .subsystem
-        .set(e, object::pe::IMAGE_SUBSYSTEM_WINDOWS_CUI);
-    header
-        .optional_header
-        .number_of_rva_and_sizes
-        .set(e, object::pe::IMAGE_NUMBEROF_DIRECTORY_ENTRIES.try_into()?);
-    // TODO: other fields
+    header.signature = object::pe::IMAGE_NT_SIGNATURE.into();
+    header.file_header = file_header;
+    header.optional_header = optional_header;
 
     Ok(())
 }
