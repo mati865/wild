@@ -42,6 +42,7 @@ pub struct CoffArgs {
     pub(crate) machine: CoffMachine,
     emulation: mingw::Emulation,
     emulation_error: Option<Error>,
+    pub(crate) gc_sections: bool,
 }
 
 impl CoffArgs {
@@ -101,6 +102,7 @@ impl Default for CoffArgs {
             no_default_libraries: false,
             emulation: mingw::Emulation::I386Pep,
             emulation_error: None,
+            gc_sections: true,
         }
     }
 }
