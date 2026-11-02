@@ -7,10 +7,13 @@ use crate::arch::Architecture;
 use crate::args::coff::CoffArgs;
 use crate::bail;
 use crate::coff_writer;
+use crate::elf::Elf;
 use crate::error::Result;
 use crate::input_data::InputBytes;
 use crate::input_data::InputRef;
 use crate::layout;
+use crate::layout::ObjectLayout;
+use crate::layout::Resolution;
 use crate::layout::SectionGcUnit;
 use crate::layout_rules;
 use crate::layout_rules::SectionKind;
@@ -21,6 +24,7 @@ use crate::output_section_id::OutputSectionId;
 use crate::output_section_id::SectionIdentity;
 use crate::output_section_id::SectionName;
 use crate::output_section_id::SectionOutputInfo;
+use crate::output_section_map::OutputSectionMap;
 use crate::output_section_part_map::OutputSectionPartMap;
 use crate::parsing::InternalSymDefInfo;
 use crate::parsing::SymbolPlacement;
@@ -31,20 +35,28 @@ use crate::platform::Args;
 use crate::platform::CommonSymbol;
 use crate::platform::ObjectFile as _;
 use crate::platform::Platform;
+use crate::platform::Relocation;
+use crate::platform::RelocationSequence;
 use crate::platform::SectionFlags as _;
 use crate::platform::SectionHeader as _;
 use crate::platform::Symbol as _;
 use crate::resolution::LoadedMetrics;
+use crate::string_merging::MergedStringStartAddresses;
+use crate::string_merging::MergedStringsSection;
 use crate::symbol_db::SymbolDb;
 use crate::symbol_db::Visibility;
+use crate::value_flags::ValueFlags;
 use object::LittleEndian;
 use object::SectionIndex;
 use object::SymbolIndex;
 use object::coff::CoffHeader;
 use object::coff::Symbol;
+use object::pe::ImageRelocation;
+use object::pe::RelocationType;
 use object::pe::SectionFlags;
 use std::borrow::Cow;
 use std::marker::PhantomData;
+use std::ops::Range;
 
 pub(crate) fn link_for_arch<'data, F: FileSystem>(
     linker: &'data crate::Linker<F>,
@@ -154,16 +166,67 @@ pub(crate) struct File<'data> {
     pub(crate) symbols: Vec<SymtabEntry>,
 }
 
-#[derive(Debug, Copy, Clone, Default)]
-pub(crate) struct RelocationList<'data> {
-    _phantom: PhantomData<&'data ()>,
+#[derive(Clone, Copy)]
+pub(crate) struct CoffRelocation {
+    raw: ImageRelocation,
 }
 
-impl<'data> platform::RelocationList<'data> for RelocationList<'data> {
-    fn num_relocations(&self) -> usize {
+impl CoffRelocation {
+    pub(crate) fn new(raw: ImageRelocation) -> Self {
+        Self { raw }
+    }
+}
+
+impl Relocation for CoffRelocation {
+    type Sequence<'data> = RelocationList<'data>;
+    type Platform = Coff;
+
+    fn symbol(&self) -> Option<SymbolIndex> {
+        Some(self.raw.symbol())
+    }
+
+    fn raw_type(&self) -> RelocationType {
+        self.raw.typ.get(LittleEndian)
+    }
+
+    fn offset(&self) -> u64 {
+        self.raw.virtual_address.get(LittleEndian).into()
+    }
+
+    fn addend(&self) -> i64 {
         todo!()
     }
 }
+
+#[derive(Debug, Copy, Clone, Default)]
+pub(crate) struct RelocationList<'data>(&'data [ImageRelocation]);
+
+impl<'data> platform::RelocationList<'data> for RelocationList<'data> {
+    fn num_relocations(&self) -> usize {
+        self.0.len()
+    }
+}
+
+impl<'data> platform::RelocationSequence<'data> for RelocationList<'data> {
+    type Rel = CoffRelocation;
+
+    fn rel_iter(&self) -> impl Iterator<Item = CoffRelocation> {
+        self.0.iter().copied().map(|raw| CoffRelocation { raw })
+    }
+
+    fn subsequence(&self, range: Range<usize>) -> Self {
+        Self(&self.0[range])
+    }
+
+    fn num_relocations(&self) -> usize {
+        self.0.len()
+    }
+}
+
+// Not needing Drop opens the option of storing this type in an arena that doesn't support dropping
+// its contents.
+// TODO
+// const _: () = assert!(!core::mem::needs_drop::<File>());
 
 impl Platform for Coff {
     const NUM_SINGLE_PART_SECTIONS: u32 = COFF_NUM_SINGLE_PART_SECTIONS;
@@ -200,7 +263,7 @@ impl Platform for Coff {
     type RelocationSections = ();
     type DynamicEntry = ();
     type DynamicSymbolDefinitionExt = ();
-    type RelocationInfo = object::pe::RelocationType;
+    type RelocationInfo = RelocationType;
     type NonAddressableIndexes = NonAddressableIndexes;
     type NonAddressableCounts = ();
     type EpilogueLayoutExt = ();
@@ -384,14 +447,28 @@ impl Platform for Coff {
     }
 
     fn load_object_section_relocations<'data, 'scope, A: Arch<Platform = Self>>(
-        _state: &mut layout::ObjectLayoutState<'data, Self>,
-        _common: &mut layout::CommonGroupState<'data, Self>,
-        _queue: &mut layout::LocalWorkQueue<Self>,
-        _resources: &'scope layout::GraphResources<'data, '_, Self>,
-        _section: layout::Section,
-        _section_index: SectionIndex,
-        _scope: &rayon::Scope<'scope>,
+        state: &mut layout::ObjectLayoutState<'data, Self>,
+        common: &mut layout::CommonGroupState<'data, Self>,
+        queue: &mut layout::LocalWorkQueue<Self>,
+        resources: &'scope layout::GraphResources<'data, '_, Self>,
+        section: layout::Section,
+        section_index: SectionIndex,
+        scope: &rayon::Scope<'scope>,
     ) -> Result {
+        for relocation in state.relocations(section_index)?.rel_iter() {
+            let local_symbol_id = state
+                .symbol_id_range
+                .input_to_id(relocation.symbol().unwrap());
+            let symbol_id = resources.symbol_db.definition(local_symbol_id);
+
+            let atomic_flags = &resources.per_symbol_flags.get_atomic(symbol_id);
+            let previous_flags = atomic_flags.fetch_or(ValueFlags::DIRECT);
+
+            if !previous_flags.has_resolution() {
+                queue.send_symbol_request::<A>(symbol_id, resources, scope);
+            }
+        }
+
         Ok(())
     }
 
@@ -1001,8 +1078,17 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
         }
     }
 
-    fn relocations(&self, index: SectionIndex, relocations: &()) -> Result<RelocationList<'data>> {
-        todo!()
+    fn relocations(&self, index: SectionIndex, _relocations: &()) -> Result<RelocationList<'data>> {
+        let section = self.section(index)?;
+        // let ptr = section.pointer_to_relocations.get(LittleEndian) as usize;
+        // let count = section.number_of_relocations.get(LittleEndian) as usize;
+        // Ok(RelocationList(
+        //     slice_from_bytes(&self.data[ptr..], count)
+        //         .map_err(|()| todo!())?
+        //         .0,
+        // ))
+        let raw = section.coff_relocations(self.data)?;
+        Ok(RelocationList(raw))
     }
 
     fn parse_relocations(&self) -> Result<()> {
@@ -1539,6 +1625,46 @@ impl Coff {
 }
 
 impl platform::BuiltInSectionDetails for BuiltInSectionDetails {}
+
+impl Resolution<Coff> {
+    #[inline(always)]
+    pub(crate) fn value_with_addend<'data>(
+        &self,
+        addend: i64,
+        symbol_index: object::SymbolIndex,
+        object_layout: &ObjectLayout<'data, Coff>,
+        section_part_ids: &[PartId],
+        merged_strings: &OutputSectionMap<MergedStringsSection>,
+        merged_string_start_addresses: &MergedStringStartAddresses,
+    ) -> Result<u64> {
+        // if self.flags.is_ifunc() {
+        //     return Ok(self.plt_address()?.wrapping_add(addend as u64));
+        // }
+
+        // For most symbols, `raw_value` won't be zero, so we can save ourselves from looking up the
+        // section to see if it's a string-merge section. For string-merge symbols with names,
+        // `raw_value` will have already been computed, so we can avoid computing it again.
+        if self.raw_value == 0
+            && let Some(r) = crate::string_merging::get_merged_string_output_address::<Coff>(
+                symbol_index,
+                addend,
+                object_layout.object,
+                &object_layout.sections,
+                section_part_ids,
+                object_layout.section_id_range,
+                merged_strings,
+                merged_string_start_addresses,
+                false,
+            )?
+        {
+            if self.raw_value != 0 {
+                bail!("Merged string resolution has value 0x{}", self.raw_value);
+            }
+            return Ok(r);
+        }
+        Ok(self.raw_value.wrapping_add(addend as u64))
+    }
+}
 
 const DEFAULT_SECTION_PLACEMENT_RULES: &[SectionRule<'static>] = &[
     SectionRule::prefix_section(".rdata".as_bytes(), output_section_id::RODATA),

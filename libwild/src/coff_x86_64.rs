@@ -1,8 +1,13 @@
 #![allow(dead_code, unused_variables)]
 
+use crate::bail;
 use crate::coff::Coff;
 use crate::platform::PreviousRelocationInfo;
+use linker_utils::elf::AllowedRange;
+use linker_utils::elf::RelocationKind;
 use linker_utils::elf::RelocationKindInfo;
+use linker_utils::elf::RelocationSize;
+use linker_utils::elf::Sign;
 use linker_utils::relaxation::RelocationModifier;
 
 pub(crate) struct CoffX86_64;
@@ -29,9 +34,27 @@ impl crate::platform::Arch for CoffX86_64 {
     }
 
     fn relocation_from_raw(
-        _r_type: <Self::Platform as crate::platform::Platform>::RelocationInfo,
+        r_type: <Self::Platform as crate::platform::Platform>::RelocationInfo,
     ) -> crate::error::Result<RelocationKindInfo> {
-        todo!()
+        let (kind, size, range) = match r_type {
+            object::pe::IMAGE_REL_AMD64_ADDR64 => (
+                RelocationKind::Absolute,
+                RelocationSize::ByteSize(8),
+                AllowedRange::from_byte_size(8, Sign::Unsigned),
+            ),
+            _ => bail!("Unsupported relocation: {r_type}"),
+        };
+
+        Ok(RelocationKindInfo {
+            kind,
+            size,
+            mask: None,
+            range,
+            alignment: 1,
+            bias: None,
+            thunkable: false,
+            implicit_addend: false,
+        })
     }
 
     fn rel_type_to_string(r_type: object::pe::RelocationType) -> std::borrow::Cow<'static, str> {

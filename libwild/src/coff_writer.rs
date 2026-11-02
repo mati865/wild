@@ -3,6 +3,8 @@
 use crate::OutputFileData;
 use crate::bail;
 use crate::coff;
+use crate::coff::Coff;
+use crate::coff::CoffRelocation;
 use crate::coff::DosHeader;
 use crate::coff::SectionHeader;
 use crate::coff::output_section_id;
@@ -19,21 +21,36 @@ use crate::layout::Layout;
 use crate::layout::ObjectLayout;
 use crate::layout::PartialLinkSingleton;
 use crate::layout::PreludeLayout;
+use crate::layout::Resolution;
 use crate::layout::Section;
 use crate::output_kind::OutputKind;
 use crate::output_section_id::SectionOutputInfo;
 use crate::output_section_map::OutputSectionMap;
 use crate::output_section_part_map::OutputSectionPartMap;
+use crate::output_trace::HexU64;
 use crate::output_trace::TraceOutput;
+use crate::part_id::PartId;
+use crate::platform;
 use crate::platform::Arch;
 use crate::platform::Args;
 use crate::platform::ObjectFile;
+use crate::platform::Platform;
+use crate::platform::Relocation;
+use crate::platform::RelocationSequence;
 use crate::platform::SectionHeader as _;
 use crate::resolution::SectionSlot;
+use crate::symbol_db::SymbolDb;
+use crate::symbol_db::SymbolId;
 use crate::timing::timing_phase;
 use crate::timing::verbose_timing_phase;
+use crate::value_flags::PerSymbolFlags;
+use crate::value_flags::ValueFlags;
 use hashbrown::HashMap;
+use linker_utils::elf::RelocationKind;
+use linker_utils::elf::RelocationSize;
+use linker_utils::relaxation::opt_input_to_output;
 use object::LittleEndian;
+use object::SymbolIndex;
 use object::from_bytes_mut;
 use object::pe::ImageFileHeader;
 use object::pe::ImageOptionalHeader64;
@@ -42,6 +59,8 @@ use object::write::WritableBuffer;
 use rayon::iter::IndexedParallelIterator;
 use rayon::iter::IntoParallelIterator as _;
 use rayon::iter::ParallelIterator as _;
+use std::fmt::Display;
+use std::marker::PhantomData;
 use std::ops::Range;
 use std::sync::atomic::Ordering::Relaxed;
 use tracing::debug_span;
@@ -539,36 +558,24 @@ fn write_object_section<'data, A: Arch<Platform = coff::Coff>>(
     //     );
     // }
 
-    // let relocations = object.relocations(section_index)?;
-    // let result = match relocations {
-    //     elf::RelocationList::Rela(rela) => apply_relocations::<C, A, elf::ElfRela<C>, _>(
-    //         object,
-    //         out,
-    //         section_index,
-    //         rela.iter().map(|rela| Ok(elf::ElfRela::new(*rela))),
-    //         &instruction_mapping,
-    //         layout,
-    //         table_writer,
-    //         trace,
-    //     ),
-    //     elf::RelocationList::Crel(crel_iter) => apply_relocations::<C, A, elf::ElfCrel<C>, _>(
-    //         object,
-    //         out,
-    //         section_index,
-    //         crel_iter.map(|r| r.map(elf::ElfCrel::new)),
-    //         &instruction_mapping,
-    //         layout,
-    //         table_writer,
-    //         trace,
-    //     ),
-    // };
-    // result.with_context(|| {
-    //     format!(
-    //         "Failed to apply relocations in section `{}` of {}",
-    //         object.object.section_display_name(section_index),
-    //         object.input
-    //     )
-    // })?;
+    let relocations = object.relocations(section_index)?;
+    apply_relocations::<A, CoffRelocation, _>(
+        object,
+        out,
+        section_index,
+        relocations.rel_iter(),
+        &instruction_mapping,
+        layout,
+        table_writer,
+        trace,
+    )
+    .with_context(|| {
+        format!(
+            "Failed to apply relocations in section `{}` of {}",
+            object.object.section_display_name(section_index),
+            object.input
+        )
+    })?;
     Ok(())
 }
 
@@ -615,6 +622,922 @@ fn write_section_raw<'out, 'data, A: Arch<Platform = coff::Coff>>(
         Ok((&mut [], HashMap::new()))
     }
 }
+
+fn apply_relocations<
+    'data,
+    A: Arch<Platform = Coff>,
+    R: Relocation<Platform = Coff>,
+    I: Iterator<Item = R>,
+>(
+    object: &ObjectLayout<'data, Coff>,
+    out: &mut [u8],
+    section_index: object::SectionIndex,
+    mut relocations: I,
+    instruction_mapping: &HashMap<u64, u64>,
+    layout: &CoffLayout<'data>,
+    table_writer: &mut TableWriter<'_, '_>,
+    trace: &TraceOutput,
+) -> Result {
+    let section_address = object.section_resolutions[section_index.0]
+        .address()
+        .context("Attempted to apply relocations to a section that we didn't load")?;
+    let object_section = object.object.section(section_index)?;
+    // let section_flags = object_section.sh_flags(LittleEndian);
+    let section_flags = object_section.characteristics.get(LittleEndian);
+    // let mut modifier = RelocationModifier::Normal;
+    let section_info = SectionInfo {
+        section_address,
+        is_writable: object_section.is_writable(),
+        section_flags,
+        part_id: object.section_part_id(section_index, &layout.symbol_db.section_part_ids),
+    };
+
+    let mut relocation_count = 0;
+    // let mut relocation_cache = RelocationCache::<R>::default();
+    let relax_deltas = object.section_relax_deltas.get(section_index.0);
+    let mut relax_cursor = relax_deltas.map(|deltas| deltas.cursor());
+
+    while let Some(rel) = relocations.next() {
+        relocation_count += 1;
+        // if A::high_part_relocations().contains(&rel.raw_type()) {
+        // let cache_offset = opt_input_to_output(relax_deltas, rel.offset());
+        // relocation_cache.high_part_symbols.insert(cache_offset, rel);
+        // }
+
+        // if modifier == RelocationModifier::SkipNextRelocation {
+        //     modifier = RelocationModifier::Normal;
+        //     relocation_cache.previous = Some(rel);
+        //     continue;
+        // }
+
+        // When relaxation deltas are present, translate the relocation's input
+        // offset to the corresponding output offset so that it points to the
+        // correct position in the (compacted) output buffer.
+        let offset_in_section = match relax_cursor.as_mut() {
+            Some(cursor) => cursor.translate(rel.offset()),
+            None => rel.offset(),
+        };
+
+        // modifier =
+        apply_relocation::<A, R, _>(
+            object,
+            offset_in_section,
+            &rel,
+            section_info,
+            layout,
+            out,
+            table_writer,
+            trace,
+            // &relocation_cache,
+            &relocations,
+            // relax_deltas,
+            instruction_mapping,
+        )
+        .with_context(|| {
+            format!(
+                "Failed to apply {} at offset 0x{offset_in_section:x}",
+                display_relocation::<A, R>(object, &rel, layout)
+            )
+        })?;
+        // relocation_cache.previous = Some(rel);
+    }
+
+    layout
+        .relocation_statistics
+        .get(
+            object
+                .section_part_id(section_index, &layout.symbol_db.section_part_ids)
+                .output_section_id::<Coff>(),
+        )
+        .fetch_add(relocation_count, Relaxed);
+    Ok(())
+}
+
+fn display_relocation<'a, 'data, A: Arch<Platform = Coff>, R: Relocation>(
+    object: &'a ObjectLayout<'data, Coff>,
+    rel: &'a R,
+    layout: &'a CoffLayout<'data>,
+) -> DisplayRelocation<'a, 'data, A, R> {
+    DisplayRelocation::<'a, 'data, A, R> {
+        rel,
+        symbol_db: &layout.symbol_db,
+        per_symbol_flags: &layout.per_symbol_flags,
+        object,
+        phantom: PhantomData,
+    }
+}
+
+struct DisplayRelocation<'a, 'data, A: Arch<Platform = Coff>, R: Relocation> {
+    rel: &'a R,
+    symbol_db: &'a SymbolDb<'data, Coff>,
+    per_symbol_flags: &'a PerSymbolFlags,
+    object: &'a ObjectLayout<'data, Coff>,
+    phantom: PhantomData<A>,
+}
+
+impl<'a, 'data, A: Arch<Platform = Coff>, R: Relocation<Platform = Coff>> Display
+    for DisplayRelocation<'a, 'data, A, R>
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "relocation of type {} to ",
+            A::rel_type_to_string(self.rel.raw_type())
+        )?;
+        match self.rel.symbol() {
+            None => write!(f, "absolute")?,
+            Some(local_symbol_index) => {
+                let symbol_id = self.object.symbol_id_range.input_to_id(local_symbol_index);
+                write!(
+                    f,
+                    "{}",
+                    self.symbol_db
+                        .symbol_debug(self.per_symbol_flags, symbol_id)
+                )?;
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy)]
+struct SectionInfo<S: platform::SectionFlags> {
+    section_address: u64,
+    is_writable: bool,
+    section_flags: S,
+    part_id: PartId,
+}
+
+struct RelocationResolution {
+    resolution: Resolution<Coff>,
+    symbol_index: SymbolIndex,
+    local_symbol_id: SymbolId,
+    flags: ValueFlags,
+}
+
+#[inline(always)]
+fn get_resolution<'data, R: Relocation>(
+    rel: &R,
+    object_layout: &ObjectLayout<'data, Coff>,
+    layout: &CoffLayout<'data>,
+) -> Result<RelocationResolution> {
+    let symbol_index = rel.symbol().context("Unsupported absolute relocation")?;
+    let local_symbol_id = object_layout.symbol_id_range.input_to_id(symbol_index);
+    let sym = object_layout.object.symbol(symbol_index)?;
+    let section_index = object_layout.object.symbol_section(sym, symbol_index)?;
+    let flags = layout.flags_for_symbol(local_symbol_id);
+    let resolution = layout
+        .symbol_resolution_with_flags(local_symbol_id, flags)
+        .or_else(|| {
+            section_index.and_then(|section_index| {
+                let section_address =
+                    object_layout.section_resolutions[section_index.0].address()?;
+                let output_offset = opt_input_to_output(
+                    object_layout.section_relax_deltas.get(section_index.0),
+                    crate::platform::Symbol::value(sym),
+                );
+
+                Some(Resolution {
+                    raw_value: section_address + output_offset,
+                    dynamic_symbol_index: None,
+                    flags: ValueFlags::empty(),
+                    format_specific: Default::default(),
+                })
+            })
+        })
+        .with_context(|| {
+            format!(
+                "Missing resolution for: {}",
+                layout.symbol_debug(local_symbol_id)
+            )
+        })?;
+    Ok(RelocationResolution {
+        resolution,
+        symbol_index,
+        local_symbol_id,
+        flags,
+    })
+}
+
+#[inline(always)]
+fn apply_relocation<
+    'data,
+    A: Arch<Platform = Coff>,
+    R: Relocation<Platform = Coff>,
+    I: Iterator<Item = R>,
+>(
+    object_layout: &ObjectLayout<'data, Coff>,
+    mut offset_in_section: u64,
+    rel: &R,
+    section_info: SectionInfo<object::pe::SectionFlags>,
+    layout: &CoffLayout<'data>,
+    out: &mut [u8],
+    table_writer: &mut TableWriter<'_, '_>,
+    trace: &TraceOutput,
+    // relocation_cache: &RelocationCache<R>,
+    relocation_iterator: &I,
+    // relax_deltas: Option<&SectionRelaxDeltas>,
+    instruction_mapping: &HashMap<u64, u64>,
+    // ) -> Result<RelocationModifier> {
+) -> Result<()> {
+    let section_address = section_info.section_address;
+    // Erratum instructions are moved to the veneer location after a section.
+    if let Some(&new_place) = instruction_mapping.get(&(section_address + offset_in_section)) {
+        offset_in_section = new_place - section_address;
+    }
+    let original_place = section_address + offset_in_section;
+    let _span = tracing::trace_span!(
+        "relocation",
+        address = original_place,
+        address_hex = %HexU64::new(original_place)
+    )
+    .entered();
+
+    let r_type = rel.raw_type();
+    let mut addend = rel.addend();
+
+    match A::relocation_from_raw(r_type)?.kind {
+        // RelocationKind::None => return Ok(RelocationModifier::Normal),
+        RelocationKind::None => return Ok(()),
+        // RelocationKind::Alignment => {
+        //     let addend = addend as u64;
+        //     let removed_bytes =
+        //         relax_deltas.map_or(0u64, |d| u64::from(d.delta_bytes_at(rel.offset())));
+        //     let padding_bytes = addend.saturating_sub(removed_bytes) as usize;
+        //     let offset_in_section = offset_in_section as usize;
+        //     A::fill_nop_padding(&mut out[offset_in_section..offset_in_section + padding_bytes]);
+        //
+        //     return Ok(RelocationModifier::Normal);
+        // }
+        RelocationKind::Relative if rel.symbol().is_none() => {
+            if layout.symbol_db.output_kind.is_position_independent() {
+                bail!(
+                    "relocation of type {} to absolute address cannot be used in \
+                    position-independent output; recompile with -fPIC",
+                    rel.raw_type()
+                );
+            }
+            let place = section_info.section_address + offset_in_section;
+            let value = (rel.addend() as u64).wrapping_sub(place);
+            A::relocation_from_raw(r_type)?
+                .write_to_buffer(value, &mut out[offset_in_section as usize..])?;
+            // return Ok(RelocationModifier::Normal);
+            return Ok(());
+        }
+        RelocationKind::Absolute | RelocationKind::TpOff
+            if layout.symbol_db.output_kind.is_shared_object()
+                && A::is_disallowed_in_shared_object(r_type) =>
+        {
+            bail!(
+                "relocation type {} cannot be used when making a shared object; \
+                 recompile with -fPIC",
+                A::rel_type_to_string(r_type)
+            );
+        }
+        _ => {}
+    }
+    let RelocationResolution {
+        resolution,
+        symbol_index,
+        local_symbol_id,
+        flags,
+    } = get_resolution(rel, object_layout, layout)?;
+    let reject_dynamic_direct = layout.symbol_db.output_kind.is_position_independent()
+        || A::relocation_from_raw(r_type)?.kind == RelocationKind::TpOff;
+    if reject_dynamic_direct
+        && (flags.is_interposable() || flags.is_dynamic())
+        && !flags.needs_copy_relocation()
+        && !flags.needs_plt()
+        && A::is_disallowed_for_interposable_symbols(r_type)
+    {
+        bail!(
+            "relocation {} cannot be used against symbol; recompile with -fPIC",
+            A::rel_type_to_string(r_type)
+        );
+    }
+    // let mut next_modifier = RelocationModifier::Normal;
+    let rel_info;
+    let output_kind = layout.symbol_db.output_kind;
+
+    // let relaxation = A::new_relaxation(
+    //     r_type,
+    //     out,
+    //     offset_in_section,
+    //     flags,
+    //     output_kind,
+    //     section_info.section_flags,
+    //     relax_deltas,
+    //     resolution.raw_value,
+    //     section_address,
+    //     rel.addend(),
+    //     relocation_cache
+    //         .previous
+    //         .as_ref()
+    //         .filter(|r| r.symbol() == rel.symbol())
+    //         .map(|r| PreviousRelocationInfo {
+    //             kind: r.raw_type(),
+    //             offset: r.offset(),
+    //             symbol: r.symbol(),
+    //             addend: r.addend(),
+    //         }),
+    // )
+    // .filter(|relaxation| layout.args().relax || relaxation.is_mandatory());
+    //
+    // if let Some(relaxation) = &relaxation {
+    //     rel_info = relaxation.rel_info();
+    //     relaxation.apply(out, &mut offset_in_section, &mut addend);
+    //     next_modifier = relaxation.next_modifier();
+    // } else {
+    rel_info = A::relocation_from_raw(r_type)?;
+    // }
+
+    // Compute place to which IP-relative relocations will be relative. This is different to
+    // `original_place` in that our `offset_in_section` may have been adjusted by a relaxation.
+    let place = section_address + offset_in_section;
+
+    let undefined_weak_target = if flags.is_undefined_weak() && !flags.needs_plt() {
+        A::undefined_weak_target(r_type, place)
+    } else {
+        None
+    };
+    // let mask = get_page_mask(rel_info.mask);
+    // let bias = rel_info.bias.map_or(0, Bias::value);
+    // Set when a ppc64 branch targets a PLT stub. The stub's first instruction saves r2 and the nop
+    // after `bl` has to load it back.
+    // let mut restore_caller_toc = false;
+    let mut value = match rel_info.kind {
+        RelocationKind::Absolute => write_absolute_relocation::<A>(
+            table_writer,
+            resolution,
+            rel_info.size,
+            place,
+            addend,
+            section_info,
+            symbol_index,
+            object_layout,
+            layout,
+        )?,
+        /*
+        RelocationKind::SymbolSize => {
+            if section_info.section_flags.is_alloc()
+                && resolution.flags.is_interposable()
+                && (resolution.flags.is_dynamic()
+                    || layout.symbol_db.output_kind.is_shared_object())
+            {
+                table_writer.write_rela_dyn_general(
+                    place,
+                    resolution.dynamic_symbol_index()?,
+                    r_type,
+                    addend,
+                )?;
+
+                0
+            } else {
+                canonical_symbol_size(layout, local_symbol_id)?.wrapping_add(addend as u64)
+            }
+        }
+                RelocationKind::AbsoluteSet
+                | RelocationKind::AbsoluteSetWord6
+                | RelocationKind::AbsoluteAddition
+                | RelocationKind::AbsoluteAdditionWord6
+                | RelocationKind::AbsoluteSubtraction
+                | RelocationKind::AbsoluteSubtractionWord6 => resolution.value_with_addend(
+                    addend,
+                    symbol_index,
+                    object_layout,
+                    &layout.symbol_db.section_part_ids,
+                    &layout.merged_strings,
+                    &layout.merged_string_start_addresses,
+                )?,
+        */
+        /*        RelocationKind::AbsoluteLowPart => resolution
+                            .value_with_addend(
+                                addend,
+                                symbol_index,
+                                object_layout,
+                                &layout.symbol_db.section_part_ids,
+                                &layout.merged_strings,
+                                &layout.merged_string_start_addresses,
+                            )?
+                            .bitand(mask.symbol_plus_addend),
+                */
+        RelocationKind::Relative => {
+            let mut symbol_plus_addend = if let Some(target) = undefined_weak_target {
+                target.wrapping_add(addend as u64)
+            } else {
+                resolution.value_with_addend(
+                    addend,
+                    symbol_index,
+                    object_layout,
+                    &layout.symbol_db.section_part_ids,
+                    &layout.merged_strings,
+                    &layout.merged_string_start_addresses,
+                )?
+            };
+            // A function defined in this object resolves to its global entry point. An
+            // interposable branch lands on the PLT stub instead, so the stub can load the
+            // JMP_SLOT into r12. A hidden reference stays on the local entry point. GCC omits
+            // the nop after `bl` when the call is expected to stay in this module. Those sites
+            // keep the local entry. A tail `b` does not return, so it can still use the stub.
+            // if rel_info.size.is_ppc64_branch()
+            //     && flags.needs_plt()
+            //     && flags.is_interposable()
+            //     && flags.has_link_time_address()
+            //     && let Some(plt) = resolution.format_specific.plt_address
+            // {
+            //     let branch_offset = offset_in_section as usize;
+            //     let call_can_use_plt_stub =
+            //         out.get(branch_offset..branch_offset + 4)
+            //             .is_some_and(|branch| {
+            //                 let insn = u32::from_le_bytes(branch.try_into().unwrap());
+            //                 // LK is the low bit. A tail branch has no TOC-restore slot.
+            //                 insn & 1 != 1
+            //                     || out.get(branch_offset + 4..branch_offset + 8).is_some_and(
+            //                         |next| {
+            //                             u32::from_le_bytes(next.try_into().unwrap()) ==
+            // 0x6000_0000                         },
+            //                     )
+            //             });
+            //     if call_can_use_plt_stub {
+            //         symbol_plus_addend = plt.get().wrapping_add(addend as u64);
+            //     }
+            // }
+
+            // let targets_plt_stub = flags.needs_plt()
+            //     && resolution
+            //         .format_specific
+            //         .plt_address
+            //         .is_some_and(|plt| symbol_plus_addend == plt.get().wrapping_add(addend as
+            // u64)); let local_entry = if rel_info.size.is_ppc64_branch() && !targets_plt_stub {
+            //     A::local_entry_offset(callee_st_other(layout, local_symbol_id))
+            // } else {
+            //     0
+            // };
+            // restore_caller_toc = targets_plt_stub && rel_info.size.is_ppc64_branch();
+            let local_entry = 0;
+
+            symbol_plus_addend
+                .wrapping_add(local_entry)
+                // .wrapping_add(bias)
+                // .bitand(mask.symbol_plus_addend)
+                .wrapping_sub(
+                    place, // .bitand(mask.place)
+                )
+        }
+        /*
+                RelocationKind::RelativeLoongArchHigh => highest_relocation_with_bias(
+                    resolution.value_with_addend(
+                        addend,
+                        symbol_index,
+                        object_layout,
+                        &layout.symbol_db.section_part_ids,
+                        &layout.merged_strings,
+                        &layout.merged_string_start_addresses,
+                    )?,
+                    place,
+                ),
+                RelocationKind::RelativeRiscVLow12 => {
+                    // The iterator is used for e.g. R_RISCV_PCREL_HI20 & R_RISCV_PCREL_LO12_I pair of
+                    // relocations where the later one actually points to a label of the HI20
+                    // relocations and thus we need to find it. The relocation is typically
+                    // right before the LO12_* relocation.
+                    ensure!(
+                        addend == 0,
+                        "Unexpected addend for R_RISCV_PCREL_LO12 relocation"
+                    );
+                    let hi_offset_in_section = resolution
+                        .value_with_addend(
+                            addend,
+                            symbol_index,
+                            object_layout,
+                            &layout.symbol_db.section_part_ids,
+                            &layout.merged_strings,
+                            &layout.merged_string_start_addresses,
+                        )?
+                        .wrapping_sub(section_address);
+                    let hi_rel = relocation_cache
+                        .high_part_symbols
+                        .get(&hi_offset_in_section)
+                        .copied()
+                        .or_else(|| {
+                            // It's very unlikely that a high part follows the low part:
+                            relocation_iterator.clone().find_map(|r| {
+                                if let Ok(r) = r
+                                    && A::high_part_relocations().contains(&r.raw_type())
+                                {
+                                    let r_output_offset = opt_input_to_output(relax_deltas, r.offset());
+                                    if r_output_offset == hi_offset_in_section {
+                                        return Some(r);
+                                    }
+                                }
+                                None
+                            })
+                        })
+                        .context("Missing High relocation connected with R_RISCV_PCREL_LO12")?;
+
+                    let hi_rel_info = A::relocation_from_raw(hi_rel.raw_type())?;
+                    let addend = hi_rel.addend();
+                    let crate::elf_writer::RelocationResolution {
+                        resolution,
+                        symbol_index,
+                        ..
+                    } = crate::elf_writer::get_resolution(&hi_rel, object_layout, layout).with_context(
+                        || "Missing High resolution connected to R_RISCV_PCREL_LO12".to_string(),
+                    )?;
+                    let place = section_address + hi_offset_in_section;
+
+                    // Only a subset of relocations is referenced by R_RISCV_PCREL_LO12 relocations.
+                    match hi_rel_info.kind {
+                        RelocationKind::Relative => resolution
+                            .value_with_addend(
+                                addend,
+                                symbol_index,
+                                object_layout,
+                                &layout.symbol_db.section_part_ids
+                                    [object_layout.section_id_range.as_usize()],
+                                &layout.merged_strings,
+                                &layout.merged_string_start_addresses,
+                            )?
+                            .wrapping_add(bias)
+                            .wrapping_sub(place),
+                        RelocationKind::GotRelative => resolution
+                            .got_address_for_relocation()?
+                            .wrapping_add(addend as u64)
+                            .wrapping_add(bias)
+                            .wrapping_sub(place),
+                        RelocationKind::TlsGd => resolution
+                            .tlsgd_got_address()?
+                            .wrapping_add(addend as u64)
+                            .wrapping_add(bias)
+                            .wrapping_sub(place),
+                        RelocationKind::TlsLd => layout
+                            .prelude()
+                            .format_specific
+                            .tlsld_got_entry
+                            .unwrap()
+                            .get()
+                            .wrapping_add(addend as u64)
+                            .wrapping_add(bias)
+                            .wrapping_sub(place),
+                        RelocationKind::GotTpOff => resolution
+                            .got_address()?
+                            .wrapping_add(addend as u64)
+                            .wrapping_add(bias)
+                            .wrapping_sub(place),
+                        _ => bail!(
+                            "Unsupported high part relocation {:?} connected with R_RISCV_PCREL_LO12",
+                            hi_rel_info.kind
+                        ),
+                    }
+                }
+        kind @ (RelocationKind::PairSubtractionULEB128RiscV
+        | RelocationKind::PairSubtractionULEB128LoongArch) => {
+            let expected_r_type = match kind {
+                RelocationKind::PairSubtractionULEB128RiscV => object::elf::R_RISCV_SET_ULEB128,
+                RelocationKind::PairSubtractionULEB128LoongArch => object::elf::R_LARCH_ADD_ULEB128,
+                _ => unreachable!(),
+            };
+            get_pair_subtraction_relocation_value::<A, R>(
+                object_layout,
+                rel,
+                layout,
+                resolution,
+                symbol_index,
+                addend,
+                // It must be the previous relocation
+                &relocation_cache.previous.with_context(|| {
+                    "Missing previous relocation for PairSubtractionULEB128".to_owned()
+                })?,
+                expected_r_type,
+            )?
+        }
+                RelocationKind::GotRelative => resolution
+                    .got_address_for_relocation()?
+                    .wrapping_add(bias)
+                    .wrapping_add(addend as u64)
+                    .bitand(mask.got_entry)
+                    .wrapping_sub(place.bitand(mask.place)),
+
+                RelocationKind::GotRelativeLoongArch64 => highest_relocation_with_bias(
+                    resolution
+                        .got_address_for_relocation()?
+                        .wrapping_add(addend as u64),
+                    place,
+                ),
+                RelocationKind::GotRelGotBase => resolution
+                    .got_address_for_relocation()?
+                    .wrapping_add(addend as u64)
+                    .wrapping_add(bias)
+                    .bitand(mask.got_entry)
+                    .wrapping_sub(layout.got_base().bitand(mask.got)),
+                RelocationKind::Got => {
+                    // The LoongArch64 psABI does not provide a separate GOT Low part relocation for the
+                    // TLSGD relocation. So we need to distinguish between a classical GOT
+                    // slot and one corresponding to TLSGD.
+                    //
+                    // Note: TLSLD is unsupported by the target (https://github.com/loongson/la-abi-specs/issues/19).
+                    if resolution.flags.needs_got_tls_module() {
+                        resolution.tlsgd_got_address()?
+                    } else {
+                        resolution.got_address_for_relocation()?
+                    }
+                    .wrapping_add(bias)
+                    .bitand(mask.got_entry)
+                }
+                RelocationKind::SymRelGotBase => resolution
+                    .value_with_addend(
+                        addend,
+                        symbol_index,
+                        object_layout,
+                        &layout.symbol_db.section_part_ids,
+                        &layout.merged_strings,
+                        &layout.merged_string_start_addresses,
+                    )?
+                    .wrapping_add(bias)
+                    .bitand(mask.symbol_plus_addend)
+                    .wrapping_sub(layout.got_base().bitand(mask.got)),
+                RelocationKind::PltRelGotBase => resolution
+                    .plt_address()?
+                    .wrapping_add(bias)
+                    .wrapping_sub(layout.got_base().bitand(mask.got)),
+                RelocationKind::PltRelative => resolution
+                    .plt_address()?
+                    .wrapping_add(addend as u64)
+                    .wrapping_add(bias)
+                    .wrapping_sub(place.bitand(mask.place)),
+                // TLS-related relocations
+                RelocationKind::TlsGd => resolution
+                    .tlsgd_got_address()?
+                    .wrapping_add(addend as u64)
+                    .wrapping_add(bias)
+                    .bitand(mask.got_entry)
+                    .wrapping_sub(place.bitand(mask.place)),
+                RelocationKind::TlsGdGot => resolution
+                    .tlsgd_got_address()?
+                    .wrapping_add(addend as u64)
+                    .wrapping_add(bias)
+                    .bitand(mask.got_entry),
+                RelocationKind::TlsGdGotBase => resolution
+                    .tlsgd_got_address()?
+                    .wrapping_add(addend as u64)
+                    .wrapping_add(bias)
+                    .bitand(mask.got_entry)
+                    .wrapping_sub(layout.got_base().bitand(mask.got)),
+                RelocationKind::TlsLd => layout
+                    .prelude()
+                    .format_specific
+                    .tlsld_got_entry
+                    .unwrap()
+                    .get()
+                    .wrapping_add(addend as u64)
+                    .wrapping_add(bias)
+                    .bitand(mask.got_entry)
+                    .wrapping_sub(place.bitand(mask.place)),
+                RelocationKind::TlsLdGot => layout
+                    .prelude()
+                    .format_specific
+                    .tlsld_got_entry
+                    .unwrap()
+                    .get()
+                    .wrapping_add(addend as u64)
+                    .wrapping_add(bias)
+                    .bitand(mask.got_entry),
+                RelocationKind::TlsLdGotBase => layout
+                    .prelude()
+                    .format_specific
+                    .tlsld_got_entry
+                    .unwrap()
+                    .get()
+                    .wrapping_add(addend as u64)
+                    .wrapping_add(bias)
+                    .bitand(mask.got_entry)
+                    .wrapping_sub(layout.got_base().bitand(mask.got)),
+                RelocationKind::DtpOff => resolution
+                    .value()
+                    .wrapping_add(addend as u64)
+                    .wrapping_add(bias)
+                    .wrapping_sub(A::dtp_offset_base(
+                        layout,
+                        output_kind == OutputKind::SharedObject,
+                    )),
+                RelocationKind::GotTpOff => resolution
+                    .got_address()?
+                    .wrapping_add(addend as u64)
+                    .wrapping_add(bias)
+                    .bitand(mask.got_entry)
+                    .wrapping_sub(place.bitand(mask.place)),
+                RelocationKind::GotTpOffLoongArch64 => highest_relocation_with_bias(
+                    resolution.got_address()?.wrapping_add(addend as u64),
+                    place,
+                ),
+                RelocationKind::GotTpOffGot => resolution
+                    .got_address()?
+                    .wrapping_add(addend as u64)
+                    .wrapping_add(bias)
+                    .bitand(mask.got_entry),
+                RelocationKind::GotTpOffGotBase => resolution
+                    .got_address()?
+                    .wrapping_add(addend as u64)
+                    .wrapping_add(bias)
+                    .bitand(mask.got_entry)
+                    .wrapping_sub(layout.got_base().bitand(mask.got)),
+                RelocationKind::TpOff
+                    if layout
+                        .symbol_db
+                        .is_undefined(layout.symbol_db.definition(local_symbol_id)) =>
+                {
+                    // An undefined weak TLS symbol has no offset within the TLS block, so we somewhat
+                    // arbitrarily give the 0 offset which at least some other linkers also do and most
+                    // importantly is a value guaranteed to fit within the range of any relocation.
+                    (addend as u64).wrapping_add(bias)
+                }
+                RelocationKind::TpOff => resolution
+                    .value()
+                    .wrapping_add(addend as u64)
+                    .wrapping_add(bias)
+                    .wrapping_sub(A::tp_offset_start(layout)),
+                RelocationKind::TlsDesc => resolution
+                    .tls_descriptor_got_address()?
+                    .wrapping_add(addend as u64)
+                    .wrapping_add(bias)
+                    .bitand(mask.got_entry)
+                    .wrapping_sub(place.bitand(mask.place)),
+                RelocationKind::TlsDescLoongArch64 => highest_relocation_with_bias(
+                    resolution
+                        .tls_descriptor_got_address()?
+                        .wrapping_add(addend as u64),
+                    place,
+                ),
+                RelocationKind::TlsDescGot => resolution
+                    .tls_descriptor_got_address()?
+                    .wrapping_add(addend as u64)
+                    .wrapping_add(bias)
+                    .bitand(mask.got_entry),
+                RelocationKind::TlsDescGotBase => resolution
+                    .tls_descriptor_got_address()?
+                    .wrapping_add(addend as u64)
+                    .wrapping_add(bias)
+                    .bitand(mask.got_entry)
+                    .wrapping_sub(layout.got_base().bitand(mask.got)),
+        */
+        RelocationKind::None | RelocationKind::TlsDescCall => 0,
+        // RelocationKind::Alignment
+        // | RelocationKind::MachoAddition
+        // | RelocationKind::MachoSubtraction => unreachable!(),
+        _ => {
+            unreachable!()
+        }
+    };
+
+    let offset_in_section = offset_in_section as usize;
+
+    // Handle addition and subtraction relocation kinds.
+    if matches!(
+        rel_info.kind,
+        RelocationKind::AbsoluteAddition
+            | RelocationKind::AbsoluteAdditionWord6
+            | RelocationKind::AbsoluteSubtraction
+            | RelocationKind::AbsoluteSetWord6
+            | RelocationKind::AbsoluteSubtractionWord6
+    ) {
+        value = rel_info.adjust_value_based_on_content(value, out, offset_in_section)?;
+    }
+
+    /*    if let Some(relaxation) = relaxation {
+            trace.emit(original_place, || {
+                format!(
+                    "relaxation applied relaxation={kind:?}, flags={flags},\n\
+                    rel_kind={rel_kind:?},\n\
+                    value=0x{value:x}, symbol_name={symbol_name}",
+                    kind = relaxation.debug_kind(),
+                    rel_kind = rel_info.kind,
+                    symbol_name = layout.symbol_db.symbol_name_for_display(local_symbol_id),
+                )
+            });
+            tracing::trace!(
+                %flags,
+                relaxation_kind = ?relaxation.debug_kind(),
+                ?rel_info.kind,
+                %rel_info.size,
+                value,
+                value_hex = %HexU64::new(value),
+                symbol_name = %layout.symbol_db.symbol_name_for_display(local_symbol_id),
+                "relaxation applied");
+        } else {
+    */
+    trace.emit(original_place, || {
+        format!(
+            "relocation applied flags={flags},\n\
+                rel_kind={rel_kind:?},\n\
+                value=0x{value:x}, symbol_name={symbol_name}",
+            rel_kind = rel_info.kind,
+            symbol_name = layout.symbol_db.symbol_name_for_display(local_symbol_id),
+        )
+    });
+    tracing::trace!(
+            %flags,
+            ?rel_info.kind,
+            %rel_info.size,
+            value,
+            value_hex = %HexU64::new(value),
+            symbol_name = %layout.symbol_db.symbol_name_for_display(local_symbol_id),
+            "relocation applied");
+    // }
+
+    // if let Some(thunked_value) = maybe_get_thunk_for_relocation::<A>(
+    //     object_layout,
+    //     section_info,
+    //     layout,
+    //     rel_info,
+    //     local_symbol_id,
+    //     place,
+    //     value,
+    // )? {
+    //     value = thunked_value;
+    // }
+
+    rel_info.write_to_buffer(value, &mut out[offset_in_section..])?;
+
+    // if restore_caller_toc {
+    //     A::restore_toc_after_plt_call(out, offset_in_section)?;
+    // }
+
+    // Ok(next_modifier)
+    Ok(())
+}
+
+#[inline(always)]
+fn write_absolute_relocation<'data, A: Arch<Platform = Coff>>(
+    table_writer: &mut TableWriter<'_, '_>,
+    resolution: Resolution<Coff>,
+    rel_size: RelocationSize,
+    place: u64,
+    addend: i64,
+    section_info: SectionInfo<<A::Platform as Platform>::SectionFlags>,
+    symbol_index: object::SymbolIndex,
+    object_layout: &ObjectLayout<'data, Coff>,
+    layout: &CoffLayout,
+) -> Result<u64> {
+    // if !section_info.section_flags.is_alloc() {
+    //     resolution.value_with_addend(
+    //         addend,
+    //         symbol_index,
+    //         object_layout,
+    //         &layout.symbol_db.section_part_ids,
+    //         &layout.merged_strings,
+    //         &layout.merged_string_start_addresses,
+    //     )
+    // } else if resolution.flags.is_dynamic()
+    //     && resolution.flags.is_absolute()
+    //     && !section_info.is_writable
+    // {
+    //     // Weak undefined symbol referenced from a read-only section. Fill in as zero.
+    //     Ok(0)
+    // } else if resolution.flags.is_interposable()
+    //     && section_info.is_writable
+    //     && rel_size == RelocationSize::ByteSize(C::ADDRESS_SIZE as u8)
+    // {
+    //     table_writer.write_dynamic_symbol_relocation::<A>(
+    //         place,
+    //         addend,
+    //         resolution.dynamic_symbol_index()?,
+    //         DynamicRelocationKind::Absolute,
+    //     )?;
+    //
+    //     Ok(0)
+    // } else if resolution.flags.is_ifunc()
+    //     && A::absolute_ifunc_needs_irelative(table_writer.output_kind, section_info.is_writable)
+    // {
+    //     ensure!(
+    //         rel_size == RelocationSize::ByteSize(C::ADDRESS_SIZE as u8),
+    //         "Relocation against an ifunc is narrower than an address"
+    //     );
+    //     table_writer
+    //         .write_ifunc_relocation_for_data::<A>(place, resolution.raw_value as i64 + addend)?;
+    //     Ok(0)
+    // } else if table_writer.output_kind.is_position_independent() && !resolution.is_absolute() {
+    //     let address = resolution.value_with_addend(
+    //         addend,
+    //         symbol_index,
+    //         object_layout,
+    //         &layout.symbol_db.section_part_ids,
+    //         &layout.merged_strings,
+    //         &layout.merged_string_start_addresses,
+    //     )?;
+    //     table_writer.write_address_relocation::<A>(place, address)
+    // } else {
+    //     resolution.value_with_addend(
+    //         addend,
+    //         symbol_index,
+    //         object_layout,
+    //         &layout.symbol_db.section_part_ids,
+    //         &layout.merged_strings,
+    //         &layout.merged_string_start_addresses,
+    //     )
+    // }
+    todo!()
+}
+
 fn write_prelude<A: Arch<Platform = coff::Coff>>(
     prelude: &PreludeLayout<coff::Coff>,
     buffers: &mut OutputSectionPartMap<&mut [u8]>,
