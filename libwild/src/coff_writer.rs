@@ -346,17 +346,21 @@ fn populate_section_headers<A: Arch<Platform = Coff>>(
     for header in headers {
         let (sec_idx, sec) = sections_iter.next().unwrap();
         let sec_name = layout.output_sections.name(sec_idx).unwrap();
-        // debug_assert!(
-        //     sec_name.len() <= 8,
-        //     "long section names are not supported yet"
-        // );
-        let mut name = [0u8; 8];
-        for (name_idx, byte) in sec_name.0.iter().enumerate() {
-            // TODO: hack
-            if name_idx < 8 {
-                name[name_idx] = *byte;
-            }
+        // Strictly speaking section names cannot be longer than 8 characters, but GNU applied
+        // symbol name logic to section names. This let them reuse DWARF section names.
+        if sec_name.len() > 8
+            && layout
+                .output_sections
+                .section_flags(sec_idx)
+                .contains(object::pe::IMAGE_SCN_MEM_DISCARDABLE)
+        {
+            eprintln!(
+                "long section names are not supported yet, section name for `{sec_name}` will be truncated"
+            );
         }
+        let mut name = [0u8; 8];
+        let byte_count = sec_name.len().min(name.len());
+        name[..byte_count].copy_from_slice(&sec_name.bytes()[..byte_count]);
         *header = SectionHeader {
             name,
             virtual_size: u32::try_from(sec.mem_size)?.into(),
