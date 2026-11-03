@@ -22,7 +22,7 @@ impl crate::platform::Arch for CoffX86_64 {
     fn get_dynamic_relocation_type(
         _relocation: linker_utils::elf::DynamicRelocationKind,
     ) -> object::pe::RelocationType {
-        todo!()
+        unreachable!()
     }
 
     fn write_plt_entry(
@@ -30,18 +30,40 @@ impl crate::platform::Arch for CoffX86_64 {
         _got_address: u64,
         _plt_address: u64,
     ) -> crate::error::Result {
-        todo!()
+        unreachable!()
     }
 
     fn relocation_from_raw(
         r_type: <Self::Platform as crate::platform::Platform>::RelocationInfo,
     ) -> crate::error::Result<RelocationKindInfo> {
         let (kind, size, range) = match r_type {
+            object::pe::IMAGE_REL_AMD64_ADDR32NB => (
+                // TODO: Very very wrong, but not critical for the current state of this port
+                RelocationKind::Relative,
+                RelocationSize::ByteSize(4),
+                AllowedRange::from_byte_size(4, Sign::Unsigned),
+            ),
+            object::pe::IMAGE_REL_AMD64_ADDR32 => (
+                RelocationKind::Absolute,
+                RelocationSize::ByteSize(4),
+                AllowedRange::from_byte_size(4, Sign::Unsigned),
+            ),
             object::pe::IMAGE_REL_AMD64_ADDR64 => (
                 RelocationKind::Absolute,
                 RelocationSize::ByteSize(8),
                 AllowedRange::from_byte_size(8, Sign::Unsigned),
             ),
+            object::pe::IMAGE_REL_AMD64_REL32
+            | object::pe::IMAGE_REL_AMD64_REL32_1
+            | object::pe::IMAGE_REL_AMD64_REL32_2
+            | object::pe::IMAGE_REL_AMD64_REL32_3
+            | object::pe::IMAGE_REL_AMD64_REL32_4
+            | object::pe::IMAGE_REL_AMD64_REL32_5 => (
+                RelocationKind::Relative,
+                RelocationSize::ByteSize(4),
+                AllowedRange::from_byte_size(4, Sign::Signed),
+            ),
+
             _ => bail!("Unsupported relocation: {r_type}"),
         };
 
@@ -53,12 +75,19 @@ impl crate::platform::Arch for CoffX86_64 {
             alignment: 1,
             bias: None,
             thunkable: false,
-            implicit_addend: false,
+            implicit_addend: true,
         })
     }
 
     fn rel_type_to_string(r_type: object::pe::RelocationType) -> std::borrow::Cow<'static, str> {
-        todo!()
+        format!("TODO: relocation type 0x{r_type:x}").into()
+    }
+
+    fn undefined_weak_target(r_type: object::pe::RelocationType, _place: u64) -> Option<u64> {
+        match r_type {
+            object::pe::IMAGE_REL_AMD64_REL32 => Some(0),
+            _ => None,
+        }
     }
 
     fn tp_offset_start(_layout: &crate::layout::Layout<Self::Platform>) -> u64 {
@@ -110,13 +139,13 @@ impl crate::platform::Relaxation for Relaxation {
     fn apply(&self, section_bytes: &mut [u8], offset_in_section: &mut u64, addend: &mut i64) {}
 
     fn rel_info(&self) -> RelocationKindInfo {
-        todo!()
+        unreachable!()
     }
 
     fn debug_kind(&self) -> impl std::fmt::Debug {}
 
     fn next_modifier(&self) -> RelocationModifier {
-        todo!()
+        unreachable!()
     }
 
     fn is_mandatory(&self) -> bool {
