@@ -11,9 +11,11 @@ use crate::error::Result;
 use crate::input_data::InputBytes;
 use crate::input_data::InputRef;
 use crate::layout;
+use crate::layout::HandlerData;
 use crate::layout::ObjectLayout;
 use crate::layout::Resolution;
 use crate::layout::SectionGcUnit;
+use crate::layout::SymbolCopyInfo;
 use crate::layout_rules;
 use crate::layout_rules::SectionKind;
 use crate::layout_rules::SectionRule;
@@ -77,7 +79,7 @@ pub(crate) fn link_for_arch<'data, F: FileSystem>(
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SymtabEntry {
     pub(crate) raw: object::pe::ImageSymbol,
-    pub(crate) index: u32,
+    pub(crate) index: SymbolIndex,
     pub(crate) is_aux: bool,
 }
 
@@ -105,6 +107,8 @@ enum SinglePartSectionId {
     DosStub = crate::output_section_id::NUM_COMMON_SINGLE_PART_SECTIONS,
     NtHeader,
     SectionHeaders,
+    Symtab,
+    Strtab,
 
     // Must be last.
     Count,
@@ -138,6 +142,8 @@ pub(crate) mod part_id {
     pub(crate) const DOS_STUB: PartId = SinglePartSectionId::DosStub.part_id();
     pub(crate) const NT_HEADER: PartId = SinglePartSectionId::NtHeader.part_id();
     pub(crate) const SECTION_HEADERS: PartId = SinglePartSectionId::SectionHeaders.part_id();
+    pub(crate) const SYMTAB: PartId = SinglePartSectionId::Symtab.part_id();
+    pub(crate) const STRTAB: PartId = SinglePartSectionId::Strtab.part_id();
 }
 
 pub(crate) mod output_section_id {
@@ -149,6 +155,8 @@ pub(crate) mod output_section_id {
     pub(crate) const NT_HEADER: OutputSectionId = SinglePartSectionId::NtHeader.output_section_id();
     pub(crate) const SECTION_HEADERS: OutputSectionId =
         SinglePartSectionId::SectionHeaders.output_section_id();
+    pub(crate) const SYMTAB: OutputSectionId = SinglePartSectionId::Symtab.output_section_id();
+    pub(crate) const STRTAB: OutputSectionId = SinglePartSectionId::Strtab.output_section_id();
 
     pub(crate) const TEXT: OutputSectionId = RegularSectionId::Text.output_section_id();
     pub(crate) const RODATA: OutputSectionId = RegularSectionId::Rdata.output_section_id();
@@ -253,6 +261,8 @@ impl Platform for Coff {
         output_section_id::DOS_STUB,
         output_section_id::NT_HEADER,
         output_section_id::SECTION_HEADERS,
+        output_section_id::SYMTAB,
+        output_section_id::STRTAB,
     ];
 
     const VERIFY_IGNORE_SECTION_IDS: &'static [OutputSectionId] = &[
@@ -260,6 +270,8 @@ impl Platform for Coff {
         output_section_id::DOS_STUB,
         output_section_id::NT_HEADER,
         output_section_id::SECTION_HEADERS,
+        output_section_id::SYMTAB,
+        output_section_id::STRTAB,
     ];
 
     type File<'data> = File<'data>;
@@ -709,11 +721,39 @@ impl Platform for Coff {
     }
 
     fn allocate_object_symtab_space<'data>(
-        _state: &layout::ObjectLayoutState<'data, Self>,
-        _common: &mut layout::CommonGroupState<'data, Self>,
-        _symbol_db: &SymbolDb<'data, Self>,
-        _per_symbol_flags: &crate::value_flags::AtomicPerSymbolFlags,
+        state: &layout::ObjectLayoutState<'data, Self>,
+        common: &mut layout::CommonGroupState<'data, Self>,
+        symbol_db: &SymbolDb<'data, Self>,
+        per_symbol_flags: &crate::value_flags::AtomicPerSymbolFlags,
     ) -> Result {
+        let mut num_sym = 0;
+        let mut strings_size = 0;
+        for ((sym_index, sym), flags) in state
+            .object
+            .enumerate_symbols()
+            .zip(per_symbol_flags.range(state.symbol_id_range()))
+        {
+            let symbol_id = state.symbol_id_range.input_to_id(sym_index);
+            if let Some(info) = SymbolCopyInfo::new(
+                state.object,
+                sym_index,
+                sym,
+                symbol_id,
+                symbol_db,
+                flags.get(),
+                &state.sections,
+            ) {
+                // TODO: check if applicable
+                // If we've decided to emit the symbol even though it's not referenced (because it's
+                // in a section we're emitting), then make sure we have a resolution for it.
+                flags.fetch_or(ValueFlags::DIRECT);
+                num_sym += 1;
+                strings_size += info.name.len() + 1;
+            }
+        }
+        let entry_size = object::pe::IMAGE_SIZEOF_SYMBOL as u64;
+        common.allocate(part_id::SYMTAB, num_sym * entry_size);
+        common.allocate(part_id::STRTAB, strings_size as u64);
         Ok(())
     }
 
@@ -796,6 +836,8 @@ impl Platform for Coff {
         builder.add_section(output_section_id::DOS_STUB);
         builder.add_section(output_section_id::NT_HEADER);
         builder.add_section(output_section_id::SECTION_HEADERS);
+        builder.add_section(output_section_id::SYMTAB);
+        builder.add_section(output_section_id::STRTAB);
         builder.add_section(output_section_id::TEXT);
         builder.add_section(output_section_id::RODATA);
         builder.add_sections(&custom.ro);
@@ -830,7 +872,7 @@ impl Platform for Coff {
                 storage_class: Default::default(),
                 number_of_aux_symbols: 0,
             },
-            index: 0,
+            index: SymbolIndex(0),
             is_aux: false,
         }
     }
@@ -889,18 +931,19 @@ impl<'data> File<'data> {
         let mut aux_remaining = 0;
         for i in 0..num_symbols {
             let raw = *symbol_table.symbol(SymbolIndex(i))?;
+            let index = SymbolIndex(i);
             if aux_remaining > 0 {
                 aux_remaining -= 1;
                 symbols.push(SymtabEntry {
                     raw,
-                    index: i as u32,
+                    index,
                     is_aux: true,
                 });
             } else {
                 aux_remaining = raw.number_of_aux_symbols;
                 symbols.push(SymtabEntry {
                     raw,
-                    index: i as u32,
+                    index,
                     is_aux: false,
                 });
             }
@@ -974,9 +1017,7 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
         if symbol.is_aux {
             bail!("aux symbol has no name")
         }
-        let sym = self
-            .symbol_table
-            .symbol(SymbolIndex(symbol.index as usize))?;
+        let sym = self.symbol_table.symbol(symbol.index)?;
         Ok(sym.name(self.symbol_table.strings())?)
     }
 
@@ -1023,12 +1064,7 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
         if symbol.is_aux {
             return Ok(None);
         }
-        let sec = symbol.raw.section_number.get(LittleEndian) as i16;
-        if sec > 0 {
-            Ok(Some(SectionIndex(sec as usize - 1)))
-        } else {
-            Ok(None)
-        }
+        Ok(symbol.raw.section().map(|i| SectionIndex(i.0 - 1)))
     }
 
     fn symbol_versions(&self) -> &[()] {
@@ -1606,6 +1642,17 @@ impl Coff {
             ..Self::DEFAULT_DEFS
         };
         defs[output_section_id::SECTION_HEADERS.as_usize()] = BuiltInSectionDetails {
+            kind: Self::primary_section(b""),
+            min_alignment: alignment::MIN,
+            ..Self::DEFAULT_DEFS
+        };
+        defs[output_section_id::SYMTAB.as_usize()] = BuiltInSectionDetails {
+            kind: Self::primary_section(b""),
+            min_alignment: alignment::MIN,
+            ..Self::DEFAULT_DEFS
+        };
+
+        defs[output_section_id::STRTAB.as_usize()] = BuiltInSectionDetails {
             kind: Self::primary_section(b""),
             min_alignment: alignment::MIN,
             ..Self::DEFAULT_DEFS
