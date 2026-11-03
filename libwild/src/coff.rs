@@ -55,7 +55,6 @@ use object::pe::RelocationType;
 use object::pe::SectionFlags;
 use std::borrow::Cow;
 use std::marker::PhantomData;
-use std::ops::Range;
 
 pub(crate) fn link_for_arch<'data, F: FileSystem>(
     linker: &'data crate::Linker<F>,
@@ -192,8 +191,17 @@ impl Relocation for CoffRelocation {
         self.raw.virtual_address.get(LittleEndian).into()
     }
 
+    // TODO: this is a bit abused to handle bias for some of AMD64 relocations
     fn addend(&self) -> i64 {
-        todo!()
+        match self.raw_type() {
+            object::pe::IMAGE_REL_AMD64_REL32 => -4,
+            object::pe::IMAGE_REL_AMD64_REL32_1 => -5,
+            object::pe::IMAGE_REL_AMD64_REL32_2 => -6,
+            object::pe::IMAGE_REL_AMD64_REL32_3 => -7,
+            object::pe::IMAGE_REL_AMD64_REL32_4 => -8,
+            object::pe::IMAGE_REL_AMD64_REL32_5 => -9,
+            _ => 0,
+        }
     }
 }
 
@@ -213,7 +221,7 @@ impl<'data> platform::RelocationSequence<'data> for RelocationList<'data> {
         self.0.iter().copied().map(|raw| CoffRelocation { raw })
     }
 
-    fn subsequence(&self, range: Range<usize>) -> Self {
+    fn subsequence(&self, range: std::ops::Range<usize>) -> Self {
         Self(&self.0[range])
     }
 
@@ -1636,10 +1644,7 @@ impl Resolution<Coff> {
         merged_strings: &OutputSectionMap<MergedStringsSection>,
         merged_string_start_addresses: &MergedStringStartAddresses,
     ) -> Result<u64> {
-        // if self.flags.is_ifunc() {
-        //     return Ok(self.plt_address()?.wrapping_add(addend as u64));
-        // }
-
+        // TODO: verify this for PE
         // For most symbols, `raw_value` won't be zero, so we can save ourselves from looking up the
         // section to see if it's a string-merge section. For string-merge symbols with names,
         // `raw_value` will have already been computed, so we can avoid computing it again.

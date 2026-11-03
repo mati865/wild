@@ -9,6 +9,7 @@ use crate::coff::DosHeader;
 use crate::coff::SectionHeader;
 use crate::coff::output_section_id;
 use crate::coff::part_id;
+use crate::ensure;
 use crate::error::Context;
 use crate::error::Result;
 use crate::file_writer::SizedOutput;
@@ -812,9 +813,38 @@ fn apply_relocation<
     .entered();
 
     let r_type = rel.raw_type();
-    let addend = rel.addend();
+    let rel_info = A::relocation_from_raw(rel.raw_type())?;
+    ensure!(
+        rel_info.implicit_addend,
+        "PE/COFF relocations always have implicit addend"
+    );
+    let mut addend = rel.addend() as u64;
+    // TODO: Copied from macho and is also similar to `adjust_value_based_on_content`. Figure out
+    // if it can be deduplicated
+    {
+        let RelocationSize::ByteSize(byte_size @ (4 | 8)) = rel_info.size else {
+            bail!(
+                "Unexpected relocation size for implicit addend read: {}",
+                rel_info.size
+            );
+        };
+        let byte_size = usize::from(byte_size);
+        let bytes = out
+            .get(offset_in_section as usize..)
+            .and_then(|bytes| bytes.get(..byte_size))
+            .context("implicit addend read extends beyond section data")?;
+        let mut buffer = [0u8; 8];
+        buffer[..byte_size].copy_from_slice(bytes);
+        // addend = addend.wrapping_add(u64_from_slice(&buffer));
+        let field = match byte_size {
+            4 => i64::from(i32::from_le_bytes(bytes.try_into()?)) as u64,
+            8 => u64::from_le_bytes(bytes.try_into()?),
+            _ => todo!(),
+        };
+        addend = addend.wrapping_add(field);
+    }
 
-    match A::relocation_from_raw(r_type)?.kind {
+    match rel_info.kind {
         RelocationKind::None => return Ok(()),
         RelocationKind::Relative if rel.symbol().is_none() => {
             if layout.symbol_db.output_kind.is_position_independent() {
@@ -826,8 +856,7 @@ fn apply_relocation<
             }
             let place = section_info.section_address + offset_in_section;
             let value = (rel.addend() as u64).wrapping_sub(place);
-            A::relocation_from_raw(r_type)?
-                .write_to_buffer(value, &mut out[offset_in_section as usize..])?;
+            rel_info.write_to_buffer(value, &mut out[offset_in_section as usize..])?;
             return Ok(());
         }
         RelocationKind::Absolute
@@ -864,7 +893,7 @@ fn apply_relocation<
     let output_kind = layout.symbol_db.output_kind;
     let rel_info = A::relocation_from_raw(r_type)?;
 
-    let undefined_weak_target = if flags.is_undefined_weak() && !flags.needs_plt() {
+    let undefined_weak_target = if flags.is_undefined_weak() {
         A::undefined_weak_target(r_type, place)
     } else {
         None
@@ -876,7 +905,7 @@ fn apply_relocation<
             resolution,
             rel_info.size,
             place,
-            addend,
+            addend as i64,
             section_info,
             symbol_index,
             object_layout,
@@ -884,10 +913,10 @@ fn apply_relocation<
         )?,
         RelocationKind::Relative => {
             let symbol_plus_addend = if let Some(target) = undefined_weak_target {
-                target.wrapping_add(addend as u64)
+                layout.args().image_base().unwrap().wrapping_add(addend)
             } else {
                 resolution.value_with_addend(
-                    addend,
+                    addend as i64,
                     symbol_index,
                     object_layout,
                     &layout.symbol_db.section_part_ids,
@@ -895,8 +924,14 @@ fn apply_relocation<
                     &layout.merged_string_start_addresses,
                 )?
             };
+            // ADDR32NB is RVA, others are RV.
+            let base = if r_type == object::pe::IMAGE_REL_AMD64_ADDR32NB {
+                layout.args().image_base().unwrap()
+            } else {
+                place
+            };
 
-            symbol_plus_addend.wrapping_sub(place)
+            symbol_plus_addend.wrapping_sub(base)
         }
         RelocationKind::None => 0,
         _ => {
@@ -941,64 +976,14 @@ fn write_absolute_relocation<'data, A: Arch<Platform = Coff>>(
     object_layout: &ObjectLayout<'data, Coff>,
     layout: &CoffLayout,
 ) -> Result<u64> {
-    // if !section_info.section_flags.is_alloc() {
-    //     resolution.value_with_addend(
-    //         addend,
-    //         symbol_index,
-    //         object_layout,
-    //         &layout.symbol_db.section_part_ids,
-    //         &layout.merged_strings,
-    //         &layout.merged_string_start_addresses,
-    //     )
-    // } else if resolution.flags.is_dynamic()
-    //     && resolution.flags.is_absolute()
-    //     && !section_info.is_writable
-    // {
-    //     // Weak undefined symbol referenced from a read-only section. Fill in as zero.
-    //     Ok(0)
-    // } else if resolution.flags.is_interposable()
-    //     && section_info.is_writable
-    //     && rel_size == RelocationSize::ByteSize(C::ADDRESS_SIZE as u8)
-    // {
-    //     table_writer.write_dynamic_symbol_relocation::<A>(
-    //         place,
-    //         addend,
-    //         resolution.dynamic_symbol_index()?,
-    //         DynamicRelocationKind::Absolute,
-    //     )?;
-    //
-    //     Ok(0)
-    // } else if resolution.flags.is_ifunc()
-    //     && A::absolute_ifunc_needs_irelative(table_writer.output_kind, section_info.is_writable)
-    // {
-    //     ensure!(
-    //         rel_size == RelocationSize::ByteSize(C::ADDRESS_SIZE as u8),
-    //         "Relocation against an ifunc is narrower than an address"
-    //     );
-    //     table_writer
-    //         .write_ifunc_relocation_for_data::<A>(place, resolution.raw_value as i64 + addend)?;
-    //     Ok(0)
-    // } else if table_writer.output_kind.is_position_independent() && !resolution.is_absolute() {
-    //     let address = resolution.value_with_addend(
-    //         addend,
-    //         symbol_index,
-    //         object_layout,
-    //         &layout.symbol_db.section_part_ids,
-    //         &layout.merged_strings,
-    //         &layout.merged_string_start_addresses,
-    //     )?;
-    //     table_writer.write_address_relocation::<A>(place, address)
-    // } else {
-    //     resolution.value_with_addend(
-    //         addend,
-    //         symbol_index,
-    //         object_layout,
-    //         &layout.symbol_db.section_part_ids,
-    //         &layout.merged_strings,
-    //         &layout.merged_string_start_addresses,
-    //     )
-    // }
-    todo!()
+    resolution.value_with_addend(
+        addend,
+        symbol_index,
+        object_layout,
+        &layout.symbol_db.section_part_ids,
+        &layout.merged_strings,
+        &layout.merged_string_start_addresses,
+    )
 }
 
 fn write_prelude<A: Arch<Platform = coff::Coff>>(
