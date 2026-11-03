@@ -374,6 +374,10 @@ fn populate_section_headers<A: Arch<Platform = Coff>>(
             characteristics: layout.output_sections.section_flags(sec_idx).into(),
         };
     }
+    assert!(
+        sections_iter.next().is_none(),
+        "Not all section headers were processed"
+    );
 
     Ok(())
 }
