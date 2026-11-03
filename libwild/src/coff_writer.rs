@@ -834,12 +834,13 @@ fn apply_relocation<'data, A: Arch<Platform = Coff>, R: Relocation<Platform = Co
     let rel_info = A::relocation_from_raw(r_type)?;
 
     let value = match rel_info.kind {
-        RelocationKind::Absolute => write_absolute_relocation::<A>(
-            resolution,
+        RelocationKind::Absolute => resolution.value_with_addend(
             addend as i64,
             symbol_index,
             object_layout,
-            layout,
+            &layout.symbol_db.section_part_ids,
+            &layout.merged_strings,
+            &layout.merged_string_start_addresses,
         )?,
         RelocationKind::Relative => {
             let symbol_plus_addend = if flags.is_undefined_weak() {
@@ -892,24 +893,6 @@ fn apply_relocation<'data, A: Arch<Platform = Coff>, R: Relocation<Platform = Co
     rel_info.write_to_buffer(value, &mut out[offset_in_section..])?;
 
     Ok(())
-}
-
-#[inline(always)]
-fn write_absolute_relocation<'data, A: Arch<Platform = Coff>>(
-    resolution: Resolution<Coff>,
-    addend: i64,
-    symbol_index: SymbolIndex,
-    object_layout: &ObjectLayout<'data, Coff>,
-    layout: &CoffLayout,
-) -> Result<u64> {
-    resolution.value_with_addend(
-        addend,
-        symbol_index,
-        object_layout,
-        &layout.symbol_db.section_part_ids,
-        &layout.merged_strings,
-        &layout.merged_string_start_addresses,
-    )
 }
 
 fn write_prelude<A: Arch<Platform = Coff>>(
