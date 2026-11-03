@@ -7,7 +7,6 @@ use crate::arch::Architecture;
 use crate::args::coff::CoffArgs;
 use crate::bail;
 use crate::coff_writer;
-use crate::elf::Elf;
 use crate::error::Result;
 use crate::input_data::InputBytes;
 use crate::input_data::InputRef;
