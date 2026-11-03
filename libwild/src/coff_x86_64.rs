@@ -83,13 +83,6 @@ impl crate::platform::Arch for CoffX86_64 {
         format!("TODO: relocation type 0x{r_type:x}").into()
     }
 
-    fn undefined_weak_target(r_type: object::pe::RelocationType, _place: u64) -> Option<u64> {
-        match r_type {
-            object::pe::IMAGE_REL_AMD64_REL32 => Some(0),
-            _ => None,
-        }
-    }
-
     fn tp_offset_start(_layout: &crate::layout::Layout<Self::Platform>) -> u64 {
         0
     }
