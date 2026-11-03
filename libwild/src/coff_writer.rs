@@ -1,5 +1,3 @@
-#![allow(dead_code, unused_variables)]
-
 use crate::OutputFileData;
 use crate::bail;
 use crate::coff;
@@ -10,6 +8,7 @@ use crate::coff::SectionHeader;
 use crate::coff::output_section_id;
 use crate::coff::part_id;
 use crate::ensure;
+use crate::error;
 use crate::error::Context;
 use crate::error::Result;
 use crate::file_writer::SizedOutput;
@@ -20,7 +19,6 @@ use crate::layout::FileLayout;
 use crate::layout::HeaderInfo;
 use crate::layout::Layout;
 use crate::layout::ObjectLayout;
-use crate::layout::PartialLinkSingleton;
 use crate::layout::PreludeLayout;
 use crate::layout::Resolution;
 use crate::layout::Section;
@@ -30,12 +28,10 @@ use crate::output_section_map::OutputSectionMap;
 use crate::output_section_part_map::OutputSectionPartMap;
 use crate::output_trace::HexU64;
 use crate::output_trace::TraceOutput;
-use crate::part_id::PartId;
 use crate::platform;
 use crate::platform::Arch;
 use crate::platform::Args;
 use crate::platform::ObjectFile;
-use crate::platform::Platform;
 use crate::platform::Relocation;
 use crate::platform::RelocationSequence;
 use crate::platform::SectionHeader as _;
@@ -48,7 +44,6 @@ use crate::value_flags::PerSymbolFlags;
 use crate::value_flags::ValueFlags;
 use linker_utils::elf::RelocationKind;
 use linker_utils::elf::RelocationSize;
-use object::LittleEndian;
 use object::SymbolIndex;
 use object::from_bytes_mut;
 use object::pe::ImageFileHeader;
@@ -64,9 +59,9 @@ use std::ops::Range;
 use std::sync::atomic::Ordering::Relaxed;
 use tracing::debug_span;
 
-type CoffLayout<'data> = Layout<'data, coff::Coff>;
+type CoffLayout<'data> = Layout<'data, Coff>;
 
-pub(crate) fn write<'data, A: Arch<Platform = coff::Coff>>(
+pub(crate) fn write<'data, A: Arch<Platform = Coff>>(
     sized_output: &mut SizedOutput<impl OutputFileData>,
     layout: &CoffLayout<'data>,
 ) -> Result {
@@ -79,7 +74,7 @@ pub(crate) fn write<'data, A: Arch<Platform = coff::Coff>>(
     Ok(())
 }
 
-fn write_file_contents<'data, A: Arch<Platform = coff::Coff>>(
+fn write_file_contents<'data, A: Arch<Platform = Coff>>(
     sized_output: &mut SizedOutput<impl OutputFileData>,
     layout: &CoffLayout<'data>,
 ) -> Result {
@@ -87,8 +82,6 @@ fn write_file_contents<'data, A: Arch<Platform = coff::Coff>>(
     let (mut section_buffers, padding) = split_output_into_sections(layout, &mut sized_output.out);
 
     fill_padding_for_sections::<A>(layout, padding);
-
-    let sym_index_map = Vec::new();
 
     let mut writable_buckets = split_buffers_by_alignment(&mut section_buffers, layout);
     let groups_and_buffers = split_output_by_group(layout, &mut writable_buckets);
@@ -98,18 +91,11 @@ fn write_file_contents<'data, A: Arch<Platform = coff::Coff>>(
         .try_for_each(|(group, mut buffers)| -> Result {
             verbose_timing_phase!("Write group");
 
-            let mut table_writer = TableWriter::from_layout(layout, &mut buffers);
+            let table_writer = TableWriter::from_layout(layout, &mut buffers);
 
             for file in &group.files {
-                write_file::<A>(
-                    file,
-                    &mut buffers,
-                    &mut table_writer,
-                    layout,
-                    &sized_output.trace,
-                    &sym_index_map,
-                )
-                .with_context(|| format!("Failed copying from {file} to output file"))?;
+                write_file::<A>(file, &mut buffers, layout, &sized_output.trace)
+                    .with_context(|| format!("Failed copying from {file} to output file"))?;
             }
             table_writer
                 .validate_empty(&group.mem_sizes)
@@ -137,9 +123,9 @@ fn write_file_contents<'data, A: Arch<Platform = coff::Coff>>(
 }
 
 struct TableWriter<'layout, 'out> {
-    output_kind: OutputKind,
-    tls: Range<u64>,
-    _phantom: std::marker::PhantomData<&'layout CoffLayout<'out>>,
+    _output_kind: OutputKind,
+    _tls: Range<u64>,
+    _phantom: PhantomData<&'layout CoffLayout<'out>>,
 }
 
 impl<'layout, 'out> TableWriter<'layout, 'out> {
@@ -160,20 +146,23 @@ impl<'layout, 'out> TableWriter<'layout, 'out> {
         _buffers: &mut OutputSectionPartMap<&'out mut [u8]>,
     ) -> TableWriter<'layout, 'out> {
         TableWriter {
-            output_kind,
-            tls,
+            _output_kind: output_kind,
+            _tls: tls,
             _phantom: Default::default(),
         }
     }
 
     /// Checks that we used all of the entries that we requested during layout.
-    fn validate_empty(&self, mem_sizes: &OutputSectionPartMap<u64>) -> crate::error::Result {
-        Ok(())
+    fn validate_empty(&self, _mem_sizes: &OutputSectionPartMap<u64>) -> Result {
+        // TODO: silence clippy
+        self._output_kind
+            .is_executable()
+            .ok_or_else(|| error!("unsupported output kind"))
     }
 }
 
-fn fill_padding_for_sections<A: Arch<Platform = coff::Coff>>(
-    layout: &Layout<'_, coff::Coff>,
+fn fill_padding_for_sections<A: Arch<Platform = Coff>>(
+    layout: &Layout<'_, Coff>,
     padding: crate::file_writer::PaddingSlices<'_>,
 ) {
     timing_phase!("Fill padding for sections");
@@ -194,9 +183,9 @@ fn fill_padding(mut section_buffers: OutputSectionMap<&mut [u8]>) {
     });
 }
 
-fn populate_dos_header<A: Arch<Platform = coff::Coff>>(
+fn populate_dos_header<A: Arch<Platform = Coff>>(
     layout: &CoffLayout,
-    header: &mut coff::DosHeader,
+    header: &mut DosHeader,
 ) -> Result {
     *header = DosHeader {
         e_magic: object::pe::IMAGE_DOS_SIGNATURE.into(),
@@ -229,11 +218,11 @@ fn populate_dos_header<A: Arch<Platform = coff::Coff>>(
     Ok(())
 }
 
-fn write_dos_stub<A: Arch<Platform = coff::Coff>>(layout: &CoffLayout, mut bytes: &mut [u8]) {
+fn write_dos_stub<A: Arch<Platform = Coff>>(mut bytes: &mut [u8]) {
     bytes.write_bytes(coff::DOS_STUB);
 }
 
-fn populate_nt_header<A: Arch<Platform = coff::Coff>>(
+fn populate_nt_header<A: Arch<Platform = Coff>>(
     layout: &CoffLayout,
     header_info: &HeaderInfo,
     header: &mut coff::NtHeader,
@@ -245,7 +234,6 @@ fn populate_nt_header<A: Arch<Platform = coff::Coff>>(
         characteristics |= object::pe::IMAGE_FILE_DLL;
     }
 
-    let e = LittleEndian;
     let first_regular_section = layout.section_layouts.get(output_section_id::TEXT);
 
     let file_header = ImageFileHeader {
@@ -344,13 +332,10 @@ fn populate_nt_header<A: Arch<Platform = coff::Coff>>(
     Ok(())
 }
 
-fn populate_section_headers<A: Arch<Platform = coff::Coff>>(
+fn populate_section_headers<A: Arch<Platform = Coff>>(
     layout: &CoffLayout,
-    header_info: &HeaderInfo,
     headers: &mut [SectionHeader],
 ) -> Result {
-    let e = LittleEndian;
-
     let mut sections_iter = layout.section_layouts.iter().skip_while(|(idx, _)| {
         layout
             .output_sections
@@ -389,30 +374,28 @@ fn populate_section_headers<A: Arch<Platform = coff::Coff>>(
     Ok(())
 }
 
-fn write_file<'data, A: Arch<Platform = coff::Coff>>(
-    file: &FileLayout<'data, coff::Coff>,
+fn write_file<'data, A: Arch<Platform = Coff>>(
+    file: &FileLayout<'data, Coff>,
     buffers: &mut OutputSectionPartMap<&mut [u8]>,
-    table_writer: &mut TableWriter<'_, '_>,
     layout: &CoffLayout<'data>,
     trace: &TraceOutput,
-    sym_index_map: &[Option<u32>],
 ) -> Result {
     match file {
         FileLayout::Object(s) => {
-            write_object::<A>(s, buffers, table_writer, layout, trace, sym_index_map)?;
+            write_object::<A>(s, buffers, layout, trace)?;
         }
         FileLayout::Prelude(s) => {
-            write_prelude::<A>(s, buffers, layout, sym_index_map)?;
+            write_prelude::<A>(s, buffers, layout)?;
         }
-        FileLayout::Epilogue(s) => {
+        FileLayout::Epilogue(_s) => {
             // write_epilogue::<A>(s, buffers, table_writer, layout, trace)?
         }
-        FileLayout::SyntheticSymbols(s) => {
+        FileLayout::SyntheticSymbols(_s) => {
             // write_synthetic_symbols::<A>(s, table_writer, layout)?;
         }
-        FileLayout::LinkerScript(s) => todo!("Wild's coff doesn't support linker scripts yet"),
+        FileLayout::LinkerScript(_s) => bail!("Wild's PE/COF doesn't support linker scripts yet"),
         FileLayout::NotLoaded | FileLayout::StubLibrary(_) => {}
-        FileLayout::Dynamic(s) => {
+        FileLayout::Dynamic(_s) => {
             // write_dynamic_file::<A>(s, table_writer, layout)?
         }
     }
@@ -420,13 +403,11 @@ fn write_file<'data, A: Arch<Platform = coff::Coff>>(
     Ok(())
 }
 
-fn write_object<'data, A: Arch<Platform = coff::Coff>>(
-    object: &ObjectLayout<'data, coff::Coff>,
+fn write_object<'data, A: Arch<Platform = Coff>>(
+    object: &ObjectLayout<'data, Coff>,
     buffers: &mut OutputSectionPartMap<&mut [u8]>,
-    table_writer: &mut TableWriter<'_, '_>,
     layout: &CoffLayout<'data>,
     trace: &TraceOutput,
-    sym_index_map: &[Option<u32>],
 ) -> Result {
     verbose_timing_phase!("Write object", file_id = object.file_id.as_u32());
 
@@ -437,23 +418,10 @@ fn write_object<'data, A: Arch<Platform = coff::Coff>>(
         let section_index = object::SectionIndex(i);
 
         match sec {
-            SectionSlot::Loaded(sec)
-            | SectionSlot::PartialLinkSingleton(PartialLinkSingleton { section: sec, .. }) => {
-                let part_id =
-                    object.section_part_id(section_index, &layout.symbol_db.section_part_ids);
-                let input_header = object.object.section(section_index)?;
-
-                write_object_section::<A>(
-                    object,
-                    layout,
-                    *sec,
-                    section_index,
-                    buffers,
-                    table_writer,
-                    trace,
-                )?;
+            SectionSlot::Loaded(sec) => {
+                write_object_section::<A>(object, layout, *sec, section_index, buffers, trace)?;
             }
-            SectionSlot::LoadedDebugInfo(sec) => {
+            SectionSlot::LoadedDebugInfo(_sec) => {
                 // write_debug_section::<C, A>(
                 //     object,
                 //     layout,
@@ -462,7 +430,7 @@ fn write_object<'data, A: Arch<Platform = coff::Coff>>(
                 //     buffers,
                 // )?;
             }
-            SectionSlot::FrameData(section_index) => {
+            SectionSlot::FrameData(_section_index) => {
                 // write_eh_frame_data::<C, A>(
                 //     object,
                 //     *section_index,
@@ -513,17 +481,14 @@ fn write_object<'data, A: Arch<Platform = coff::Coff>>(
     Ok(())
 }
 
-fn write_object_section<'data, A: Arch<Platform = coff::Coff>>(
-    object: &ObjectLayout<'data, coff::Coff>,
+fn write_object_section<'data, A: Arch<Platform = Coff>>(
+    object: &ObjectLayout<'data, Coff>,
     layout: &CoffLayout<'data>,
     section: Section,
     section_index: object::SectionIndex,
     buffers: &mut OutputSectionPartMap<&mut [u8]>,
-    table_writer: &mut TableWriter<'_, '_>,
     trace: &TraceOutput,
 ) -> Result {
-    let part_id = object.section_part_id(section_index, &layout.symbol_db.section_part_ids);
-
     // For --only-keep-debug, alloc non-NOTE sections are NOBITS.
     // if layout.args().only_keep_debug() {
     //     let primary_id = layout
@@ -563,7 +528,6 @@ fn write_object_section<'data, A: Arch<Platform = coff::Coff>>(
         section_index,
         relocations.rel_iter(),
         layout,
-        table_writer,
         trace,
     )
     .with_context(|| {
@@ -576,8 +540,8 @@ fn write_object_section<'data, A: Arch<Platform = coff::Coff>>(
     Ok(())
 }
 
-fn write_section_raw<'out, 'data, A: Arch<Platform = coff::Coff>>(
-    object: &ObjectLayout<'data, coff::Coff>,
+fn write_section_raw<'out, 'data, A: Arch<Platform = Coff>>(
+    object: &ObjectLayout<'data, Coff>,
     layout: &CoffLayout,
     sec: Section,
     section_index: object::SectionIndex,
@@ -586,7 +550,7 @@ fn write_section_raw<'out, 'data, A: Arch<Platform = coff::Coff>>(
     let part_id = object.section_part_id(section_index, &layout.symbol_db.section_part_ids);
     if layout
         .output_sections
-        .has_data_in_file(part_id.output_section_id::<coff::Coff>())
+        .has_data_in_file(part_id.output_section_id::<Coff>())
     {
         let section_buffer = buffers.get_mut(part_id);
         let allocation_size = sec.capacity(part_id, &layout.output_sections) as usize;
@@ -606,7 +570,7 @@ fn write_section_raw<'out, 'data, A: Arch<Platform = coff::Coff>>(
 
         let section_info = layout
             .output_sections
-            .output_info(part_id.output_section_id::<coff::Coff>());
+            .output_info(part_id.output_section_id::<Coff>());
         let section_size = object.object.section_size(object_section)?;
         let section_size = section_size as usize;
         object
@@ -629,40 +593,29 @@ fn apply_relocations<
     object: &ObjectLayout<'data, Coff>,
     out: &mut [u8],
     section_index: object::SectionIndex,
-    mut relocations: I,
+    relocations: I,
     layout: &CoffLayout<'data>,
-    table_writer: &TableWriter<'_, '_>,
     trace: &TraceOutput,
 ) -> Result {
     let section_address = object.section_resolutions[section_index.0]
         .address()
         .context("Attempted to apply relocations to a section that we didn't load")?;
-    let object_section = object.object.section(section_index)?;
-    let section_flags = object_section.characteristics.get(LittleEndian);
-    let section_info = SectionInfo {
-        section_address,
-        is_writable: object_section.is_writable(),
-        section_flags,
-        part_id: object.section_part_id(section_index, &layout.symbol_db.section_part_ids),
-    };
 
     let mut relocation_count = 0;
 
-    while let Some(rel) = relocations.next() {
+    for rel in relocations {
         relocation_count += 1;
 
         let offset_in_section = rel.offset();
 
-        apply_relocation::<A, R, _>(
+        apply_relocation::<A, R>(
             object,
             offset_in_section,
             &rel,
-            section_info,
+            section_address,
             layout,
             out,
-            table_writer,
             trace,
-            &relocations,
         )
         .with_context(|| {
             format!(
@@ -730,14 +683,6 @@ impl<'a, 'data, A: Arch<Platform = Coff>, R: Relocation<Platform = Coff>> Displa
     }
 }
 
-#[derive(Clone, Copy)]
-struct SectionInfo<S: platform::SectionFlags> {
-    section_address: u64,
-    is_writable: bool,
-    section_flags: S,
-    part_id: PartId,
-}
-
 struct RelocationResolution {
     resolution: Resolution<Coff>,
     symbol_index: SymbolIndex,
@@ -787,23 +732,15 @@ fn get_resolution<'data, R: Relocation>(
 }
 
 #[inline(always)]
-fn apply_relocation<
-    'data,
-    A: Arch<Platform = Coff>,
-    R: Relocation<Platform = Coff>,
-    I: Iterator<Item = R>,
->(
+fn apply_relocation<'data, A: Arch<Platform = Coff>, R: Relocation<Platform = Coff>>(
     object_layout: &ObjectLayout<'data, Coff>,
     offset_in_section: u64,
     rel: &R,
-    section_info: SectionInfo<object::pe::SectionFlags>,
+    section_address: u64,
     layout: &CoffLayout<'data>,
     out: &mut [u8],
-    table_writer: &TableWriter<'_, '_>,
     trace: &TraceOutput,
-    relocation_iterator: &I,
 ) -> Result<()> {
-    let section_address = section_info.section_address;
     let place = section_address + offset_in_section;
     let _span = tracing::trace_span!(
         "relocation",
@@ -854,7 +791,7 @@ fn apply_relocation<
                     rel.raw_type()
                 );
             }
-            let place = section_info.section_address + offset_in_section;
+            let place = section_address + offset_in_section;
             let value = (rel.addend() as u64).wrapping_sub(place);
             rel_info.write_to_buffer(value, &mut out[offset_in_section as usize..])?;
             return Ok(());
@@ -890,29 +827,18 @@ fn apply_relocation<
             A::rel_type_to_string(r_type)
         );
     }
-    let output_kind = layout.symbol_db.output_kind;
     let rel_info = A::relocation_from_raw(r_type)?;
-
-    let undefined_weak_target = if flags.is_undefined_weak() {
-        A::undefined_weak_target(r_type, place)
-    } else {
-        None
-    };
 
     let value = match rel_info.kind {
         RelocationKind::Absolute => write_absolute_relocation::<A>(
-            table_writer,
             resolution,
-            rel_info.size,
-            place,
             addend as i64,
-            section_info,
             symbol_index,
             object_layout,
             layout,
         )?,
         RelocationKind::Relative => {
-            let symbol_plus_addend = if let Some(target) = undefined_weak_target {
+            let symbol_plus_addend = if flags.is_undefined_weak() {
                 layout.args().image_base().unwrap().wrapping_add(addend)
             } else {
                 resolution.value_with_addend(
@@ -966,13 +892,9 @@ fn apply_relocation<
 
 #[inline(always)]
 fn write_absolute_relocation<'data, A: Arch<Platform = Coff>>(
-    table_writer: &TableWriter<'_, '_>,
     resolution: Resolution<Coff>,
-    rel_size: RelocationSize,
-    place: u64,
     addend: i64,
-    section_info: SectionInfo<<A::Platform as Platform>::SectionFlags>,
-    symbol_index: object::SymbolIndex,
+    symbol_index: SymbolIndex,
     object_layout: &ObjectLayout<'data, Coff>,
     layout: &CoffLayout,
 ) -> Result<u64> {
@@ -986,19 +908,17 @@ fn write_absolute_relocation<'data, A: Arch<Platform = Coff>>(
     )
 }
 
-fn write_prelude<A: Arch<Platform = coff::Coff>>(
-    prelude: &PreludeLayout<coff::Coff>,
+fn write_prelude<A: Arch<Platform = Coff>>(
+    prelude: &PreludeLayout<Coff>,
     buffers: &mut OutputSectionPartMap<&mut [u8]>,
     layout: &CoffLayout,
-    sym_index_map: &[Option<u32>],
 ) -> Result {
     verbose_timing_phase!("Write prelude");
 
-    let dos_header: &mut coff::DosHeader =
-        from_bytes_mut(buffers.get_mut(crate::part_id::FILE_HEADER))
-            .ok()
-            .context("Invalid DOS header allocation")?
-            .0;
+    let dos_header: &mut DosHeader = from_bytes_mut(buffers.get_mut(crate::part_id::FILE_HEADER))
+        .ok()
+        .context("Invalid DOS header allocation")?
+        .0;
     populate_dos_header::<A>(layout, dos_header)?;
 
     let dos_stub: &mut [u8; coff::DOS_STUB.len()] =
@@ -1006,29 +926,29 @@ fn write_prelude<A: Arch<Platform = coff::Coff>>(
             .ok()
             .context("Invalid DOS header allocation")?
             .0;
-    write_dos_stub::<A>(layout, dos_stub);
+    write_dos_stub::<A>(dos_stub);
 
-    let nt_header: &mut coff::NtHeader = from_bytes_mut(buffers.get_mut(coff::part_id::NT_HEADER))
+    let nt_header: &mut coff::NtHeader = from_bytes_mut(buffers.get_mut(part_id::NT_HEADER))
         .ok()
         .context("Invalid NT header allocation")?
         .0;
     populate_nt_header::<A>(layout, &prelude.header_info, nt_header)?;
 
-    let sections_headers: &mut [coff::SectionHeader] = slice_from_bytes_mut(
-        buffers.get_mut(coff::part_id::SECTION_HEADERS),
+    let sections_headers: &mut [SectionHeader] = slice_from_bytes_mut(
+        buffers.get_mut(part_id::SECTION_HEADERS),
         prelude.header_info.num_output_sections_with_content as usize,
     )
     .ok()
     .context("Invalid section headers allocation")?
     .0;
-    populate_section_headers::<A>(layout, &prelude.header_info, sections_headers)?;
+    populate_section_headers::<A>(layout, sections_headers)?;
 
     Ok(())
 }
 
-fn fill_section_padding<A: Arch<Platform = coff::Coff>>(
+fn fill_section_padding<A: Arch<Platform = Coff>>(
     padding: &mut [u8],
-    section_info: &SectionOutputInfo<coff::Coff>,
+    section_info: &SectionOutputInfo<Coff>,
 ) {
     if let Some(pattern) = section_info.fill {
         let chunks = padding.chunks_mut(4);
