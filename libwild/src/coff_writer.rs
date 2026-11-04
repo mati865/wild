@@ -138,7 +138,7 @@ fn write_file_contents<'data, A: Arch<Platform = Coff>>(
 
 struct TableWriter<'layout, 'out> {
     _output_kind: OutputKind,
-    debug_symbol_writer: SymbolTableWriter<'layout, 'out>,
+    symbol_table_writer: SymbolTableWriter<'layout, 'out>,
     section_headers: &'out mut [coff::SectionHeader],
     _phantom: PhantomData<&'layout ()>,
 }
@@ -149,20 +149,20 @@ impl<'layout, 'out> TableWriter<'layout, 'out> {
         strtab_start_offset: u32,
         buffers: &mut OutputSectionPartMap<&'out mut [u8]>,
     ) -> TableWriter<'layout, 'out> {
-        let debug_symbol_writer =
+        let symbol_table_writer =
             SymbolTableWriter::new(strtab_start_offset, buffers, &layout.output_sections);
 
-        Self::new(layout.symbol_db.output_kind, buffers, debug_symbol_writer)
+        Self::new(layout.symbol_db.output_kind, buffers, symbol_table_writer)
     }
 
     fn new(
         output_kind: OutputKind,
         buffers: &mut OutputSectionPartMap<&'out mut [u8]>,
-        debug_symbol_writer: SymbolTableWriter<'layout, 'out>,
+        symbol_table_writer: SymbolTableWriter<'layout, 'out>,
     ) -> TableWriter<'layout, 'out> {
         TableWriter {
             _output_kind: output_kind,
-            debug_symbol_writer,
+            symbol_table_writer,
             section_headers: slice_from_all_bytes_mut(buffers.take(part_id::SECTION_HEADERS)),
             _phantom: Default::default(),
         }
@@ -184,7 +184,7 @@ impl<'layout, 'out> TableWriter<'layout, 'out> {
             ));
         }
 
-        self.debug_symbol_writer.check_exhausted()?;
+        self.symbol_table_writer.check_exhausted()?;
 
         Ok(())
     }
@@ -805,7 +805,7 @@ fn write_object<'data, A: Arch<Platform = Coff>>(
     // }
 
     if !layout.args().should_strip_all() {
-        write_symbols(object, &mut table_writer.debug_symbol_writer, layout)?;
+        write_symbols(object, &mut table_writer.symbol_table_writer, layout)?;
     }
 
     Ok(())
