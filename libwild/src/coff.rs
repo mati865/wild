@@ -11,6 +11,7 @@ use crate::error::Result;
 use crate::input_data::InputBytes;
 use crate::input_data::InputRef;
 use crate::layout;
+use crate::layout::DynamicSymbolDefinition;
 use crate::layout::HandlerData;
 use crate::layout::ObjectLayout;
 use crate::layout::Resolution;
@@ -256,6 +257,7 @@ impl Platform for Coff {
     const TEXT_SECTION_ID: Option<OutputSectionId> = Some(output_section_id::TEXT);
     const DATA_SECTION_ID: Option<OutputSectionId> = Some(output_section_id::DATA);
     const RODATA_SECTION_ID: Option<OutputSectionId> = Some(output_section_id::RODATA);
+    const STRTAB_SECTION_ID: Option<OutputSectionId> = Some(output_section_id::STRTAB);
 
     const CUSTOM_PHDR_EXCLUDED_SECTION_IDS: &'static [OutputSectionId] = &[
         output_section_id::DOS_STUB,
@@ -271,7 +273,6 @@ impl Platform for Coff {
         output_section_id::NT_HEADER,
         output_section_id::SECTION_HEADERS,
         output_section_id::SYMTAB,
-        output_section_id::STRTAB,
     ];
 
     type File<'data> = File<'data>;
@@ -385,6 +386,16 @@ impl Platform for Coff {
         _common: &mut layout::CommonGroupState<'data, Self>,
         _resources: &layout::GraphResources<'data, 'scope, Self>,
     ) {
+    }
+
+    fn finalise_sizes_prelude<'data>(
+        _prelude: &mut layout::PreludeLayoutState<'data, Self>,
+        mem_sizes: &mut OutputSectionPartMap<u64>,
+        _dynamic_symbol_definitions: &[DynamicSymbolDefinition<'data, Self>],
+    ) -> Result {
+        // The first 4 bytes are the size of string table.
+        mem_sizes.increment(part_id::STRTAB, 4);
+        Ok(())
     }
 
     fn finalise_sizes_dynamic<'data>(
@@ -747,7 +758,9 @@ impl Platform for Coff {
                 // in a section we're emitting), then make sure we have a resolution for it.
                 flags.fetch_or(ValueFlags::DIRECT);
                 num_sym += 1;
-                strings_size += info.name.len() + 1;
+                if info.name.len() > 8 {
+                    strings_size += info.name.len() + 1;
+                }
             }
         }
         let entry_size = object::pe::IMAGE_SIZEOF_SYMBOL as u64;
@@ -765,7 +778,10 @@ impl Platform for Coff {
         Ok(())
     }
 
-    fn allocate_prelude(_common: &mut layout::CommonGroupState<Self>, _symbol_db: &SymbolDb<Self>) {
+    fn allocate_prelude(common: &mut layout::CommonGroupState<Self>, symbol_db: &SymbolDb<Self>) {
+        if !symbol_db.args.should_strip_all() {
+            common.allocate(crate::elf::part_id::STRTAB, 4);
+        }
     }
 
     fn finalise_prelude_layout<'data>(
@@ -1260,6 +1276,7 @@ impl platform::SectionHeader for SectionHeader {
     }
 
     fn is_prog_bits(&self) -> bool {
+        // TODO: might be relevant
         false
     }
 
