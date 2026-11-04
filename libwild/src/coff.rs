@@ -523,7 +523,7 @@ impl Platform for Coff {
             .hide();
 
         symbols
-            .section_start(crate::output_section_id::FILE_HEADER, "__ImageBase")
+            .section_start(output_section_id::TEXT, "__ImageBase")
             .hide();
     }
 
@@ -1680,11 +1680,9 @@ const DEFAULT_SECTION_PLACEMENT_RULES: &[SectionRule<'static>] = &[
 const LINKER_MANAGED_SECTION_RULES: &[SectionRule<'static>] =
     &[SectionRule::prefix(b".debug_", SectionRuleOutcome::Debug)];
 
-// PE/COFF doesn't store FILE_HEADER in SECTION_HEADER, so we subtract 1 here.
-// TODO: Make it platform specific whether FILE_HADER is included.
 fn section_headers_size(header_info: &layout::HeaderInfo) -> u64 {
     object::pe::IMAGE_SIZEOF_SECTION_HEADER as u64
-        * u64::from(header_info.num_output_sections_with_content - 1)
+        * u64::from(header_info.num_output_sections_with_content)
 }
 
 impl SinglePartSectionId {
