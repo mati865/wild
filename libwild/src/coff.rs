@@ -673,11 +673,7 @@ impl Platform for Coff {
         sizes.increment(crate::part_id::FILE_HEADER, size_of::<DosHeader>() as u64);
         sizes.increment(part_id::DOS_STUB, DOS_STUB.len() as u64);
         sizes.increment(part_id::NT_HEADER, SIZE_OF_NT_HEADERS64 as u64);
-        sizes.increment(
-            part_id::SECTION_HEADERS,
-            u64::from(header_info.num_output_sections_with_content)
-                * size_of::<SectionHeader>() as u64,
-        );
+        sizes.increment(part_id::SECTION_HEADERS, section_headers_size(header_info));
     }
 
     fn finalise_sizes_for_symbol<'data>(
@@ -1693,6 +1689,13 @@ const DEFAULT_SECTION_PLACEMENT_RULES: &[SectionRule<'static>] = &[
 
 const LINKER_MANAGED_SECTION_RULES: &[SectionRule<'static>] =
     &[SectionRule::prefix(b".debug_", SectionRuleOutcome::Debug)];
+
+// PE/COFF doesn't store FILE_HEADER in SECTION_HEADER, so we subtract 1 here.
+// TODO: Make it platform specific whether FILE_HADER is included.
+fn section_headers_size(header_info: &layout::HeaderInfo) -> u64 {
+    object::pe::IMAGE_SIZEOF_SECTION_HEADER as u64
+        * u64::from(header_info.num_output_sections_with_content - 1)
+}
 
 impl SinglePartSectionId {
     const fn part_id(self) -> PartId {
