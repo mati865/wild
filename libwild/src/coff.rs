@@ -345,8 +345,7 @@ impl Platform for Coff {
     }
 
     fn is_zero_sized_section_content(_section_id: OutputSectionId) -> bool {
-        // TODO
-        false
+        true
     }
 
     fn built_in_section_details() -> &'static [Self::BuiltInSectionDetails] {
@@ -1243,14 +1242,13 @@ impl platform::SectionHeader for SectionHeader {
     }
 
     fn should_retain(&self) -> bool {
-        !self
-            .characteristics
-            .get(LittleEndian)
-            .contains(object::pe::IMAGE_SCN_LNK_REMOVE)
+        false
     }
 
     fn should_exclude(&self) -> bool {
-        false
+        self.characteristics
+            .get(LittleEndian)
+            .contains(object::pe::IMAGE_SCN_LNK_REMOVE)
     }
 
     fn is_group(&self) -> bool {
