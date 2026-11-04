@@ -695,11 +695,11 @@ impl<'layout, 'out> SymbolTableWriter<'layout, 'out> {
     /// Verifies that we've used up all the space allocated to this writer. i.e. checks that we
     /// didn't allocate too much or missed writing something that we were supposed to write.
     fn check_exhausted(&self) -> Result {
-        if !self.entries.is_empty() {
+        if !self.entries.is_empty()
             // if !self.local_entries.is_empty()
             //     || !self.global_entries.is_empty()
-            //     || !self.strtab_writer.out.is_empty()
-            // {
+                || !self.strtab_writer.out.is_empty()
+        {
             //     let table_names = if self.is_dynamic {
             //         "dynsym/dynstr"
             //     } else {
@@ -715,6 +715,7 @@ impl<'layout, 'out> SymbolTableWriter<'layout, 'out> {
                 self.strtab_writer.out.len()
             );
         }
+
         Ok(())
     }
 
@@ -1302,6 +1303,16 @@ fn write_prelude<A: Arch<Platform = Coff>>(
 
     write_section_headers(table_writer, layout)?;
 
+    // TODO: add helper
+    let strtab_size = layout
+        .section_layouts
+        .get(output_section_id::STRTAB)
+        .file_size;
+    table_writer
+        .symbol_table_writer
+        .strtab_writer
+        .write_size_header(u32::try_from(strtab_size)?)?;
+
     Ok(())
 }
 
@@ -1420,6 +1431,13 @@ impl StrTabWriter<'_> {
         let offset = self.next_offset;
         self.next_offset += len_with_terminator as u32;
         offset
+    }
+
+    fn write_size_header(&mut self, total_size: u32) -> Result {
+        let header = self.out.split_off_mut(..4).unwrap();
+        header.copy_from_slice(&total_size.to_le_bytes());
+        self.next_offset += 4;
+        Ok(())
     }
 
     // fn take_prefix(&mut self, size: usize) -> Self {
