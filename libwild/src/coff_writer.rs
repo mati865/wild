@@ -424,14 +424,14 @@ impl<'layout, 'out> SymbolTableWriter<'layout, 'out> {
     ) -> Self {
         let entries = slice_from_all_bytes_mut(buffers.take(part_id::SYMTAB));
         // let local_entries =
-        // slice_from_all_bytes_mut(buffers.take(crate::elf::part_id::SYMTAB_LOCAL));
+        // slice_from_all_bytes_mut(buffers.take(part_id::SYMTAB_LOCAL));
         // let global_entries =
-        // slice_from_all_bytes_mut(buffers.take(crate::elf::part_id::SYMTAB_GLOBAL));
+        // slice_from_all_bytes_mut(buffers.take(part_id::SYMTAB_GLOBAL));
         // let symtab_shndx_local_entries =
-        // Some(buffers.take(crate::elf::part_id::SYMTAB_SHNDX_LOCAL))     .and_then(|s|
+        // Some(buffers.take(part_id::SYMTAB_SHNDX_LOCAL))     .and_then(|s|
         // (!s.is_empty()).then(|| slice_from_all_bytes_mut(s)));
         // let symtab_shndx_global_entries =
-        // Some(buffers.take(crate::elf::part_id::SYMTAB_SHNDX_GLOBAL))     .and_then(|s|
+        // Some(buffers.take(part_id::SYMTAB_SHNDX_GLOBAL))     .and_then(|s|
         // (!s.is_empty()).then(|| slice_from_all_bytes_mut(s)));
 
         let strings = buffers.take(part_id::STRTAB);
@@ -456,8 +456,8 @@ impl<'layout, 'out> SymbolTableWriter<'layout, 'out> {
     //     buffers: &mut OutputSectionPartMap<&'out mut [u8]>,
     //     output_sections: &'layout OutputSections<elf::Elf<C>>,
     // ) -> Self {
-    //     let global_entries = slice_from_all_bytes_mut(buffers.take(crate::elf::part_id::DYNSYM));
-    //     let strings = slice_from_all_bytes_mut(buffers.take(crate::elf::part_id::DYNSTR));
+    //     let global_entries = slice_from_all_bytes_mut(buffers.take(part_id::DYNSYM));
+    //     let strings = slice_from_all_bytes_mut(buffers.take(part_id::DYNSTR));
     //     Self {
     //         local_entries: Default::default(),
     //         global_entries,
@@ -499,9 +499,9 @@ impl<'layout, 'out> SymbolTableWriter<'layout, 'out> {
             )?
         } else if sym.is_common() {
             let section_id = /*if sym.st_type() == STT_TLS {
-                crate::elf::output_section_id::TBSS
+                output_section_id::TBSS
             } else*/ {
-                crate::elf::output_section_id::BSS
+                output_section_id::BSS
             };
 
             Some(self.copy_symbol(sym, name, section_id, value, flags)?)
@@ -543,7 +543,7 @@ impl<'layout, 'out> SymbolTableWriter<'layout, 'out> {
             | SectionSlot::MergeStrings(_) => object
                 .section_part_id(section_index, &layout.symbol_db.section_part_ids)
                 .output_section_id::<Coff>(),
-            SectionSlot::FrameData(..) => crate::elf::output_section_id::EH_FRAME,
+            // SectionSlot::FrameData(..) => output_section_id::EH_FRAME,
             _ => {
                 if layout.symbol_db.is_mapping_symbol(symbol_id) {
                     return Ok(None);
