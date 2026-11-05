@@ -596,7 +596,8 @@ impl<'layout, 'out> SymbolTableWriter<'layout, 'out> {
         // let size = sym.st_size(e).into();
         let entry = self.define_symbol(
             // is_local,
-            SymbolSection(shndx),
+            // 1-based indexes strike again
+            SymbolSection(shndx + 1),
             value,
             // size,
             name,
@@ -617,7 +618,7 @@ impl<'layout, 'out> SymbolTableWriter<'layout, 'out> {
         _flags: ValueFlags,
     ) -> Result<&mut object::pe::ImageSymbol> {
         let value = sym.raw.value.into();
-        let entry = self.define_symbol(object::pe::IMAGE_SYM_ABSOLUTE, value, name)?;
+        let entry = self.define_symbol(object::pe::IMAGE_SYM_DEBUG, value, name)?;
         // entry.set_info(sym.st_info());
         // entry.set_other(sym.st_other());
         // Fix binding if symbol was downgraded to local by version script
@@ -662,9 +663,7 @@ impl<'layout, 'out> SymbolTableWriter<'layout, 'out> {
 
         entry.name = name_bytes;
         entry.value.set(LittleEndian, value);
-        entry
-            .section_number
-            .set(LittleEndian, section.index().unwrap_or(0).try_into()?);
+        entry.section_number.set(LittleEndian, section.0 as u16);
         // entry.typ.set(LittleEndian, 0);
         // entry.storage_class = ;
         // entry.number_of_aux_symbols = ;
