@@ -1,4 +1,6 @@
 use crate::OutputFileData;
+use crate::alignment;
+use crate::alignment::Alignment;
 use crate::bail;
 use crate::coff;
 use crate::coff::Coff;
@@ -18,6 +20,7 @@ use crate::file_writer::split_output_by_group;
 use crate::file_writer::split_output_into_sections;
 use crate::layout::FileLayout;
 use crate::layout::HeaderInfo;
+use crate::layout::InternalSymbols;
 use crate::layout::Layout;
 use crate::layout::ObjectLayout;
 use crate::layout::OutputRecordLayout;
@@ -25,6 +28,7 @@ use crate::layout::PreludeLayout;
 use crate::layout::Resolution;
 use crate::layout::Section;
 use crate::layout::SymbolCopyInfo;
+use crate::layout::SyntheticSymbolsLayout;
 use crate::output_kind::OutputKind;
 use crate::output_section_id::OrderEvent;
 use crate::output_section_id::OutputSectionId;
@@ -43,6 +47,7 @@ use crate::platform::RelocationSequence;
 use crate::platform::SectionHeader as _;
 use crate::platform::Symbol as _;
 use crate::resolution::SectionSlot;
+use crate::sharding::ShardKey;
 use crate::symbol_db::SymbolDb;
 use crate::symbol_db::SymbolId;
 use crate::timing::timing_phase;
@@ -61,6 +66,7 @@ use object::pe::SymbolSection;
 use object::write::WritableBuffer;
 use rayon::iter::IndexedParallelIterator;
 use rayon::iter::IntoParallelIterator as _;
+use rayon::iter::ParallelBridge;
 use rayon::iter::ParallelIterator as _;
 use std::fmt::Display;
 use std::marker::PhantomData;
@@ -332,7 +338,8 @@ fn populate_nt_header<A: Arch<Platform = Coff>>(
         address_of_entry_point: entry_point_address.into(),
         base_of_code: u32::try_from(rva(first_regular_section.mem_offset, layout))?.into(),
         image_base: layout.args().image_base().unwrap().into(),
-        section_alignment: u32::try_from(first_regular_section.alignment.value())?.into(),
+        // TODO: Create const
+        section_alignment: u32::try_from(Alignment::from_exponent(12)?.value())?.into(),
         // Wild doesn't support separate memory and file alignment
         file_alignment: u32::try_from(first_regular_section.alignment.value())?.into(),
         major_operating_system_version: 6.into(),
@@ -407,8 +414,8 @@ fn write_file<'data, A: Arch<Platform = Coff>>(
         FileLayout::Epilogue(_s) => {
             // write_epilogue::<A>(s, buffers, table_writer, layout, trace)?
         }
-        FileLayout::SyntheticSymbols(_s) => {
-            // write_synthetic_symbols::<A>(s, table_writer, layout)?;
+        FileLayout::SyntheticSymbols(s) => {
+            write_synthetic_symbols::<A>(s, table_writer, layout)?;
         }
         FileLayout::LinkerScript(_s) => bail!("Wild's PE/COF doesn't support linker scripts yet"),
         FileLayout::NotLoaded | FileLayout::StubLibrary(_) => {}
@@ -1207,6 +1214,180 @@ fn write_prelude<A: Arch<Platform = Coff>>(
         .strtab_writer
         .write_size_header(u32::try_from(strtab_size)?);
 
+    if !layout.args().should_strip_all() {
+        write_symbol_table_entries(prelude, &mut table_writer.symbol_table_writer, layout)?;
+    }
+
+    write_merged_strings(prelude, buffers, layout);
+
+    Ok(())
+}
+
+fn write_merged_strings(
+    _prelude: &PreludeLayout<Coff>,
+    buffers: &mut OutputSectionPartMap<&mut [u8]>,
+    layout: &CoffLayout,
+) {
+    // let only_keep_debug = layout.args().only_keep_debug();
+    layout.merged_strings.for_each(|section_id, merged| {
+        if merged.len() > 0 {
+            // TODO
+            // let primary_id = layout.output_sections.primary_output_section(section_id);
+            // if only_keep_debug
+            //     && crate::only_keep_debug::should_hollow_section(
+            //         layout.output_sections.section_flags(primary_id).is_alloc(),
+            //         layout
+            //             .output_sections
+            //             .output_info(primary_id)
+            //             .section_attributes
+            //             .ty,
+            //     )
+            // {
+            //     return;
+            // }
+            let buffer = buffers.get_mut(section_id.part_id_with_alignment::<Coff>(alignment::MIN));
+
+            write_merged_strings_to_buffer(merged, buffer);
+        }
+    });
+
+    // TODO
+    // if layout.args().should_write_linker_identity {
+    //     // Write linker identity into .comment section.
+    //     let comment_buffer = buffers.get_mut(
+    //         crate::elf::output_section_id::COMMENT.
+    // part_id_with_alignment::<Coff>(alignment::MIN),     );
+    //     comment_buffer
+    //         .split_off_mut(..prelude.identity.len())
+    //         .unwrap()
+    //         .copy_from_slice(prelude.identity.as_bytes());
+    // }
+}
+
+pub(crate) fn write_merged_strings_to_buffer(
+    merged: &crate::string_merging::MergedStringsSection,
+    buffer: &mut &mut [u8],
+) {
+    merged
+        .buckets
+        .iter()
+        .map(|b| (b, buffer.split_off_mut(..b.len()).unwrap()))
+        .par_bridge()
+        .for_each(|(bucket, mut buffer)| {
+            for string in &bucket.strings {
+                let dest = buffer.split_off_mut(..string.len()).unwrap();
+                dest.copy_from_slice(string);
+            }
+        });
+}
+
+fn write_symbol_table_entries(
+    prelude: &PreludeLayout<Coff>,
+    symbol_writer: &mut SymbolTableWriter<'_, '_>,
+    layout: &CoffLayout,
+) -> Result {
+    let internal_symbols = &prelude.internal_symbols;
+
+    write_internal_symbols(internal_symbols, layout, symbol_writer)?;
+    Ok(())
+}
+
+fn write_synthetic_symbols<'data, A: Arch<Platform = Coff>>(
+    syn: &SyntheticSymbolsLayout<Coff>,
+    table_writer: &mut TableWriter<'_, '_>,
+    layout: &CoffLayout<'data>,
+) -> Result {
+    verbose_timing_phase!("Write synthetic symbols");
+
+    if !layout.args().should_strip_all() {
+        write_internal_symbols(
+            &syn.internal_symbols,
+            layout,
+            &mut table_writer.symbol_table_writer,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn write_internal_symbols(
+    internal_symbols: &InternalSymbols<Coff>,
+    layout: &CoffLayout,
+    symbol_writer: &mut SymbolTableWriter<'_, '_>,
+) -> Result {
+    for (local_index, def_info) in internal_symbols.symbol_definitions.iter().enumerate() {
+        if def_info.name.is_empty() {
+            continue;
+        }
+        let symbol_id = internal_symbols.start_symbol_id.add_usize(local_index);
+        if !layout.symbol_db.is_canonical(symbol_id) {
+            continue;
+        }
+        let Some(resolution) = layout.local_symbol_resolution(symbol_id) else {
+            continue;
+        };
+
+        let symbol_name = layout.symbol_db.symbol_name(symbol_id)?;
+
+        // For Redirect, get attributes from the target symbol
+        let (mut shndx, st_type) = if matches!(
+            def_info.placement,
+            crate::parsing::SymbolPlacement::Redirect(_)
+        ) {
+            unreachable!();
+        } else {
+            let shndx = def_info
+                .section_id()
+                .map(|section_id| {
+                    let section_id = layout.output_sections.primary_output_section(section_id);
+
+                    layout
+                        .output_sections
+                        .output_index_of_section(section_id)
+                        .with_context(|| {
+                            format!(
+                                "symbol '{}' in section '{}' that we're not going to output {resolution:?}",
+                                layout.symbol_db.symbol_name_for_display(symbol_id),
+                                layout.output_sections.display_name(section_id)
+                            )
+                        })
+                })
+                .transpose()?
+                .map_or(object::pe::IMAGE_SYM_ABSOLUTE, |i| SymbolSection(i as i32));
+
+            (shndx, def_info.symbol.raw.typ)
+        };
+
+        // Move symbols that are in our header (section 0) into the first section, otherwise they'll
+        // show up as undefined.
+        // if matches!(shndx, SymbolSection::Index(0)) {
+        //     shndx = SymbolSection::Index(1);
+        // }
+        // 1-based offsets
+        if shndx.0 >= 0 {
+            shndx = SymbolSection(shndx.0 + 1);
+        }
+
+        // TODO: section_id is also called above
+        let address = u32::try_from(
+            resolution.value()
+                - symbol_writer
+                    .section_layouts
+                    .get(def_info.section_id().unwrap())
+                    .mem_offset,
+        )?;
+
+        // if platform::Symbol::is_tls(&def_info.symbol) {
+        //     address -= layout.tls_start_address();
+        // }
+
+        let entry = symbol_writer
+            .define_symbol(shndx, address, symbol_name.bytes())
+            .with_context(|| format!("Failed to write {}", layout.symbol_debug(symbol_id)))?;
+
+        entry.typ = st_type;
+        entry.storage_class = def_info.symbol.raw.storage_class;
+    }
     Ok(())
 }
 

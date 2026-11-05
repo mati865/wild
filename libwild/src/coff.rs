@@ -558,9 +558,12 @@ impl Platform for Coff {
             .add_symbol(InternalSymDefInfo::new(SymbolPlacement::Undefined, b""))
             .hide();
 
-        symbols
-            .section_start(output_section_id::TEXT, "__ImageBase")
-            .hide();
+        // symbols
+        //     .add_symbol(InternalSymDefInfo::new(
+        //         SymbolPlacement::Undefined,
+        //         b"__ImageBase",
+        //     ))
+        //     .hide();
     }
 
     fn built_in_section_infos<'data>() -> Vec<SectionOutputInfo<'data, Self>> {
@@ -1135,11 +1138,7 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
     }
 
     fn section_alignment(&self, section: &SectionHeader) -> Result<u64> {
-        if section.is_null() {
-            Ok(0)
-        } else {
-            Ok(Alignment::from_exponent(12)?.value())
-        }
+        Ok(section.coff_alignment())
     }
 
     fn relocations(&self, index: SectionIndex, _relocations: &()) -> Result<RelocationList<'data>> {
@@ -1193,7 +1192,7 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
         &self,
         _resources: &layout::GraphResources<'data, '_, Coff>,
     ) -> bool {
-        false
+        true
     }
 
     fn verneed_table(&self) -> Result<VerneedTable<'data>> {
@@ -1307,13 +1306,29 @@ impl platform::SectionFlags for SectionFlags {
 
 impl platform::Symbol for SymtabEntry {
     fn as_common(&self) -> Option<CommonSymbol> {
-        None
+        // TODO: <object::read::coff::symbol::CoffSymbol as
+        // object::read::traits::ObjectSymbol>::section
+        if self.is_aux
+            || self.raw.section_number() != object::pe::IMAGE_SYM_UNDEFINED
+            || self.raw.storage_class() != object::pe::IMAGE_SYM_CLASS_EXTERNAL
+            || self.raw.value() == 0
+        {
+            return None;
+        }
+
+        // This is convoluted compared to ELF, but also what LLD does.
+        let alignment = Alignment::new(self.value().next_power_of_two().min(32)).unwrap();
+        let size = alignment.align_up(self.value());
+        let output_section_id = output_section_id::BSS;
+        let part_id = output_section_id.part_id_with_alignment::<Coff>(alignment);
+
+        Some(CommonSymbol { size, part_id })
     }
 
     fn is_undefined(&self) -> bool {
         !self.is_aux
-            && i32::from(self.raw.section_number.get(LittleEndian) as i16)
-                == object::pe::IMAGE_SYM_UNDEFINED.0
+            && self.raw.section_number() == object::pe::IMAGE_SYM_UNDEFINED
+            && self.raw.value() == 0
     }
 
     fn is_local(&self) -> bool {
@@ -1339,11 +1354,12 @@ impl platform::Symbol for SymtabEntry {
     }
 
     fn value(&self) -> u64 {
-        u64::from(self.raw.value.get(LittleEndian))
+        self.raw.value().into()
     }
 
     fn size(&self) -> u64 {
-        todo!()
+        debug_assert!(self.is_common());
+        self.value()
     }
 
     fn has_name(&self) -> bool {
@@ -1370,8 +1386,7 @@ impl platform::Symbol for SymtabEntry {
     }
 
     fn is_func(&self) -> bool {
-        !self.is_aux
-            && self.raw.typ.get(LittleEndian) == object::pe::IMAGE_SYM_DTYPE_FUNCTION.into()
+        !self.is_aux && self.raw.typ() == object::pe::IMAGE_SYM_DTYPE_FUNCTION.into()
     }
 
     fn is_ifunc(&self) -> bool {
@@ -1603,6 +1618,7 @@ impl std::fmt::Display for ProgramSegmentDef {
 pub(crate) struct BuiltInSectionDetails {
     pub(crate) kind: SectionKind<'static, Coff>,
     pub(crate) section_flags: SectionFlags,
+    // TODO: This is unused.
     pub(crate) link: &'static [OutputSectionId],
     pub(crate) min_alignment: Alignment,
 }
@@ -1677,6 +1693,9 @@ impl Coff {
         };
         defs[output_section_id::BSS.as_usize()] = BuiltInSectionDetails {
             kind: Self::primary_section(".bss".as_bytes()),
+            // TODO
+            // section_flags: object::pe::IMAGE_SCN_CNT_UNINITIALIZED_DATA
+            //     | object::pe::IMAGE_SCN_MEM_READ,
             ..Self::DEFAULT_DEFS
         };
         defs[output_section_id::TLS.as_usize()] = BuiltInSectionDetails {
