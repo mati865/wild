@@ -4431,6 +4431,8 @@ fn build_obj(
 
             if config.platform == PlatformKind::MachO {
                 command.arg("-mmacosx-version-min=11.0");
+            } else if config.platform == PlatformKind::MinGW {
+                command.args(["-ffreestanding", "-mno-stack-arg-probe"]);
             }
         }
         CompilerKind::Rust => {
