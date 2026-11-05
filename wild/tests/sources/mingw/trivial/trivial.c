@@ -1,2 +1,4 @@
+//#Object:runtime.c
+
 int foo = 42;
-int mainCRTStartup() { return foo; }
+int main() { return foo; }
