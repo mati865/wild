@@ -409,14 +409,9 @@ fn write_file<'data, A: Arch<Platform = Coff>>(
 
 struct SymbolTableWriter<'layout, 'out> {
     entries: &'out mut [object::pe::ImageSymbol],
-    // local_entries: &'out mut [elf::SymtabEntry<C>],
-    // global_entries: &'out mut [elf::SymtabEntry<C>],
     output_sections: &'layout OutputSections<'layout, Coff>,
     section_layouts: &'layout OutputSectionMap<OutputRecordLayout>,
     strtab_writer: StrTabWriter<'out>,
-    // is_dynamic: bool,
-    // symtab_shndx_local_entries: Option<&'out mut [u32]>,
-    // symtab_shndx_global_entries: Option<&'out mut [u32]>,
 }
 
 impl<'layout, 'out> SymbolTableWriter<'layout, 'out> {
@@ -427,55 +422,17 @@ impl<'layout, 'out> SymbolTableWriter<'layout, 'out> {
         section_layouts: &'layout OutputSectionMap<OutputRecordLayout>,
     ) -> Self {
         let entries = slice_from_all_bytes_mut(buffers.take(part_id::SYMTAB));
-        // let local_entries =
-        // slice_from_all_bytes_mut(buffers.take(part_id::SYMTAB_LOCAL));
-        // let global_entries =
-        // slice_from_all_bytes_mut(buffers.take(part_id::SYMTAB_GLOBAL));
-        // let symtab_shndx_local_entries =
-        // Some(buffers.take(part_id::SYMTAB_SHNDX_LOCAL))     .and_then(|s|
-        // (!s.is_empty()).then(|| slice_from_all_bytes_mut(s)));
-        // let symtab_shndx_global_entries =
-        // Some(buffers.take(part_id::SYMTAB_SHNDX_GLOBAL))     .and_then(|s|
-        // (!s.is_empty()).then(|| slice_from_all_bytes_mut(s)));
-
         let strings = buffers.take(part_id::STRTAB);
         Self {
             entries,
-            // local_entries,
-            // global_entries,
             output_sections,
             section_layouts,
             strtab_writer: StrTabWriter {
                 next_offset: start_string_offset,
                 out: strings,
             },
-            // is_dynamic: false,
-            // symtab_shndx_local_entries,
-            // symtab_shndx_global_entries,
         }
     }
-
-    // fn new_dynamic(
-    //     string_offset: u32,
-    //     buffers: &mut OutputSectionPartMap<&'out mut [u8]>,
-    //     output_sections: &'layout OutputSections<elf::Elf<C>>,
-    // ) -> Self {
-    //     let global_entries = slice_from_all_bytes_mut(buffers.take(part_id::DYNSYM));
-    //     let strings = slice_from_all_bytes_mut(buffers.take(part_id::DYNSTR));
-    //     Self {
-    //         local_entries: Default::default(),
-    //         global_entries,
-    //         output_sections,
-    //         strtab_writer: crate::elf_writer::StrTabWriter {
-    //             next_offset: string_offset,
-    //             out: strings,
-    //         },
-    //         is_dynamic: true,
-    //         symtab_shndx_local_entries: None,
-    //         symtab_shndx_global_entries: None,
-    //     }
-    // }
-    //
 
     #[inline(always)]
     fn copy_object_symbol(
@@ -489,7 +446,6 @@ impl<'layout, 'out> SymbolTableWriter<'layout, 'out> {
         value: u64,
         flags: ValueFlags,
     ) -> Result {
-        // let entry =
         if let Some(section_index) = object.object.symbol_section(sym, sym_index)? {
             self.copy_symbol_with_section(
                 sym,
@@ -518,12 +474,6 @@ impl<'layout, 'out> SymbolTableWriter<'layout, 'out> {
         } else {
             bail!("Attempted to output a symtab entry with an unexpected section type")
         };
-
-        // if let Some(entry) = entry {
-        //     entry.set_size(crate::elf_writer::object_symbol_size(
-        //         sym, sym_index, object,
-        //     )?)?;
-        // }
 
         Ok(())
     }
@@ -597,23 +547,12 @@ impl<'layout, 'out> SymbolTableWriter<'layout, 'out> {
         value: u32,
         _flags: ValueFlags,
     ) -> Result<&mut object::pe::ImageSymbol> {
-        // let e = LittleEndian;
-        // let is_local = flags.is_symtab_local(sym);
-        // let size = sym.st_size(e).into();
         let entry = self.define_symbol(
-            // is_local,
             // 1-based indexes strike again
             SymbolSection(shndx + 1),
             value,
-            // size,
             name,
         )?;
-        // entry.set_info(sym.st_info());
-        // entry.set_other(sym.st_other());
-        // Fix binding if symbol was downgraded to local by version script
-        // if flags.is_downgraded_to_local() {
-        //     entry.set_binding_and_type(object::elf::STB_LOCAL, sym.st_type());
-        // }
 
         entry.typ = sym.raw.typ;
         entry.storage_class = sym.raw.storage_class;
@@ -634,10 +573,8 @@ impl<'layout, 'out> SymbolTableWriter<'layout, 'out> {
     #[inline(always)]
     fn define_symbol(
         &mut self,
-        // is_local: bool,
         section: SymbolSection,
         value: u32,
-        // size: u64,
         name: &[u8],
     ) -> Result<&mut object::pe::ImageSymbol> {
         let entry = self.entries.split_off_first_mut().with_context(|| {
@@ -659,68 +596,22 @@ impl<'layout, 'out> SymbolTableWriter<'layout, 'out> {
         entry.value.set(LittleEndian, value);
         entry.section_number.set(LittleEndian, section.0 as u16);
 
-        // let (index, shndx) = match section {
-        //     // crate::elf_writer::SymbolSection::Raw(shndx) => (0, shndx),
-        //     SymbolSection(index) => {
-        //         let shndx = SymbolSection(index);
-        //         if shndx == object::elf::SHN_XINDEX {
-        //             (index, shndx)
-        //         } else {
-        //             (0, shndx)
-        //         }
-        //     }
-        // };
-        // if let Some(s) = symtab_shndx_entries {
-        //     *s = index;
-        // }
-        // entry.set_name(string_offset);
-        // entry.set_info(object::elf::SymbolInfo(0));
-        // entry.set_other(object::elf::SymbolOther(0));
-        // entry.set_section(shndx);
-        // entry.set_value(value)?;
-        // entry.set_size(size)?;
         Ok(entry)
     }
 
     /// Verifies that we've used up all the space allocated to this writer. i.e. checks that we
     /// didn't allocate too much or missed writing something that we were supposed to write.
     fn check_exhausted(&self) -> Result {
-        if !self.entries.is_empty()
-            // if !self.local_entries.is_empty()
-            //     || !self.global_entries.is_empty()
-                || !self.strtab_writer.out.is_empty()
-        {
-            //     let table_names = if self.is_dynamic {
-            //         "dynsym/dynstr"
-            //     } else {
-            //         "symtab/strtab"
-            //     };
+        if !self.entries.is_empty() || !self.strtab_writer.out.is_empty() {
             bail!(
                 "Didn't use up all allocated symbol table space. entries={} strings={}",
-                //         "Didn't use up all allocated {table_names} space. local={} global={}
-                // strings={}",
                 self.entries.len(),
-                //         self.local_entries.len(),
-                //         self.global_entries.len(),
                 self.strtab_writer.out.len()
             );
         }
 
         Ok(())
     }
-
-    // /// Returns a new writer that will take responsibility for the first `num_symbols`.
-    // fn take_prefix_global(&mut self, num_symbols: usize, strtab_size: usize) -> Self {
-    //     Self {
-    //         local_entries: &mut [],
-    //         global_entries: self.global_entries.split_off_mut(..num_symbols).unwrap(),
-    //         output_sections: self.output_sections,
-    //         strtab_writer: self.strtab_writer.take_prefix(strtab_size),
-    //         is_dynamic: self.is_dynamic,
-    //         symtab_shndx_local_entries: None,
-    //         symtab_shndx_global_entries: None,
-    //     }
-    // }
 }
 
 fn write_object<'data, A: Arch<Platform = Coff>>(
@@ -1301,7 +1192,7 @@ fn write_prelude<A: Arch<Platform = Coff>>(
     table_writer
         .symbol_table_writer
         .strtab_writer
-        .write_size_header(u32::try_from(strtab_size)?)?;
+        .write_size_header(u32::try_from(strtab_size)?);
 
     Ok(())
 }
@@ -1423,22 +1314,11 @@ impl StrTabWriter<'_> {
         offset
     }
 
-    fn write_size_header(&mut self, total_size: u32) -> Result {
+    fn write_size_header(&mut self, total_size: u32) {
         let header = self.out.split_off_mut(..4).unwrap();
         header.copy_from_slice(&total_size.to_le_bytes());
         self.next_offset += 4;
-        Ok(())
     }
-
-    // fn take_prefix(&mut self, size: usize) -> Self {
-    //     let next_offset = self.next_offset;
-    //     self.next_offset += size as u32;
-    //
-    //     Self {
-    //         next_offset,
-    //         out: self.out.split_off_mut(..size).unwrap(),
-    //     }
-    // }
 }
 
 fn fill_section_padding<A: Arch<Platform = Coff>>(
