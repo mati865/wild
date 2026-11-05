@@ -1356,8 +1356,8 @@ impl platform::Symbol for SymtabEntry {
     }
 
     fn is_default_strippable(&self, name: &[u8]) -> bool {
-        // TODO
-        false
+        // LLD skips symbols with file and section name. We follow that to make our life easier.
+        self.is_aux || self.raw.has_aux_file_name() || self.raw.has_aux_section()
     }
 
     fn debug_string(&self) -> String {
