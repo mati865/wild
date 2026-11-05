@@ -295,27 +295,40 @@ fn populate_nt_header<A: Arch<Platform = Coff>>(
         layout.resolved_entry_symbol_address()?.unwrap(),
         layout,
     ))?;
+    let size_of_code = u32::try_from(
+        layout
+            .section_layouts
+            .get(output_section_id::TEXT)
+            .file_size,
+    )?
+    .into();
+    let size_of_initialized_data = u32::try_from(
+        layout
+            .output_sections
+            .ids_with_info()
+            .map(|(id, sec)| {
+                if sec
+                    .section_attributes
+                    .flags
+                    .contains(object::pe::IMAGE_SCN_CNT_INITIALIZED_DATA)
+                {
+                    layout.section_layouts.get(id).file_size
+                } else {
+                    0
+                }
+            })
+            .sum::<usize>(),
+    )?
+    .into();
+    let size_of_uninitialized_data =
+        u32::try_from(layout.section_layouts.get(output_section_id::BSS).file_size)?.into();
     let optional_header = ImageOptionalHeader64 {
         magic: object::pe::IMAGE_NT_OPTIONAL_HDR64_MAGIC.into(),
         major_linker_version: 14,
         minor_linker_version: 0,
-        size_of_code: Default::default(),
-        // TODO: filter only sections with CODE characteristics
-        size_of_initialized_data: u32::try_from(
-            layout
-                .section_layouts
-                .iter()
-                .map(|(_, sec)| sec.file_size)
-                .sum::<usize>(),
-        )?
-        .into(),
-        size_of_uninitialized_data: u32::try_from(
-            layout
-                .section_layouts
-                .get(output_section_id::TEXT)
-                .file_size,
-        )?
-        .into(),
+        size_of_code,
+        size_of_initialized_data,
+        size_of_uninitialized_data,
         address_of_entry_point: entry_point_address.into(),
         base_of_code: u32::try_from(rva(first_regular_section.mem_offset, layout))?.into(),
         image_base: layout.args().image_base().unwrap().into(),
