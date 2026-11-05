@@ -770,11 +770,7 @@ impl Platform for Coff {
         Ok(())
     }
 
-    fn allocate_prelude(common: &mut layout::CommonGroupState<Self>, symbol_db: &SymbolDb<Self>) {
-        if !symbol_db.args.should_strip_all() {
-            common.allocate(crate::elf::part_id::STRTAB, 4);
-        }
-    }
+    fn allocate_prelude(common: &mut layout::CommonGroupState<Self>, symbol_db: &SymbolDb<Self>) {}
 
     fn finalise_prelude_layout<'data>(
         _prelude: &layout::PreludeLayoutState<Self>,
