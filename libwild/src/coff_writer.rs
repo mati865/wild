@@ -591,7 +591,7 @@ impl<'layout, 'out> SymbolTableWriter<'layout, 'out> {
     #[inline(always)]
     fn copy_symbol_shndx(
         &mut self,
-        _sym: &coff::SymtabEntry,
+        sym: &coff::SymtabEntry,
         name: &[u8],
         shndx: i32,
         value: u32,
@@ -614,6 +614,10 @@ impl<'layout, 'out> SymbolTableWriter<'layout, 'out> {
         // if flags.is_downgraded_to_local() {
         //     entry.set_binding_and_type(object::elf::STB_LOCAL, sym.st_type());
         // }
+
+        entry.typ = sym.raw.typ;
+        entry.storage_class = sym.raw.storage_class;
+        entry.number_of_aux_symbols = 0;
         Ok(entry)
     }
 
@@ -654,9 +658,6 @@ impl<'layout, 'out> SymbolTableWriter<'layout, 'out> {
         entry.name = name_bytes;
         entry.value.set(LittleEndian, value);
         entry.section_number.set(LittleEndian, section.0 as u16);
-        // entry.typ.set(LittleEndian, 0);
-        // entry.storage_class = ;
-        // entry.number_of_aux_symbols = ;
 
         // let (index, shndx) = match section {
         //     // crate::elf_writer::SymbolSection::Raw(shndx) => (0, shndx),
