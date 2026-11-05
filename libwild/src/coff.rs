@@ -1327,12 +1327,7 @@ impl platform::Symbol for SymtabEntry {
     }
 
     fn is_absolute(&self) -> bool {
-        self.is_aux
-            // TODO: This is ugly
-            || i32::from(self.raw.section_number.get(LittleEndian) as i16)
-                == object::pe::IMAGE_SYM_ABSOLUTE.0
-            || i32::from(self.raw.section_number.get(LittleEndian) as i16)
-                == object::pe::IMAGE_SYM_DEBUG.0
+        self.is_aux || self.raw.section_number() == object::pe::IMAGE_SYM_ABSOLUTE
     }
 
     fn is_weak(&self) -> bool {
