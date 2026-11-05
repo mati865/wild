@@ -20,6 +20,7 @@ use crate::layout::FileLayout;
 use crate::layout::HeaderInfo;
 use crate::layout::Layout;
 use crate::layout::ObjectLayout;
+use crate::layout::OutputRecordLayout;
 use crate::layout::PreludeLayout;
 use crate::layout::Resolution;
 use crate::layout::Section;
@@ -140,7 +141,6 @@ struct TableWriter<'layout, 'out> {
     _output_kind: OutputKind,
     symbol_table_writer: SymbolTableWriter<'layout, 'out>,
     section_headers: &'out mut [coff::SectionHeader],
-    _phantom: PhantomData<&'layout ()>,
 }
 
 impl<'layout, 'out> TableWriter<'layout, 'out> {
@@ -149,8 +149,12 @@ impl<'layout, 'out> TableWriter<'layout, 'out> {
         strtab_start_offset: u32,
         buffers: &mut OutputSectionPartMap<&'out mut [u8]>,
     ) -> TableWriter<'layout, 'out> {
-        let symbol_table_writer =
-            SymbolTableWriter::new(strtab_start_offset, buffers, &layout.output_sections);
+        let symbol_table_writer = SymbolTableWriter::new(
+            strtab_start_offset,
+            buffers,
+            &layout.output_sections,
+            &layout.section_layouts,
+        );
 
         Self::new(layout.symbol_db.output_kind, buffers, symbol_table_writer)
     }
@@ -164,7 +168,6 @@ impl<'layout, 'out> TableWriter<'layout, 'out> {
             _output_kind: output_kind,
             symbol_table_writer,
             section_headers: slice_from_all_bytes_mut(buffers.take(part_id::SECTION_HEADERS)),
-            _phantom: Default::default(),
         }
     }
 
@@ -409,11 +412,11 @@ struct SymbolTableWriter<'layout, 'out> {
     // local_entries: &'out mut [elf::SymtabEntry<C>],
     // global_entries: &'out mut [elf::SymtabEntry<C>],
     output_sections: &'layout OutputSections<'layout, Coff>,
+    section_layouts: &'layout OutputSectionMap<OutputRecordLayout>,
     strtab_writer: StrTabWriter<'out>,
     // is_dynamic: bool,
     // symtab_shndx_local_entries: Option<&'out mut [u32]>,
     // symtab_shndx_global_entries: Option<&'out mut [u32]>,
-    _phantom: PhantomData<(&'layout (), &'out ())>,
 }
 
 impl<'layout, 'out> SymbolTableWriter<'layout, 'out> {
@@ -421,6 +424,7 @@ impl<'layout, 'out> SymbolTableWriter<'layout, 'out> {
         start_string_offset: u32,
         buffers: &mut OutputSectionPartMap<&'out mut [u8]>,
         output_sections: &'layout OutputSections<'layout, Coff>,
+        section_layouts: &'layout OutputSectionMap<OutputRecordLayout>,
     ) -> Self {
         let entries = slice_from_all_bytes_mut(buffers.take(part_id::SYMTAB));
         // let local_entries =
@@ -440,6 +444,7 @@ impl<'layout, 'out> SymbolTableWriter<'layout, 'out> {
             // local_entries,
             // global_entries,
             output_sections,
+            section_layouts,
             strtab_writer: StrTabWriter {
                 next_offset: start_string_offset,
                 out: strings,
@@ -447,7 +452,6 @@ impl<'layout, 'out> SymbolTableWriter<'layout, 'out> {
             // is_dynamic: false,
             // symtab_shndx_local_entries,
             // symtab_shndx_global_entries,
-            _phantom: PhantomData,
         }
     }
 
@@ -482,7 +486,7 @@ impl<'layout, 'out> SymbolTableWriter<'layout, 'out> {
         name: &[u8],
         object: &ObjectLayout<Coff>,
         layout: &CoffLayout,
-        value: u32,
+        value: u64,
         flags: ValueFlags,
     ) -> Result {
         // let entry =
@@ -532,7 +536,7 @@ impl<'layout, 'out> SymbolTableWriter<'layout, 'out> {
         name: &[u8],
         object: &ObjectLayout<Coff>,
         layout: &CoffLayout,
-        value: u32,
+        value: u64,
         flags: ValueFlags,
         section_index: object::SectionIndex,
     ) -> Result<Option<&mut object::pe::ImageSymbol>> {
@@ -565,7 +569,7 @@ impl<'layout, 'out> SymbolTableWriter<'layout, 'out> {
         sym: &coff::SymtabEntry,
         name: &[u8],
         output_section_id: OutputSectionId,
-        value: u32,
+        value: u64,
         flags: ValueFlags,
     ) -> Result<&mut object::pe::ImageSymbol> {
         let shndx = self
@@ -579,6 +583,8 @@ impl<'layout, 'out> SymbolTableWriter<'layout, 'out> {
                     output_section_id,
                 )
             })?;
+        // Symbol value is section-relatve
+        let value = u32::try_from(value - self.section_layouts.get(output_section_id).mem_offset)?;
         self.copy_symbol_shndx(sym, name, shndx as i32, value, flags)
     }
 
@@ -611,32 +617,16 @@ impl<'layout, 'out> SymbolTableWriter<'layout, 'out> {
         Ok(entry)
     }
 
+    #[allow(clippy::unused_self)]
     fn copy_absolute_symbol(
-        &mut self,
-        sym: &coff::SymtabEntry,
-        name: &[u8],
+        &self,
+        _sym: &coff::SymtabEntry,
+        _name: &[u8],
         _flags: ValueFlags,
     ) -> Result<&mut object::pe::ImageSymbol> {
-        let value = sym.raw.value.into();
-        let entry = self.define_symbol(object::pe::IMAGE_SYM_DEBUG, value, name)?;
-        // entry.set_info(sym.st_info());
-        // entry.set_other(sym.st_other());
-        // Fix binding if symbol was downgraded to local by version script
-        // if flags.is_downgraded_to_local() {
-        //     entry.set_binding_and_type(object::elf::STB_LOCAL, sym.st_type());
-        // }
-        Ok(entry)
+        bail!("Absolute symbols are not supported currently")
     }
 
-    // #[inline(always)]
-    // fn undefined_symbol(
-    //     &mut self,
-    //     is_local: bool,
-    //     name: &[u8],
-    // ) -> Result<&mut elf::SymtabEntry<C>> {
-    //     self.define_symbol(is_local, object::elf::SHN_UNDEF.into(), 0, 0, Some(name))
-    // }
-    //
     #[inline(always)]
     fn define_symbol(
         &mut self,
@@ -942,7 +932,7 @@ fn write_symbols<'data>(
                 bail!("Missing resolution for {}", layout.symbol_debug(symbol_id));
             };
 
-            let symbol_value = res.value_for_symbol_table() as u32;
+            let symbol_value = res.value_for_symbol_table();
 
             // if sym.st_type() == object::elf::STT_TLS {
             //     symbol_value -= layout.tls_start_address();
