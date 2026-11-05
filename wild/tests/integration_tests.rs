@@ -8401,23 +8401,24 @@ fn available_linkers_for_mac() -> Result<LinkerCatalog> {
 }
 
 fn available_linkers_for_mingw() -> Result<Vec<Linker>> {
+    // BFD support for Windows is *not ideal*, LLD is more sensible reference.
     let mut linkers = vec![Linker::ThirdParty(ThirdPartyLinker {
-        // TODO: Rename to "bfd" and get rid of gcc_name.
-        name: "ld",
-        gcc_name: "bfd",
-        path: find_bin(&["x86_64-w64-mingw32-ld.bfd", "x86_64-w64-mingw32-ld"])?,
-        // cross_paths: find_cross_paths("ld"),
-        cross_paths: HashMap::new(),
+        name: "lld",
+        gcc_name: "lld",
+        path: find_bin(&["ld.lld"])?,
+        cross_paths: find_cross_paths("ld.lld"),
         direct_args: Vec::new(),
         enabled_by_default: true,
     })];
 
-    if let Ok(path) = find_bin(&["ld.lld"]) {
+    if let Ok(path) = find_bin(&["x86_64-w64-mingw32-ld.bfd", "x86_64-w64-mingw32-ld"]) {
         linkers.push(Linker::ThirdParty(ThirdPartyLinker {
-            name: "lld",
-            gcc_name: "lld",
+            // TODO: Rename to "bfd" and get rid of gcc_name.
+            name: "ld",
+            gcc_name: "bfd",
             path,
-            cross_paths: find_cross_paths("ld.lld"),
+            // cross_paths: find_cross_paths("ld"),
+            cross_paths: HashMap::new(),
             direct_args: Vec::new(),
             enabled_by_default: false,
         }));
