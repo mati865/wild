@@ -557,12 +557,9 @@ impl Platform for Coff {
             .add_symbol(InternalSymDefInfo::new(SymbolPlacement::Undefined, b""))
             .hide();
 
-        // symbols
-        //     .add_symbol(InternalSymDefInfo::new(
-        //         SymbolPlacement::Undefined,
-        //         b"__ImageBase",
-        //     ))
-        //     .hide();
+        symbols
+            .section_start(output_section_id::TEXT, "__ImageBase")
+            .hide();
     }
 
     fn built_in_section_infos<'data>() -> Vec<SectionOutputInfo<'data, Self>> {
@@ -765,11 +762,19 @@ impl Platform for Coff {
     }
 
     fn allocate_internal_symbol(
-        _symbol_id: crate::symbol_db::SymbolId,
+        symbol_id: crate::symbol_db::SymbolId,
         _def_info: &InternalSymDefInfo<Self>,
-        _sizes: &mut OutputSectionPartMap<u64>,
-        _symbol_db: &SymbolDb<Self>,
+        sizes: &mut OutputSectionPartMap<u64>,
+        symbol_db: &SymbolDb<Self>,
     ) -> Result {
+        let symtab_part = part_id::SYMTAB;
+        sizes.increment(symtab_part, object::pe::IMAGE_SIZEOF_SYMBOL as u64);
+        let symbol_name = symbol_db.symbol_name(symbol_id)?;
+        let symbol_name = symbol_name.bytes();
+        if symbol_name.len() > 8 {
+            sizes.increment(part_id::STRTAB, symbol_name.len() as u64 + 1);
+        }
+
         Ok(())
     }
 
