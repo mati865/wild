@@ -1,6 +1,5 @@
 use crate::OutputFileData;
 use crate::alignment;
-use crate::alignment::Alignment;
 use crate::bail;
 use crate::coff;
 use crate::coff::Coff;
@@ -339,8 +338,8 @@ fn populate_nt_header<A: Arch<Platform = Coff>>(
         address_of_entry_point: entry_point_address.into(),
         base_of_code: u32::try_from(rva(first_regular_section.mem_offset, layout))?.into(),
         image_base: layout.args().image_base().unwrap().into(),
-        // TODO: Create const
-        section_alignment: u32::try_from(Alignment::from_exponent(12)?.value())?.into(),
+        section_alignment: u32::try_from(layout.args().loadable_segment_alignment().value())?
+            .into(),
         // Wild doesn't support separate memory and file alignment
         file_alignment: u32::try_from(first_regular_section.alignment.value())?.into(),
         major_operating_system_version: 6.into(),
