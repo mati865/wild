@@ -8,11 +8,9 @@ void crt_ctor(void) {}
 extern void (*const ctor_b0)(void);
 extern void (*const ctor_b1)(void);
 
-__attribute__((used, section(".CRT$XCA")))
-void (*const ctor_a)(void) = crt_ctor;
+__attribute__((used, section(".CRT$XCA"))) void (*const ctor_a)(void) = crt_ctor;
 
-__attribute__((used, section(".CRT$XD")))
-void (*const ctor_c)(void) = crt_ctor;
+__attribute__((used, section(".CRT$XD"))) void (*const ctor_c)(void) = crt_ctor;
 
 int main() {
   // Ordered by suffix
