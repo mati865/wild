@@ -1201,6 +1201,12 @@ fn write_prelude<A: Arch<Platform = Coff>>(
         .0;
     populate_nt_header::<A>(layout, &prelude.header_info, nt_header)?;
 
+    // TODO: object doesn't include this in `coff::NtHeader`, so just zero remaining bytes.
+    let remaining_nt_header_bytes =
+        &mut buffers.get_mut(part_id::NT_HEADER)[size_of::<coff::NtHeader>()..];
+    assert!(!remaining_nt_header_bytes.is_empty());
+    remaining_nt_header_bytes.fill(0);
+
     write_section_headers(table_writer, layout)?;
 
     // TODO: add helper
@@ -1421,6 +1427,7 @@ fn write_internal_symbols(
 
         entry.typ = st_type;
         entry.storage_class = def_info.symbol.raw.storage_class;
+        entry.number_of_aux_symbols = 0;
     }
     Ok(())
 }

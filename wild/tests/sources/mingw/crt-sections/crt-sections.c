@@ -1,6 +1,7 @@
 //#Object:runtime.c
 //#Object:ctor0.c
 //#Object:ctor1.c
+//#TestUpdateInPlace:true
 
 void crt_ctor(void) {}
 
