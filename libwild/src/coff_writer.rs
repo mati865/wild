@@ -825,8 +825,8 @@ fn write_symbols<'data>(
         .object
         .symbols
         .iter()
-        .filter(|entry| !entry.is_aux)
         .zip(layout.per_symbol_flags.raw_range(object.symbol_id_range))
+        .filter(|(entry, _)| !entry.is_aux)
     {
         let sym_index = sym.index;
         let symbol_id = object.symbol_id_range.input_to_id(sym_index);
