@@ -737,6 +737,7 @@ impl Platform for Coff {
             .object
             .enumerate_symbols()
             .zip(per_symbol_flags.range(state.symbol_id_range()))
+            .filter(|((_, sym), _)| !sym.is_aux)
         {
             let symbol_id = state.symbol_id_range.input_to_id(sym_index);
             if let Some(info) = SymbolCopyInfo::new(
