@@ -2,7 +2,8 @@
 //#Object:common_section0.c
 //#Object:common_section1.c
 //#Object:runtime.c
-//#ReferenceLinkers:bfd,lld
+// TODO: LLD is bugged, it puts `a` into .data
+//#ReferenceLinkers:bfd
 //#DiffMatchAny:true
 
 int a;
