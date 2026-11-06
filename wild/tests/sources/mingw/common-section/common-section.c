@@ -5,6 +5,7 @@
 // TODO: LLD is bugged, it puts `a` into .data
 //#ReferenceLinkers:bfd
 //#DiffMatchAny:true
+//#TestUpdateInPlace:true
 
 int a;
 extern int data[];
