@@ -1361,7 +1361,7 @@ impl platform::Symbol for SymtabEntry {
     }
 
     fn has_name(&self) -> bool {
-        !self.is_aux
+        !self.is_aux && !self.raw.has_aux_section()
     }
 
     fn is_default_strippable(&self, name: &[u8]) -> bool {
