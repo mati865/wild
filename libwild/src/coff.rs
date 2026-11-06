@@ -823,6 +823,10 @@ impl Platform for Coff {
         rules
     }
 
+    fn init_section_priority(name: &[u8]) -> Option<u16> {
+        init_priority(name)
+    }
+
     fn build_output_order_and_program_segments<'data>(
         custom: &crate::output_section_id::CustomSectionIds,
         output_kind: crate::output_kind::OutputKind,
@@ -916,11 +920,17 @@ impl Platform for Coff {
         name: SectionName<'data>,
         _section: &Self::SectionHeader,
     ) -> SectionIdentity<'data, Self> {
-        SectionIdentity::new(name, ())
+        Self::section_identity_from_name(name).unwrap()
     }
 
     fn section_identity_from_name(name: SectionName) -> Option<SectionIdentity<Self>> {
-        Some(SectionIdentity::new(name, ()))
+        // COFF "grouped sections". The section name is up to the first '$', suffix means the order.
+        let base = match name.bytes().iter().position(|&b| b == b'$') {
+            // TODO: lifetime workaround
+            Some(i) => SectionName(&name.0[..i]),
+            None => name,
+        };
+        Some(SectionIdentity::new(base, ()))
     }
 }
 
@@ -1745,6 +1755,7 @@ impl Resolution<Coff> {
     }
 }
 
+// TODO: Add constants
 const DEFAULT_SECTION_PLACEMENT_RULES: &[SectionRule<'static>] = &[
     SectionRule::prefix_section(".rdata".as_bytes(), output_section_id::RODATA),
     SectionRule::prefix_section(".text".as_bytes(), output_section_id::TEXT),
@@ -1754,10 +1765,38 @@ const DEFAULT_SECTION_PLACEMENT_RULES: &[SectionRule<'static>] = &[
     SectionRule::prefix_section(".pdata".as_bytes(), output_section_id::PDATA),
     SectionRule::prefix_section(".bss".as_bytes(), output_section_id::BSS),
     SectionRule::prefix_section(".tls".as_bytes(), output_section_id::TLS),
+    // TODO: This sets `keep`; verify if that's correct
+    SectionRule::prefix_section_sort(".ctors$".as_bytes(), output_section_id::RODATA),
+    SectionRule::prefix_section_sort(".dtors$".as_bytes(), output_section_id::RODATA),
+    SectionRule::prefix_section_sort(".CRT$".as_bytes(), output_section_id::RODATA),
 ];
 
 const LINKER_MANAGED_SECTION_RULES: &[SectionRule<'static>] =
     &[SectionRule::prefix(b".debug_", SectionRuleOutcome::Debug)];
+
+fn init_priority(name: &[u8]) -> Option<u16> {
+    if let Some(pos) = name.iter().position(|&byte| byte == b'$') {
+        return parse_priority_suffix(&name[pos + 1..]);
+    }
+
+    None
+}
+
+fn parse_priority_suffix(suffix: &[u8]) -> Option<u16> {
+    if suffix.is_empty() || !suffix.iter().all(|b| b.is_ascii()) {
+        return None;
+    }
+
+    // u16 is too short, but 3 letter constructor suffixes by mingw-w64 typically start with `X`. As
+    // long as they all use the same starting letter, we can just use two least significant bytes.
+    // TODO: widen type to u32, or handle it differently
+    match suffix.len() {
+        1 => Some(u16::from(suffix[0])),
+        2 => Some(u16::from_le_bytes([suffix[0], suffix[1]])),
+        3 if suffix[0] == b'X' => Some(u16::from_le_bytes([suffix[1], suffix[2]])),
+        _ => panic!("Invalid priority suffix: {suffix:?}"),
+    }
+}
 
 fn section_headers_size(header_info: &layout::HeaderInfo) -> u64 {
     object::pe::IMAGE_SIZEOF_SECTION_HEADER as u64

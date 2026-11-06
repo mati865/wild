@@ -18,6 +18,7 @@ use crate::file_writer::insufficient_allocation;
 use crate::file_writer::split_buffers_by_alignment;
 use crate::file_writer::split_output_by_group;
 use crate::file_writer::split_output_into_sections;
+use crate::layout::EpilogueLayout;
 use crate::layout::FileLayout;
 use crate::layout::HeaderInfo;
 use crate::layout::InternalSymbols;
@@ -411,9 +412,7 @@ fn write_file<'data, A: Arch<Platform = Coff>>(
         FileLayout::Prelude(s) => {
             write_prelude::<A>(s, buffers, table_writer, layout)?;
         }
-        FileLayout::Epilogue(_s) => {
-            // write_epilogue::<A>(s, buffers, table_writer, layout, trace)?
-        }
+        FileLayout::Epilogue(s) => write_epilogue::<A>(s, buffers, table_writer, layout, trace),
         FileLayout::SyntheticSymbols(s) => {
             write_synthetic_symbols::<A>(s, table_writer, layout)?;
         }
@@ -1308,6 +1307,41 @@ fn write_synthetic_symbols<'data, A: Arch<Platform = Coff>>(
     }
 
     Ok(())
+}
+
+fn write_epilogue<A: Arch<Platform = Coff>>(
+    _epilogue: &EpilogueLayout<Coff>,
+    _buffers: &mut OutputSectionPartMap<&mut [u8]>,
+    _table_writer: &mut TableWriter<'_, '_>,
+    _layout: &CoffLayout,
+    _trace: &TraceOutput,
+) {
+    verbose_timing_phase!("Write epilogue");
+
+    // TODO: LLD has .buildid section header
+    // The actual build-id will be filled in later once all writing has completed. It's important
+    // that we fill it with zeros now however, since if we're overwriting an existing file, there
+    // might be other data there and we don't zero it, then the build ID will be hashing that data.
+    // let build_id_buffer = buffers.get_mut(part_id::NOTE_GNU_BUILD_ID);
+    // build_id_buffer.fill(0);
+
+    // for sorted_section in &layout.script_sorted_sections {
+    //     let FileLayout::Object(object) = layout.file_layout(sorted_section.file_id) else {
+    //         unreachable!();
+    //     };
+    //
+    //     if let SectionSlot::Sorted(sec) =
+    // &object.sections[sorted_section.section_index.as_usize()]     {
+    //         write_object_section::<A>(
+    //             object,
+    //             layout,
+    //             sec.section,
+    //             sorted_section.section_index.into(),
+    //             buffers,
+    //             trace,
+    //         )?;
+    //     }
+    // }
 }
 
 fn write_internal_symbols(
