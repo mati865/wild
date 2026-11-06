@@ -1,4 +1,4 @@
-#![allow(dead_code, unused_variables)]
+#![allow(unused_variables)]
 
 use crate::FileSystem;
 use crate::alignment;
@@ -89,7 +89,6 @@ pub(crate) type DosHeader = object::pe::ImageDosHeader;
 pub(crate) type NtHeader = object::pe::ImageNtHeaders64;
 pub(crate) type CoffFileHeader = object::pe::ImageFileHeader;
 pub(crate) type SectionHeader = object::pe::ImageSectionHeader;
-pub(crate) type SymbolTable<'data> = object::read::coff::SymbolTable<'data>;
 
 // `object` currently skips directory entries, so the sizes are off. This might change in the
 // future.
@@ -233,7 +232,7 @@ impl<'data> platform::RelocationSequence<'data> for RelocationList<'data> {
     type Rel = CoffRelocation;
 
     fn rel_iter(&self) -> impl Iterator<Item = CoffRelocation> {
-        self.0.iter().copied().map(|raw| CoffRelocation { raw })
+        self.0.iter().copied().map(CoffRelocation::new)
     }
 
     fn subsequence(&self, range: std::ops::Range<usize>) -> Self {
@@ -1154,13 +1153,6 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
 
     fn relocations(&self, index: SectionIndex, _relocations: &()) -> Result<RelocationList<'data>> {
         let section = self.section(index)?;
-        // let ptr = section.pointer_to_relocations.get(LittleEndian) as usize;
-        // let count = section.number_of_relocations.get(LittleEndian) as usize;
-        // Ok(RelocationList(
-        //     slice_from_bytes(&self.data[ptr..], count)
-        //         .map_err(|()| todo!())?
-        //         .0,
-        // ))
         let raw = section.coff_relocations(self.data)?;
         Ok(RelocationList(raw))
     }
@@ -1629,8 +1621,6 @@ impl std::fmt::Display for ProgramSegmentDef {
 pub(crate) struct BuiltInSectionDetails {
     pub(crate) kind: SectionKind<'static, Coff>,
     pub(crate) section_flags: SectionFlags,
-    // TODO: This is unused.
-    pub(crate) link: &'static [OutputSectionId],
     pub(crate) min_alignment: Alignment,
 }
 
@@ -1638,7 +1628,6 @@ impl Coff {
     const DEFAULT_DEFS: BuiltInSectionDetails = BuiltInSectionDetails {
         kind: Self::primary_section(&[]),
         section_flags: object::pe::IMAGE_SCN_MEM_READ,
-        link: &[],
         min_alignment: Alignment { exponent: 12 },
     };
 
@@ -1711,12 +1700,10 @@ impl Coff {
         };
         defs[output_section_id::TLS.as_usize()] = BuiltInSectionDetails {
             kind: Self::primary_section(".tls".as_bytes()),
-            link: &[output_section_id::TLS],
             ..Self::DEFAULT_DEFS
         };
         defs[output_section_id::RELOC.as_usize()] = BuiltInSectionDetails {
             kind: Self::primary_section(".reloc".as_bytes()),
-            link: &[output_section_id::RELOC],
             ..Self::DEFAULT_DEFS
         };
 
