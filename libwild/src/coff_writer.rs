@@ -1497,16 +1497,22 @@ fn write_section_headers(table_writer: &mut TableWriter<'_, '_>, layout: &CoffLa
             LittleEndian,
             rva(section_layout.mem_offset, layout).try_into()?,
         );
-        entry.size_of_raw_data.set(
-            LittleEndian,
-            section_layout
-                .alignment
-                .align_up(section_layout.file_size as u64)
-                .try_into()?,
-        );
+        let (size_of_raw_data, pointer_to_raw_data) =
+            if output_sections.has_data_in_file(section_id) {
+                (
+                    section_layout
+                        .alignment
+                        .align_up(section_layout.file_size as u64)
+                        .try_into()?,
+                    section_layout.file_offset.try_into()?,
+                )
+            } else {
+                (0, 0)
+            };
+        entry.size_of_raw_data.set(LittleEndian, size_of_raw_data);
         entry
             .pointer_to_raw_data
-            .set(LittleEndian, section_layout.file_offset.try_into()?);
+            .set(LittleEndian, pointer_to_raw_data);
         entry
             .pointer_to_relocations
             .set(LittleEndian, Default::default());
