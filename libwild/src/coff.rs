@@ -82,6 +82,7 @@ pub(crate) struct SymtabEntry {
     pub(crate) raw: object::pe::ImageSymbol,
     pub(crate) index: SymbolIndex,
     pub(crate) is_aux: bool,
+    is_hidden: bool,
 }
 
 // TODO: Figure out naming
@@ -565,7 +566,10 @@ impl Platform for Coff {
             .hide();
 
         symbols
-            .section_start(output_section_id::TEXT, "__ImageBase")
+            .add_symbol(InternalSymDefInfo::new(
+                SymbolPlacement::LoadBaseAddress,
+                b"__ImageBase",
+            ))
             .hide();
     }
 
@@ -771,10 +775,13 @@ impl Platform for Coff {
 
     fn allocate_internal_symbol(
         symbol_id: crate::symbol_db::SymbolId,
-        _def_info: &InternalSymDefInfo<Self>,
+        def_info: &InternalSymDefInfo<Self>,
         sizes: &mut OutputSectionPartMap<u64>,
         symbol_db: &SymbolDb<Self>,
     ) -> Result {
+        if def_info.symbol.is_hidden() {
+            return Ok(());
+        }
         let symtab_part = part_id::SYMTAB;
         sizes.increment(symtab_part, object::pe::IMAGE_SIZEOF_SYMBOL as u64);
         let symbol_name = symbol_db.symbol_name(symbol_id)?;
@@ -897,6 +904,7 @@ impl Platform for Coff {
             },
             index: SymbolIndex(0),
             is_aux: false,
+            is_hidden: false,
         }
     }
 
@@ -967,6 +975,7 @@ impl<'data> File<'data> {
                     raw,
                     index,
                     is_aux: true,
+                    is_hidden: false,
                 });
             } else {
                 aux_remaining = raw.number_of_aux_symbols;
@@ -974,6 +983,7 @@ impl<'data> File<'data> {
                     raw,
                     index,
                     is_aux: false,
+                    is_hidden: false,
                 });
             }
         }
@@ -1413,8 +1423,7 @@ impl platform::Symbol for SymtabEntry {
     }
 
     fn is_hidden(&self) -> bool {
-        // TODO
-        false
+        !self.is_aux && self.is_hidden
     }
 
     fn is_gnu_unique(&self) -> bool {
@@ -1422,8 +1431,8 @@ impl platform::Symbol for SymtabEntry {
         false
     }
 
-    fn with_hidden(self, _hidden: bool) -> Self {
-        // TODO: ?
+    fn with_hidden(mut self, hidden: bool) -> Self {
+        self.is_hidden = hidden;
         self
     }
 }

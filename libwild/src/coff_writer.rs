@@ -1355,7 +1355,7 @@ fn write_internal_symbols(
     symbol_writer: &mut SymbolTableWriter<'_, '_>,
 ) -> Result {
     for (local_index, def_info) in internal_symbols.symbol_definitions.iter().enumerate() {
-        if def_info.name.is_empty() {
+        if def_info.name.is_empty() || def_info.symbol.is_hidden() {
             continue;
         }
         let symbol_id = internal_symbols.start_symbol_id.add_usize(local_index);

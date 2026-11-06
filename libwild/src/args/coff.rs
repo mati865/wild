@@ -194,6 +194,11 @@ impl platform::Args for CoffArgs {
         }
     }
 
+    fn allow_multiple_definitions(&self) -> bool {
+        // TODO: Wire up COMDATs
+        true
+    }
+
     fn image_base(&self) -> Option<u64> {
         // TODO: needs to be configurable
         Some(0x1_4000_0000)
