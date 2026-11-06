@@ -252,6 +252,7 @@ impl Platform for Coff {
     const DATA_SECTION_ID: Option<OutputSectionId> = Some(output_section_id::DATA);
     const RODATA_SECTION_ID: Option<OutputSectionId> = Some(output_section_id::RODATA);
     const STRTAB_SECTION_ID: Option<OutputSectionId> = Some(output_section_id::STRTAB);
+    const BSS_SECTION_ID: Option<OutputSectionId> = Some(output_section_id::BSS);
 
     const CUSTOM_PHDR_EXCLUDED_SECTION_IDS: &'static [OutputSectionId] = &[
         output_section_id::DOS_STUB,
