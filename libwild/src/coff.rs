@@ -117,6 +117,9 @@ enum SinglePartSectionId {
     DosStub = crate::output_section_id::NUM_COMMON_SINGLE_PART_SECTIONS,
     NtHeader,
     SectionHeaders,
+
+    // TODO: these two are wrong, they must be placed after all other sections but this is not
+    // doable right now
     Symtab,
     Strtab,
 

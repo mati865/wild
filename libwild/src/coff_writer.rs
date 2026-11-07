@@ -362,6 +362,7 @@ fn populate_nt_header<A: Arch<Platform = Coff>>(
         )?
         .into(),
         size_of_headers: u32::try_from(
+            // TODO: this is wrong, the headers are not aligned like that right now
             first_regular_section.alignment.align_up(
                 (layout
                     .section_layouts
@@ -1182,15 +1183,13 @@ fn write_prelude<A: Arch<Platform = Coff>>(
     verbose_timing_phase!("Write prelude");
 
     let dos_header: &mut DosHeader = from_bytes_mut(buffers.get_mut(crate::part_id::FILE_HEADER))
-        .ok()
-        .context("Invalid DOS header allocation")?
+        .map_err(|_| insufficient_allocation("DOS header"))?
         .0;
     populate_dos_header::<A>(layout, dos_header)?;
 
     let dos_stub: &mut [u8; coff::DOS_STUB.len()] =
         from_bytes_mut(buffers.get_mut(part_id::DOS_STUB))
-            .ok()
-            .context("Invalid DOS header allocation")?
+            .map_err(|_| insufficient_allocation("DOS stub"))?
             .0;
     write_dos_stub::<A>(dos_stub);
 
