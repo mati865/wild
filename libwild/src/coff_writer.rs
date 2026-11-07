@@ -293,7 +293,7 @@ fn populate_nt_header<A: Arch<Platform = Coff>>(
                 / object::pe::IMAGE_SIZEOF_SYMBOL,
         )?
         .into(),
-        size_of_optional_header: coff::SIZE_OF_OPTIONAL_HEADER64.into(),
+        size_of_optional_header: (coff::SIZE_OF_OPTIONAL_HEADER64 as u16).into(),
         characteristics: characteristics.into(),
     };
     // TODO: Skips a lot of logic compared to ELF one
@@ -363,18 +363,18 @@ fn populate_nt_header<A: Arch<Platform = Coff>>(
         .into(),
         size_of_headers: u32::try_from(
             first_regular_section.alignment.align_up(
-                layout
+                (layout
                     .section_layouts
                     .get(output_section_id::DOS_STUB)
-                    .mem_size
+                    .file_size
                     + layout
                         .section_layouts
                         .get(output_section_id::NT_HEADER)
-                        .mem_size
+                        .file_size
                     + layout
                         .section_layouts
                         .get(output_section_id::SECTION_HEADERS)
-                        .mem_size,
+                        .file_size) as u64,
             ),
         )?
         .into(),
@@ -1194,17 +1194,12 @@ fn write_prelude<A: Arch<Platform = Coff>>(
             .0;
     write_dos_stub::<A>(dos_stub);
 
-    let nt_header: &mut coff::NtHeader = from_bytes_mut(buffers.get_mut(part_id::NT_HEADER))
-        .ok()
-        .context("Invalid NT header allocation")?
-        .0;
+    let (nt_header, data_directory_bytes): (&mut coff::NtHeader, _) =
+        from_bytes_mut(buffers.get_mut(part_id::NT_HEADER))
+            .map_err(|_| insufficient_allocation("NT header"))?;
     populate_nt_header::<A>(layout, &prelude.header_info, nt_header)?;
-
-    // TODO: object doesn't include this in `coff::NtHeader`, so just zero remaining bytes.
-    let remaining_nt_header_bytes =
-        &mut buffers.get_mut(part_id::NT_HEADER)[size_of::<coff::NtHeader>()..];
-    assert!(!remaining_nt_header_bytes.is_empty());
-    remaining_nt_header_bytes.fill(0);
+    // TODO: object doesn't include this in `coff::NtHeader`, so just wipe remaining bytes for now.
+    data_directory_bytes.fill(0);
 
     write_section_headers(table_writer, layout)?;
 

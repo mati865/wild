@@ -94,11 +94,19 @@ pub(crate) type SectionHeader = object::pe::ImageSectionHeader;
 
 // `object` currently skips directory entries, so the sizes are off. This might change in the
 // future.
-pub(crate) const SIZE_OF_NT_HEADERS64: usize = size_of::<NtHeader>()
-    + object::pe::IMAGE_NUMBEROF_DIRECTORY_ENTRIES * size_of::<object::pe::ImageDataDirectory>();
-const _: () = assert!(SIZE_OF_NT_HEADERS64 == 264);
-pub(crate) const SIZE_OF_OPTIONAL_HEADER64: u16 = 240;
-const _: () = assert!(SIZE_OF_NT_HEADERS64 != size_of::<object::pe::ImageOptionalHeader64>());
+pub(crate) const SIZE_OF_DIRECTORY_ENTRIES: usize =
+    object::pe::IMAGE_NUMBEROF_DIRECTORY_ENTRIES * size_of::<object::pe::ImageDataDirectory>();
+const _: () = assert!(SIZE_OF_DIRECTORY_ENTRIES == 128);
+pub(crate) const SIZE_OF_OPTIONAL_HEADER64: usize =
+    size_of::<object::pe::ImageOptionalHeader64>() + SIZE_OF_DIRECTORY_ENTRIES;
+const _: () = assert!(
+    SIZE_OF_OPTIONAL_HEADER64
+        == size_of::<object::pe::ImageOptionalHeader64>() + SIZE_OF_DIRECTORY_ENTRIES
+);
+pub(crate) const SIZE_OF_NT_HEADERS64: usize = size_of::<NtHeader>() + SIZE_OF_DIRECTORY_ENTRIES;
+const _: () = assert!(
+    SIZE_OF_NT_HEADERS64 == size_of::<object::pe::ImageNtHeaders64>() + SIZE_OF_DIRECTORY_ENTRIES
+);
 
 #[derive(Debug, Copy, Clone, Default)]
 pub(crate) struct Coff;
