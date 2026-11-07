@@ -763,7 +763,7 @@ impl<'data, P: Platform> OutputSections<'data, P> {
 
         let section_id = self.get_or_create_named_section(
             custom.identity,
-            custom.alignment,
+            custom.alignment.max(P::CUSTOM_SECTION_MIN_ALIGNMENT),
             None,
             location_info.as_ref(),
             None,

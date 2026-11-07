@@ -1,6 +1,7 @@
 use crate::FileSystem;
 use crate::OutputKind;
 use crate::Result;
+use crate::alignment;
 use crate::alignment::Alignment;
 use crate::arch::Architecture;
 use crate::bail;
@@ -456,6 +457,8 @@ pub(crate) trait Platform:
     const PACKED_SECTION_IDS: &'static [OutputSectionId] = &[];
     const VERIFY_IGNORE_SECTION_IDS: &'static [OutputSectionId] = &[];
     const VERIFY_IGNORE_ALIGNMENT_SECTION_IDS: &'static [OutputSectionId] = &[];
+
+    const CUSTOM_SECTION_MIN_ALIGNMENT: Alignment = alignment::MIN;
 
     fn single_part_id(section_id: OutputSectionId) -> Option<PartId> {
         (section_id.as_u32() < crate::output_section_id::regular_section_base::<Self>().as_u32())

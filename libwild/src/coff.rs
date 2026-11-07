@@ -3,6 +3,7 @@
 use crate::FileSystem;
 use crate::alignment;
 use crate::alignment::Alignment;
+use crate::alignment::PE_SECTION_ALIGNMENT;
 use crate::arch::Architecture;
 use crate::args::coff::CoffArgs;
 use crate::bail;
@@ -259,6 +260,8 @@ impl Platform for Coff {
     const RODATA_SECTION_ID: Option<OutputSectionId> = Some(output_section_id::RODATA);
     const STRTAB_SECTION_ID: Option<OutputSectionId> = Some(output_section_id::STRTAB);
     const BSS_SECTION_ID: Option<OutputSectionId> = Some(output_section_id::BSS);
+
+    const CUSTOM_SECTION_MIN_ALIGNMENT: Alignment = alignment::PE_SECTION_ALIGNMENT;
 
     const CUSTOM_PHDR_EXCLUDED_SECTION_IDS: &'static [OutputSectionId] = &[
         output_section_id::DOS_STUB,
@@ -1653,7 +1656,7 @@ impl Coff {
     const DEFAULT_DEFS: BuiltInSectionDetails = BuiltInSectionDetails {
         kind: Self::primary_section(&[]),
         section_flags: object::pe::IMAGE_SCN_MEM_READ,
-        min_alignment: Alignment { exponent: 12 },
+        min_alignment: PE_SECTION_ALIGNMENT,
     };
 
     const fn primary_section(name: &'static [u8]) -> SectionKind<'static, Coff> {
