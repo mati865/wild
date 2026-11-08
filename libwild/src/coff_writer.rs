@@ -1198,7 +1198,36 @@ fn write_prelude<A: Arch<Platform = Coff>>(
             .map_err(|_| insufficient_allocation("NT header"))?;
     populate_nt_header::<A>(layout, &prelude.header_info, nt_header)?;
     // TODO: object doesn't include this in `coff::NtHeader`, so just wipe remaining bytes for now.
-    data_directory_bytes.fill(0);
+    let data_directory: &mut [object::pe::ImageDataDirectory] =
+        slice_from_all_bytes_mut(data_directory_bytes);
+    for (i, data_directory) in data_directory.iter_mut().enumerate() {
+        let (mut address, mut size) = (0, 0);
+        if i == 1 {
+            if let Some(section) = layout
+                .output_sections
+                .init_fini_by_priority
+                .get(&(output_section_id::IDATA, b'2'.into()))
+                .map(|&id| layout.section_layouts.get(id))
+            {
+                address = rva(section.mem_offset, layout).try_into()?;
+                size = section.mem_size;
+            }
+        } else if i == 12 {
+            if let Some(section) = layout
+                .output_sections
+                .init_fini_by_priority
+                .get(&(output_section_id::IDATA, b'5'.into()))
+                .map(|&id| layout.section_layouts.get(id))
+            {
+                address = rva(section.mem_offset, layout).try_into()?;
+                size = section.mem_size;
+            }
+        }
+        data_directory
+            .virtual_address
+            .set(LittleEndian, u32::try_from(address)?);
+        data_directory.size.set(LittleEndian, u32::try_from(size)?);
+    }
 
     write_section_headers(table_writer, layout)?;
 

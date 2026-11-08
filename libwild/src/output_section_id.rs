@@ -109,7 +109,8 @@ pub(crate) struct OutputSections<'data, P: Platform> {
 
     custom_by_identity: HashMap<SectionIdentity<'data, P>, OutputSectionId>,
 
-    init_fini_by_priority: HashMap<(OutputSectionId, u16), OutputSectionId>,
+    // TODO: hacked around, do it properly
+    pub(crate) init_fini_by_priority: HashMap<(OutputSectionId, u16), OutputSectionId>,
 
     rosegment: bool,
 
