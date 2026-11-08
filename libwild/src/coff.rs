@@ -881,8 +881,6 @@ impl Platform for Coff {
         builder.add_section(output_section_id::DOS_STUB);
         builder.add_section(output_section_id::NT_HEADER);
         builder.add_section(output_section_id::SECTION_HEADERS);
-        builder.add_section(output_section_id::SYMTAB);
-        builder.add_section(output_section_id::STRTAB);
         builder.add_section(output_section_id::TEXT);
         builder.add_section(output_section_id::RODATA);
         builder.add_sections(&custom.ro);
@@ -902,6 +900,9 @@ impl Platform for Coff {
         builder.add_section(output_section_id::TLS);
 
         builder.add_sections(&custom.nonalloc);
+
+        builder.add_section(output_section_id::SYMTAB);
+        builder.add_section(output_section_id::STRTAB);
 
         builder.build()
     }
@@ -1332,11 +1333,11 @@ impl platform::SectionType for SectionType {
     }
 
     fn is_symtab(&self) -> bool {
-        false
+        todo!()
     }
 
     fn is_strtab(&self) -> bool {
-        false
+        todo!()
     }
 }
 
