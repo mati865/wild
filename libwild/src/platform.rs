@@ -969,6 +969,18 @@ pub(crate) trait Platform:
         None
     }
 
+    /// Returns whether input sections with the specified name should have their layout order
+    /// determined by the identity of their input file (library path, then archive member name)
+    /// in addition to the input section name.
+    ///
+    /// Used by PE to order `.idata$` chunks from GNU (dlltool) import libraries: within each
+    /// import library, the head member (with its zero-length `.idata$4`/`.idata$5` marker
+    /// sections) must be laid out before the stub members, and the tail member (with the
+    /// terminating null entries) last, regardless of the member order within the archive.
+    fn sorts_section_by_input_identity(_section_name: &[u8]) -> bool {
+        false
+    }
+
     /// Check that there aren't any platform-specific symbols defined that shouldn't be.
     fn validate_input_symbols(_symbol_db: &SymbolDb<Self>) -> Result {
         Ok(())

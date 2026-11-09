@@ -7243,9 +7243,16 @@ fn harvest_and_sort_script_sections<'data, P: Platform>(
                         let part_id =
                             obj.section_part_id(sorted_section.index.into(), section_part_ids);
                         let capacity = sec.section.capacity(part_id, output_sections);
+                        let input = &obj.input;
                         sections_out.push((
                             obj.object
                                 .section_name(sorted_section.index.into())
+                                .unwrap_or_default(),
+                            input.file.filename.as_os_str().as_encoded_bytes(),
+                            input
+                                .entry
+                                .as_ref()
+                                .map(|entry| entry.identifier.as_slice())
                                 .unwrap_or_default(),
                             InputSortedSection {
                                 file_id: obj.file_id,
@@ -7261,10 +7268,19 @@ fn harvest_and_sort_script_sections<'data, P: Platform>(
         }
     }
 
-    sections_out.sort_by_key(|a| a.0);
+    // Sort by input section name, then, for platforms that request it, by library path and
+    // archive member name. The latter is needed by PE for GNU (dlltool) import libraries, where
+    // member order within the archive doesn't put the head member first or the tail member last.
+    // For ELF, ties on section name keep input order, as with GNU ld.
+    sections_out.sort_by_key(|(name, lib, member, _)| {
+        (
+            *name,
+            P::sorts_section_by_input_identity(name).then(|| (*lib, *member)),
+        )
+    });
     sections_out
         .into_iter()
-        .map(|(_, harvested)| harvested)
+        .map(|(_, _, _, harvested)| harvested)
         .collect()
 }
 

@@ -1544,6 +1544,10 @@ fn apply_init_fini_secondaries<'data, P: Platform>(
 
         match slot {
             SectionSlot::Unloaded(_) | SectionSlot::MustLoad(_) => {}
+            // A sorted section may still need its init/fini secondary. This happens on PE for
+            // `.idata$` sections, which are both sorted by input identity and placed into a
+            // digit-secondary of the primary import section.
+            SectionSlot::Sorted(_) => {}
             _ => continue,
         }
 
@@ -1748,6 +1752,7 @@ fn resolve_section<'data, P: Platform>(
             must_load |= output_info.must_keep;
 
             unloaded_section = UnloadedSection::new();
+            unloaded_section.needs_sorting = P::sorts_section_by_input_identity(section_name);
         }
         SectionRuleOutcome::Discard => {
             return Ok((SectionSlot::Discard, crate::part_id::UNMAPPED));

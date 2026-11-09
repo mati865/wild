@@ -902,6 +902,10 @@ impl Platform for Coff {
         init_priority(name)
     }
 
+    fn sorts_section_by_input_identity(section_name: &[u8]) -> bool {
+        section_name.starts_with(b".idata$")
+    }
+
     fn build_output_order_and_program_segments<'data>(
         custom: &crate::output_section_id::CustomSectionIds,
         output_kind: crate::output_kind::OutputKind,

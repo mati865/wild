@@ -412,7 +412,7 @@ fn write_file<'data, A: Arch<Platform = Coff>>(
         FileLayout::Prelude(s) => {
             write_prelude::<A>(s, buffers, table_writer, layout)?;
         }
-        FileLayout::Epilogue(s) => write_epilogue::<A>(s, buffers, table_writer, layout, trace),
+        FileLayout::Epilogue(s) => write_epilogue::<A>(s, buffers, table_writer, layout, trace)?,
         FileLayout::SyntheticSymbols(s) => {
             write_synthetic_symbols::<A>(s, table_writer, layout)?;
         }
@@ -1345,11 +1345,11 @@ fn write_synthetic_symbols<'data, A: Arch<Platform = Coff>>(
 
 fn write_epilogue<A: Arch<Platform = Coff>>(
     _epilogue: &EpilogueLayout<Coff>,
-    _buffers: &mut OutputSectionPartMap<&mut [u8]>,
+    buffers: &mut OutputSectionPartMap<&mut [u8]>,
     _table_writer: &mut TableWriter<'_, '_>,
-    _layout: &CoffLayout,
-    _trace: &TraceOutput,
-) {
+    layout: &CoffLayout<'_>,
+    trace: &TraceOutput,
+) -> Result {
     verbose_timing_phase!("Write epilogue");
 
     // TODO: LLD has .buildid section header
@@ -1359,23 +1359,25 @@ fn write_epilogue<A: Arch<Platform = Coff>>(
     // let build_id_buffer = buffers.get_mut(part_id::NOTE_GNU_BUILD_ID);
     // build_id_buffer.fill(0);
 
-    // for sorted_section in &layout.script_sorted_sections {
-    //     let FileLayout::Object(object) = layout.file_layout(sorted_section.file_id) else {
-    //         unreachable!();
-    //     };
-    //
-    //     if let SectionSlot::Sorted(sec) =
-    // &object.sections[sorted_section.section_index.as_usize()]     {
-    //         write_object_section::<A>(
-    //             object,
-    //             layout,
-    //             sec.section,
-    //             sorted_section.section_index.into(),
-    //             buffers,
-    //             trace,
-    //         )?;
-    //     }
-    // }
+    for sorted_section in &layout.script_sorted_sections {
+        let FileLayout::Object(object) = layout.file_layout(sorted_section.file_id) else {
+            unreachable!();
+        };
+
+        if let SectionSlot::Sorted(sec) = &object.sections[sorted_section.section_index.as_usize()]
+        {
+            write_object_section::<A>(
+                object,
+                layout,
+                sec.section,
+                sorted_section.section_index.into(),
+                buffers,
+                trace,
+            )?;
+        }
+    }
+
+    Ok(())
 }
 
 fn write_internal_symbols(
