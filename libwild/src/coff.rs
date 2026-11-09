@@ -724,14 +724,23 @@ impl Platform for Coff {
             parse_priority_suffix(b"2").unwrap(),
         )) {
             let range = section_id.part_id_range::<Self>();
+            // Sections that are counted after the fact rather than allocated during section
+            // loading (e.g. sorted sections, whose sizes arrive via `extra_sizes`) contribute
+            // nothing to `current_sizes`, so consider both.
             let last_part = (range.start.as_usize()..range.end.as_usize())
                 .rev()
-                .find(|&i| current_sizes.get(PartId::from_usize(i)) != 0)
-                .map(PartId::from_usize);
-            if let Some(part) = last_part {
-                extra_sizes.increment(part, 20);
-                state.idata2_part_id = Some(part);
-            }
+                .find(|&i| {
+                    let part = PartId::from_usize(i);
+                    current_sizes.get(part) + extra_sizes.get(part) != 0
+                });
+            let Some(part) = last_part.map(PartId::from_usize) else {
+                return Ok(());
+            };
+            // The null terminator must come after all the `.idata$2` chunks with content, which
+            // either occupy `current_sizes` or arrive via `extra_sizes`, so the +20 goes at the
+            // part end.
+            extra_sizes.increment(part, 20);
+            state.idata2_part_id = Some(part);
         }
         Ok(())
     }
