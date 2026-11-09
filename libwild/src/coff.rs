@@ -719,10 +719,10 @@ impl Platform for Coff {
         _args: &CoffArgs,
     ) -> Result {
         // TODO: Hack: .idata$2 requires additional 20 null bytes at the end.
-        if let Some(section_id) = output_sections
-            .init_fini_by_priority
-            .get(&(output_section_id::IDATA, u16::from(b'2')))
-        {
+        if let Some(section_id) = output_sections.init_fini_by_priority.get(&(
+            output_section_id::IDATA,
+            parse_priority_suffix(b"2").unwrap(),
+        )) {
             let range = section_id.part_id_range::<Self>();
             let last_part = (range.start.as_usize()..range.end.as_usize())
                 .rev()
@@ -1863,18 +1863,20 @@ fn init_priority(name: &[u8]) -> Option<u16> {
     None
 }
 
-fn parse_priority_suffix(suffix: &[u8]) -> Option<u16> {
+pub(crate) fn parse_priority_suffix(suffix: &[u8]) -> Option<u16> {
     if suffix.is_empty() || !suffix.iter().all(|b| b.is_ascii()) {
         return None;
     }
 
     // u16 is too short, but 3 letter constructor suffixes by mingw-w64 typically start with `X`. As
-    // long as they all use the same starting letter, we can just use two least significant bytes.
-    // TODO: widen type to u32, or handle it differently
+    // long as they all use the same starting letter, we can just use their two remaining bytes.
+    // The bytes are compared in big-endian order, so that ordering the resulting priorities is
+    // equivalent to sorting the suffixes lexicographically, which is what object-section ordering
+    // by `$`-suffix means (e.g. `.CRT$XIA` < `.CRT$XIZ` < `.CRT$XLA`).
     match suffix.len() {
-        1 => Some(u16::from(suffix[0])),
-        2 => Some(u16::from_le_bytes([suffix[0], suffix[1]])),
-        3 if suffix[0] == b'X' => Some(u16::from_le_bytes([suffix[1], suffix[2]])),
+        1 => Some(u16::from_be_bytes([suffix[0], 0])),
+        2 => Some(u16::from_be_bytes([suffix[0], suffix[1]])),
+        3 if suffix[0] == b'X' => Some(u16::from_be_bytes([suffix[1], suffix[2]])),
         _ => panic!("Invalid priority suffix: {suffix:?}"),
     }
 }

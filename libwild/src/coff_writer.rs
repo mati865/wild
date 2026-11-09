@@ -1206,7 +1206,10 @@ fn write_prelude<A: Arch<Platform = Coff>>(
             if let Some(section) = layout
                 .output_sections
                 .init_fini_by_priority
-                .get(&(output_section_id::IDATA, b'2'.into()))
+                .get(&(
+                    output_section_id::IDATA,
+                    crate::coff::parse_priority_suffix(b"2").unwrap(),
+                ))
                 .map(|&id| layout.section_layouts.get(id))
             {
                 address = rva(section.mem_offset, layout).try_into()?;
@@ -1216,7 +1219,10 @@ fn write_prelude<A: Arch<Platform = Coff>>(
             if let Some(section) = layout
                 .output_sections
                 .init_fini_by_priority
-                .get(&(output_section_id::IDATA, b'5'.into()))
+                .get(&(
+                    output_section_id::IDATA,
+                    crate::coff::parse_priority_suffix(b"5").unwrap(),
+                ))
                 .map(|&id| layout.section_layouts.get(id))
             {
                 address = rva(section.mem_offset, layout).try_into()?;
