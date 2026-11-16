@@ -10,6 +10,7 @@ use crate::file_kind::FileKind;
 use crate::input_data::InputBytes;
 use crate::input_data::InputRef;
 use crate::layout;
+use crate::layout::DynamicSymbolDefinition;
 use crate::layout::HandlerData as _;
 use crate::layout::Resolution;
 use crate::layout::SectionGcUnit;
@@ -131,6 +132,10 @@ enum RegularSectionId {
     Rdata,
     Data,
     Bss,
+    // TODO: Merge with RDATA like LLD
+    Idata,
+
+    Tls,
 
     // Must be last.
     Count,
@@ -168,6 +173,9 @@ pub(crate) mod output_section_id {
     pub(crate) const RDATA: OutputSectionId = RegularSectionId::Rdata.output_section_id();
     pub(crate) const DATA: OutputSectionId = RegularSectionId::Data.output_section_id();
     pub(crate) const BSS: OutputSectionId = RegularSectionId::Bss.output_section_id();
+
+    pub(crate) const IDATA: OutputSectionId = RegularSectionId::Idata.output_section_id();
+    pub(crate) const TLS: OutputSectionId = RegularSectionId::Tls.output_section_id();
 }
 
 #[derive(derive_more::Debug)]
@@ -294,7 +302,7 @@ impl Platform for Coff {
     type RelocationInfo = RelocationType;
     type NonAddressableIndexes = NonAddressableIndexes;
     type NonAddressableCounts = ();
-    type EpilogueLayoutExt = ();
+    type EpilogueLayoutExt = EpilogueLayoutExt;
     type GroupLayoutExt = ();
     type CommonGroupStateExt = ();
     type StubLibraryLayoutStateExt = ();
@@ -345,6 +353,7 @@ impl Platform for Coff {
     }
 
     fn is_zero_sized_section_content(_section_id: OutputSectionId) -> bool {
+        // TODO
         false
     }
 
@@ -632,6 +641,9 @@ impl Platform for Coff {
         _dynamic_symbol_definitions: &mut [layout::DynamicSymbolDefinition<'data, Self>],
         _group_states: &[layout::GroupState<'data, Self>],
     ) -> Self::EpilogueLayoutExt {
+        Self::EpilogueLayoutExt {
+            idata2_part_id: None,
+        }
     }
 
     fn apply_non_addressable_indexes_epilogue(
@@ -664,13 +676,46 @@ impl Platform for Coff {
     }
 
     fn finalise_layout_epilogue<'data>(
-        _epilogue_state: &mut Self::EpilogueLayoutExt,
-        _memory_offsets: &mut OutputSectionPartMap<u64>,
+        epilogue_state: &mut Self::EpilogueLayoutExt,
+        memory_offsets: &mut OutputSectionPartMap<u64>,
         _symbol_db: &SymbolDb<'data, Self>,
         _common_state: &Self::LayoutExt<'data>,
         _dynsym_start_index: u32,
         _dynamic_symbol_defs: &[layout::DynamicSymbolDefinition<Self>],
     ) -> Result {
+        if let Some(idata2_part_id) = epilogue_state.idata2_part_id {
+            memory_offsets.increment(idata2_part_id, 20);
+        }
+        Ok(())
+    }
+
+    fn apply_late_size_adjustments_epilogue(
+        state: &mut Self::EpilogueLayoutExt,
+        current_sizes: &OutputSectionPartMap<u64>,
+        extra_sizes: &mut OutputSectionPartMap<u64>,
+        output_sections: &crate::output_section_id::OutputSections<Self>,
+        _dynamic_symbol_defs: &[DynamicSymbolDefinition<Self>],
+        _format_specific: &Self::FinaliseSizesExt<'_>,
+        _args: &CoffArgs,
+    ) -> Result {
+        // TODO: Hack: .idata$2 requires additional 20 null bytes after the last entry.
+        if let Some(section_id) = output_sections.init_fini_by_priority.get(&(
+            output_section_id::IDATA,
+            parse_priority_suffix(b"2").unwrap(),
+        )) {
+            let range = section_id.part_id_range::<Self>();
+            let last_part = (range.start.as_usize()..range.end.as_usize())
+                .rev()
+                .find(|&i| {
+                    let part_id = PartId::from_usize(i);
+                    current_sizes.get(part_id) + extra_sizes.get(part_id) != 0
+                })
+                .map(PartId::from_usize);
+            if let Some(part) = last_part {
+                extra_sizes.increment(part, 20);
+                state.idata2_part_id = Some(part);
+            }
+        }
         Ok(())
     }
 
@@ -864,9 +909,14 @@ impl Platform for Coff {
         builder.add_sections(&custom.data);
         builder.add_section(output_section_id::BSS);
         builder.add_sections(&custom.bss);
-        builder.add_sections(&custom.nonalloc);
+
+        builder.add_section(output_section_id::IDATA);
+
+        builder.add_section(output_section_id::TLS);
         builder.add_sections(&custom.tbss);
         builder.add_sections(&custom.tdata);
+
+        builder.add_sections(&custom.nonalloc);
 
         builder.add_section(output_section_id::SYMTAB);
         builder.add_section(output_section_id::STRTAB);
@@ -1574,6 +1624,11 @@ impl platform::NonAddressableIndexes for NonAddressableIndexes {
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct EpilogueLayoutExt {
+    idata2_part_id: Option<PartId>,
+}
+
 #[derive(Debug, Copy, Clone, Default)]
 pub(crate) struct ProgramSegmentDef {}
 
@@ -1669,6 +1724,16 @@ impl Coff {
                 .with(object::pe::IMAGE_SCN_MEM_WRITE),
             ..Self::DEFAULT_DEFS
         };
+        defs[output_section_id::IDATA.as_usize()] = BuiltInSectionDetails {
+            kind: Self::primary_section(".idata".as_bytes()),
+            section_flags: object::pe::IMAGE_SCN_MEM_READ
+                .with(object::pe::IMAGE_SCN_CNT_INITIALIZED_DATA),
+            ..Self::DEFAULT_DEFS
+        };
+        defs[output_section_id::TLS.as_usize()] = BuiltInSectionDetails {
+            kind: Self::primary_section(".tls".as_bytes()),
+            ..Self::DEFAULT_DEFS
+        };
 
         defs
     };
@@ -1693,6 +1758,8 @@ const DEFAULT_SECTION_PLACEMENT_RULES: &[SectionRule<'static>] = &[
     // Unlike BFD, LLD merges them into RDATA for tighter packing (by avoiding .CRT section), we
     // follow that.
     SectionRule::prefix_section(".CRT$".as_bytes(), output_section_id::RDATA),
+    SectionRule::prefix_section(".idata$".as_bytes(), output_section_id::IDATA),
+    SectionRule::prefix_section(".tls$".as_bytes(), output_section_id::TLS),
 ];
 
 const LINKER_MANAGED_SECTION_RULES: &[SectionRule<'static>] =
