@@ -33,26 +33,63 @@ pub(crate) struct Pattern {
 struct PatternInner {
     #[cfg(test)]
     source: Vec<u8>,
+    kind: PatternKind,
+}
+
+/// How a compiled glob matches a name. Shapes built from a single literal plus
+/// optional `*` wildcards are matched by direct byte comparisons; anything else
+/// uses a regex.
+#[derive(Debug)]
+enum PatternKind {
+    /// `*`
+    Any,
+    /// `literal`
+    Exact(Vec<u8>),
+    /// `literal*`
+    Prefix(Vec<u8>),
+    /// `*literal`
+    Suffix(Vec<u8>),
+    /// `*literal*`
+    Contains(Vec<u8>),
+    /// Any other shape.
+    Regex(Box<RegexPattern>),
+}
+
+#[derive(Debug)]
+struct RegexPattern {
     regex: Regex,
+    // One cache per pattern per thread: a cache created from an empty regex
+    // cannot reliably be reused across patterns (https://github.com/rust-lang/regex/issues/1155).
     cache: ThreadLocal<RefCell<Cache>>,
 }
 
 impl Pattern {
+    #[inline]
     pub(crate) fn matches(&self, name: &[u8]) -> bool {
-        // Keep one cache per pattern per thread: a cache created from an empty regex
-        // cannot reliably be reused across patterns (https://github.com/rust-lang/regex/issues/1155).
-        let cache = self
-            .inner
-            .cache
-            .get_or(|| RefCell::new(self.inner.regex.create_cache()));
-        self.inner
-            .regex
-            .is_match_with(&mut cache.borrow_mut(), &Input::new(name))
+        match &self.inner.kind {
+            PatternKind::Any => true,
+            PatternKind::Exact(literal) => name == literal.as_slice(),
+            PatternKind::Prefix(prefix) => name.starts_with(prefix),
+            PatternKind::Suffix(suffix) => name.ends_with(suffix),
+            PatternKind::Contains(needle) => memchr::memmem::find(name, needle).is_some(),
+            PatternKind::Regex(regex) => regex.matches(name),
+        }
     }
 
     #[cfg(test)]
     pub(crate) fn source(&self) -> &[u8] {
         &self.inner.source
+    }
+}
+
+impl RegexPattern {
+    #[inline]
+    fn matches(&self, name: &[u8]) -> bool {
+        let cache = self
+            .cache
+            .get_or(|| RefCell::new(self.regex.create_cache()));
+        self.regex
+            .is_match_with(&mut cache.borrow_mut(), &Input::new(name))
     }
 }
 
@@ -218,18 +255,68 @@ fn parse_brackets(
 
 pub(crate) fn compile_pattern(token: &[u8], syntax: GlobSyntax) -> Result<Pattern, &'static str> {
     let items = parse_glob(token, syntax)?;
-    let regex = Regex::builder()
-        .configure(Regex::config().utf8_empty(false))
-        .build_from_hir(&Hir::concat(items))
-        .map_err(|_| "Failed to compile glob pattern")?;
+    let kind = match specialize(&items) {
+        Some(kind) => kind,
+        None => PatternKind::Regex(Box::new(RegexPattern {
+            regex: Regex::builder()
+                .configure(Regex::config().utf8_empty(false))
+                .build_from_hir(&Hir::concat(items))
+                .map_err(|_| "Failed to compile glob pattern")?,
+            cache: ThreadLocal::new(),
+        })),
+    };
     Ok(Pattern {
         inner: Arc::new(PatternInner {
             #[cfg(test)]
             source: token.into(),
-            regex,
-            cache: ThreadLocal::new(),
+            kind,
         }),
     })
+}
+
+/// Recognises glob shapes that only need a literal comparison, so that the common cases
+/// avoid the regex engine and its per-thread cache: `*`, `lit`, `lit*`, `*lit` and `*lit*`.
+fn specialize(items: &[Hir]) -> Option<PatternKind> {
+    let [first, rest @ .., last] = items else {
+        return None;
+    };
+    if !matches!(first.kind(), HirKind::Look(Look::Start))
+        || !matches!(last.kind(), HirKind::Look(Look::End))
+    {
+        return None;
+    }
+    let literal = |item: &Hir| match item.kind() {
+        HirKind::Literal(literal) => Some(literal.0.to_vec()),
+        _ => None,
+    };
+    match rest {
+        [star] if is_any_byte_star(star) => Some(PatternKind::Any),
+        [lit] => literal(lit).map(PatternKind::Exact),
+        [lit, star] if is_any_byte_star(star) => literal(lit).map(PatternKind::Prefix),
+        [star, lit] if is_any_byte_star(star) => literal(lit).map(PatternKind::Suffix),
+        [star, lit, star2] if is_any_byte_star(star) && is_any_byte_star(star2) => {
+            literal(lit).map(PatternKind::Contains)
+        }
+        _ => None,
+    }
+}
+
+/// Whether `item` is the any-byte `*` repetition produced by `parse_glob`.
+fn is_any_byte_star(item: &Hir) -> bool {
+    match item.kind() {
+        HirKind::Repetition(repetition) => {
+            repetition.min == 0
+                && repetition.max.is_none()
+                && matches!(
+                    repetition.sub.kind(),
+                    HirKind::Class(Class::Bytes(class))
+                        if class.ranges().len() == 1
+                            && class.ranges()[0].start() == 0
+                            && class.ranges()[0].end() == u8::MAX
+                )
+        }
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -274,6 +361,69 @@ mod tests {
         assert!(pattern.matches(br"_prefix\suffix"));
         assert!(!pattern.matches(b"_prefixsuffix"));
         assert!(!pattern.matches(b"_prefix*"));
+    }
+
+    #[test]
+    fn specialized_prefix() {
+        let pattern = compile_pattern(b"v8dbg_*", GlobSyntax::Gnu).unwrap();
+        assert!(pattern.matches(b"v8dbg_init"));
+        assert!(pattern.matches(b"v8dbg_"));
+        assert!(!pattern.matches(b"v8dbg"));
+        assert!(!pattern.matches(b"xv8dbg_init"));
+    }
+
+    #[test]
+    fn specialized_suffix() {
+        let pattern = compile_pattern(b"*_wrapper", GlobSyntax::Gnu).unwrap();
+        assert!(pattern.matches(b"main_wrapper"));
+        assert!(pattern.matches(b"_wrapper"));
+        assert!(!pattern.matches(b"_wrapperx"));
+        assert!(!pattern.matches(b"mainwrapper"));
+    }
+
+    #[test]
+    fn specialized_contains() {
+        let pattern = compile_pattern(b"*_fn_*", GlobSyntax::Gnu).unwrap();
+        assert!(pattern.matches(b"best_test_fn_tail"));
+        assert!(pattern.matches(b"_fn_"));
+        assert!(!pattern.matches(b"best_test_fn"));
+        assert!(!pattern.matches(b"best_fn"));
+    }
+
+    #[test]
+    fn specialized_any() {
+        for token in [&b"*"[..], b"**", b"***"] {
+            let pattern = compile_pattern(token, GlobSyntax::Gnu).unwrap();
+            assert!(pattern.matches(b"anything"));
+            assert!(pattern.matches(b""));
+        }
+    }
+
+    #[test]
+    fn specialized_escaped_literal_prefix() {
+        // In GNU syntax `\*` is a literal star, so this is the prefix `foo*bar`.
+        let pattern = compile_pattern(b"foo\\*bar*", GlobSyntax::Gnu).unwrap();
+        assert!(pattern.matches(b"foo*barbaz"));
+        assert!(pattern.matches(b"foo*bar"));
+        assert!(!pattern.matches(b"fooxbarbaz"));
+    }
+
+    #[test]
+    fn non_specialized_shapes_stay_on_regex() {
+        let pattern = compile_pattern(b"foo*bar*baz", GlobSyntax::Gnu).unwrap();
+        assert!(pattern.matches(b"foobarbaz"));
+        assert!(pattern.matches(b"fooxbarbaz"));
+        assert!(pattern.matches(b"foobarx_baz"));
+        assert!(!pattern.matches(b"foobaz"));
+
+        let pattern = compile_pattern(b"foo?bar", GlobSyntax::Gnu).unwrap();
+        assert!(pattern.matches(b"fooxbar"));
+        assert!(!pattern.matches(b"foobar"));
+        assert!(!pattern.matches(b"fooxxbar"));
+
+        let pattern = compile_pattern(b"foo[a-z]bar", GlobSyntax::Gnu).unwrap();
+        assert!(pattern.matches(b"foozbar"));
+        assert!(!pattern.matches(b"fooAbar"));
     }
 
     #[test]
